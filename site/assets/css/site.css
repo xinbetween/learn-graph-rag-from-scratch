@@ -168,6 +168,28 @@ kbd { background: var(--bg-sunk); border: 1px solid var(--border-strong); border
 @media (max-width: 900px) { .topnav > a.hide-sm { display: none; } }
 @media (max-width: 560px) { .topnav > a:not(.iconbtn) { display: none; } }
 
+/* language switch: an 11px mono pill pair inside a hairline group, as on the sister courses. The active
+   language carries colour rather than weight. The `.topnav` prefix is needed because `.topnav > a` sets a
+   larger link size. */
+.langsw { display: inline-flex; align-items: center; gap: 1px; padding: 2px; flex: none; border: 1px solid var(--border); background: var(--panel); border-radius: 6px; }
+.topnav .langsw > a, .topnav .langsw > span {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 400; line-height: 1; letter-spacing: 0; padding: 4px 6px; border-radius: 4px;
+  min-width: 25px; text-align: center; color: var(--fg-faint); text-decoration: none; transition: color .12s ease, background-color .12s ease;
+}
+.topnav .langsw > a:hover { color: var(--fg); text-decoration: none; }
+.topnav .langsw > .on { background: var(--accent-soft); color: var(--accent); }
+@media (max-width: 400px) { .langsw { display: none; } }
+
+/* Chinese reads better with a little more air and a font stack that has the glyphs. English passages on a
+   Chinese page (untranslated bodies, code) keep the Latin stack through their own lang attribute. */
+html[lang^="zh"] { --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif; }
+html[lang^="zh"] body { line-height: 1.8; letter-spacing: .01em; }
+html[lang^="zh"] h1, html[lang^="zh"] h2, html[lang^="zh"] h3, html[lang^="zh"] h4 { letter-spacing: 0; }
+html[lang^="zh"] .eyebrow, html[lang^="zh"] .mono-label, html[lang^="zh"] .chap-part, html[lang^="zh"] .nav-part h5,
+html[lang^="zh"] .toc h2, html[lang^="zh"] .objectives h2, html[lang^="zh"] .keypoints h2, html[lang^="zh"] .callout-title { letter-spacing: .04em; }
+[lang="en"] { letter-spacing: normal; }
+.chapter > .lang-fallback { margin: 2rem 0 -1rem; }
+
 /* --------------------------------------------------------------- search dialog */
 .search-dlg { position: fixed; inset: 0; z-index: 300; }
 .search-backdrop { position: absolute; inset: 0; background: color-mix(in srgb, var(--bg-sunk) 70%, transparent); backdrop-filter: blur(3px); }

@@ -1,0 +1,1016 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capstone 3: temporal memory for an agent | Graph RAG from Scratch</title>
+<meta name="description" content="Build a chat agent whose memory is a bi-temporal knowledge graph: episodes become dated facts, contradictions invalidate old facts without deleting them, and retrieval combines semantic, keyword and graph-distance signals with as-of queries.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c3-temporal-memory.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="c3-temporal-memory" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Capstone 3: temporal memory for an agent</h1>
+  <p class="lede">An assistant that remembers “Jonas Vehl is our CTO” and never learns that he stepped down will confidently give stale answers for as long as it runs. In this capstone you build a chat agent whose memory is a bi-temporal knowledge graph: it records when each fact was true and when it learned it, retires facts that new ones contradict, and can answer both “who is the CTO?” and “what did I tell you in January?”.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Turn conversation turns into episodes and dated facts with an extraction prompt that resolves pronouns and relative dates</li>
+      <li>Store facts as bi-temporal edges on top of <code>minigraphrag.temporal</code> and invalidate contradicted facts without deleting history</li>
+      <li>Detect contradictions with schema rules for single-valued relations and an LLM check for everything else</li>
+      <li>Retrieve memory by fusing semantic, keyword and graph-distance rankings, restricted to the time window and knowledge state a question implies</li>
+      <li>Evaluate memory with a scripted multi-session conversation in which facts change, and compare your design with Graphiti</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Overview and architecture</h2>
+<p><a href="27-incremental-temporal.html">Chapter 27</a> introduced bi-temporal edges and <a href="30-agentic-graphrag.html">Chapter 30</a> showed how Zep and Graphiti use them for agent memory. This capstone builds that memory yourself, small enough to read in one sitting, and tests it against the one change every Kestrel chapter has used: in March 2026 Priya Nair became CTO and Jonas Vehl became Chief Scientist.</p>
+<p>The memory has three kinds of objects. An <strong>episode</strong> is one raw input, such as a chat message, with the time it was received. <strong>Entities</strong> are people, organizations, projects and job titles. <strong>Facts</strong> are directed edges between entities, each carrying four timestamps. The names below follow <code>minigraphrag.temporal</code>; Graphiti names the same four <code>valid_at</code>, <code>invalid_at</code>, <code>created_at</code> and <code>expired_at</code>.</p>
+<table>
+  <thead><tr><th>minigraphrag field</th><th>Graphiti field</th><th>Timeline</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>valid_from</code></td><td><code>valid_at</code></td><td>Valid time</td><td>When the fact became true in the world</td></tr>
+    <tr><td><code>valid_to</code></td><td><code>invalid_at</code></td><td>Valid time</td><td>When it stopped being true (None while still true)</td></tr>
+    <tr><td><code>recorded_at</code></td><td><code>created_at</code></td><td>Record time</td><td>When the memory learned the fact</td></tr>
+    <tr><td><code>invalidated_at</code></td><td><code>expired_at</code></td><td>Record time</td><td>When the memory learned the fact had ended</td></tr>
+  </tbody>
+</table>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 330" role="img" aria-labelledby="c3-arch-title">
+      <title id="c3-arch-title">Memory write path: message becomes an episode, facts are extracted, entities resolved, contradictions checked, then edges added or invalidated. Read path: question gives a time scope, hybrid retrieval fuses three rankings, answer cites episodes.</title>
+      <defs><marker id="c3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <text class="d-text bold" x="10" y="20">Write path: remember(text, when)</text>
+      <rect class="d-box edge" x="10" y="32" width="112" height="58" rx="6"/>
+      <text class="d-text bold" x="22" y="56">Episode</text>
+      <text class="d-text small" x="22" y="74">text + time</text>
+      <line class="d-line" x1="122" y1="61" x2="142" y2="61" marker-end="url(#c3a)"/>
+      <rect class="d-box node" x="144" y="32" width="120" height="58" rx="6"/>
+      <text class="d-text bold" x="156" y="56">extract.py</text>
+      <text class="d-text small" x="156" y="74">dated facts (JSON)</text>
+      <line class="d-line" x1="264" y1="61" x2="284" y2="61" marker-end="url(#c3a)"/>
+      <rect class="d-box node" x="286" y="32" width="120" height="58" rx="6"/>
+      <text class="d-text bold" x="298" y="56">entity()</text>
+      <text class="d-text small" x="298" y="74">resolve names</text>
+      <line class="d-line" x1="406" y1="61" x2="426" y2="61" marker-end="url(#c3a)"/>
+      <rect class="d-box comm" x="428" y="32" width="120" height="58" rx="6"/>
+      <text class="d-text bold" x="440" y="56">contradict?</text>
+      <text class="d-text small" x="440" y="74">rules, then LLM</text>
+      <line class="d-line" x1="548" y1="61" x2="568" y2="61" marker-end="url(#c3a)"/>
+      <rect class="d-box good" x="570" y="32" width="100" height="58" rx="6"/>
+      <text class="d-text bold" x="582" y="56">add()</text>
+      <text class="d-text small" x="582" y="74">close old edges</text>
+
+      <rect class="d-box" x="190" y="112" width="300" height="82" rx="8"/>
+      <text class="d-text bold" x="204" y="134">Bi-temporal memory graph</text>
+      <text class="d-text small mono" x="204" y="154">JONAS VEHL -CTO_OF-&gt; KESTREL LABS</text>
+      <text class="d-text small" x="204" y="170">valid 2021-01 to 2026-03, learned 2025-05-20,</text>
+      <text class="d-text small" x="204" y="185">invalidated 2026-03-27 by ep-4</text>
+      <line class="d-line dash" x1="620" y1="90" x2="490" y2="140" marker-end="url(#c3a)"/>
+
+      <text class="d-text bold" x="10" y="226">Read path: ask(question, today)</text>
+      <rect class="d-box edge" x="10" y="238" width="112" height="70" rx="6"/>
+      <text class="d-text bold" x="22" y="262">Question</text>
+      <text class="d-text small" x="22" y="280">"my title in</text>
+      <text class="d-text small" x="22" y="295">January?"</text>
+      <line class="d-line" x1="122" y1="273" x2="142" y2="273" marker-end="url(#c3a)"/>
+      <rect class="d-box node" x="144" y="238" width="130" height="70" rx="6"/>
+      <text class="d-text bold" x="156" y="262">time_scope</text>
+      <text class="d-text small" x="156" y="280">valid window and</text>
+      <text class="d-text small" x="156" y="295">known-at date</text>
+      <line class="d-line" x1="274" y1="273" x2="294" y2="273" marker-end="url(#c3a)"/>
+      <rect class="d-box comm" x="296" y="238" width="190" height="70" rx="6"/>
+      <text class="d-text bold" x="308" y="262">search_memory</text>
+      <text class="d-text small" x="308" y="280">semantic + BM25 + hops</text>
+      <text class="d-text small" x="308" y="295">from user, fused by RRF</text>
+      <line class="d-line dash" x1="340" y1="194" x2="370" y2="236" marker-end="url(#c3a)"/>
+      <line class="d-line" x1="486" y1="273" x2="506" y2="273" marker-end="url(#c3a)"/>
+      <rect class="d-box good" x="508" y="238" width="162" height="70" rx="6"/>
+      <text class="d-text bold" x="520" y="262">Answer</text>
+      <text class="d-text small" x="520" y="280">facts with validity</text>
+      <text class="d-text small" x="520" y="295">periods, cites [ep-1]</text>
+    </svg>
+  </div>
+  <figcaption>Writes never delete: a contradiction closes the old edge's validity interval and stamps when the memory learned it. Reads first decide which slice of both timelines the question is about, then rank only the facts in that slice.</figcaption>
+</figure>
+
+<h3>The scripted conversation</h3>
+<p>Evaluation uses a fixed script with Priya Nair as the user, across three sessions whose facts all come from the running example. Step through it below. The bars show each fact's valid time; the step controls when the memory learned things. Drag the “ask about” slider to pick the valid time a question is about and watch which facts the memory would use.</p>
+
+<div class="viz" data-viz="c3-memory">
+<script type="application/json">
+{
+  "title": "The memory graph across three sessions",
+  "subtitle": "Rows are facts; bars are valid time; steps are record time",
+  "start": "2021-01", "end": "2026-12",
+  "sessions": [
+    {"date": "2025-05-20", "label": "Session 1 (20 May 2025)", "said": "I'm Priya Nair, lead engineer on Project Sentinel at Kestrel Labs. Jonas Vehl is our CTO. Deepcast has supplied our sonar since 2022, but after Marlow Dynamics bought them they told us supply ends at the end of June."},
+    {"date": "2025-07-02", "label": "Session 2 (2 July 2025)", "said": "We kicked off Project Tern this week to build our own sonar. Jonas and I co-lead it."},
+    {"date": "2026-03-27", "label": "Session 3 (27 March 2026)", "said": "Big change this month: I'm now the CTO of Kestrel Labs, and Jonas became Chief Scientist."}
+  ],
+  "facts": [
+    {"label": "Priya Nair HAS_TITLE Lead engineer", "from": "2023-01", "to": "2026-03", "rec": "2025-05-20", "inval": "2026-03-27", "group": 1},
+    {"label": "Priya Nair LEADS Project Sentinel", "from": "2023-01", "to": null, "rec": "2025-05-20", "inval": null, "group": 1},
+    {"label": "Jonas Vehl CTO_OF Kestrel Labs", "from": "2021-01", "to": "2026-03", "rec": "2025-05-20", "inval": "2026-03-27", "group": 3},
+    {"label": "Jonas Vehl HAS_TITLE CTO", "from": "2021-01", "to": "2026-03", "rec": "2025-05-20", "inval": "2026-03-27", "group": 3},
+    {"label": "Deepcast SUPPLIED Kestrel Labs", "from": "2022-01", "to": "2025-06-30", "rec": "2025-05-20", "inval": null, "group": 2},
+    {"label": "Marlow Dynamics ACQUIRED Deepcast", "from": "2025-04", "to": null, "rec": "2025-05-20", "inval": null, "group": 2},
+    {"label": "Priya Nair CO_LEADS Project Tern", "from": "2025-06-30", "to": null, "rec": "2025-07-02", "inval": null, "group": 1},
+    {"label": "Jonas Vehl CO_LEADS Project Tern", "from": "2025-06-30", "to": null, "rec": "2025-07-02", "inval": null, "group": 3},
+    {"label": "Priya Nair CTO_OF Kestrel Labs", "from": "2026-03", "to": null, "rec": "2026-03-27", "inval": null, "group": 1},
+    {"label": "Priya Nair HAS_TITLE CTO", "from": "2026-03", "to": null, "rec": "2026-03-27", "inval": null, "group": 1},
+    {"label": "Jonas Vehl HAS_TITLE Chief Scientist", "from": "2026-03", "to": null, "rec": "2026-03-27", "inval": null, "group": 3}
+  ],
+  "probe": "2026-01"
+}
+</script>
+</div>
+
+<h2>Requirements</h2>
+<h3>Functional</h3>
+<ul>
+  <li><code>remember(text, when, session)</code> stores an episode, extracts facts with valid times, resolves entity names, detects contradictions and adds or invalidates edges. Nothing is ever deleted.</li>
+  <li>Single-valued relations are declared in a schema: a person has one <code>HAS_TITLE</code> at a time (source side), a company has one <code>CTO_OF</code> holder at a time (target side). Other contradictions are found by an LLM check over facts that share an endpoint.</li>
+  <li><code>ask(question, today)</code> derives a valid-time window and, for “what did I tell you” questions, a known-at date; retrieves facts valid in that window with hybrid ranking; and answers with validity periods in the prompt and episode citations.</li>
+  <li>A chat loop in which every statement is remembered and every question is answered.</li>
+</ul>
+<h3>Evidence</h3>
+<ul>
+  <li>A scripted multi-session evaluation with probes for current facts, past facts, record-time (“what did you believe”) facts and facts that are no longer true, run with an oracle extractor and with a real LLM.</li>
+  <li>A comparison with Graphiti on the same script: which probes each system answers, and why.</li>
+</ul>
+<h3>Constraints</h3>
+<ul>
+  <li>Build on <code>minigraphrag.temporal</code> (<code>add_fact</code>, <code>is_valid</code>, <code>parse_date</code>, <code>EXCLUSIVE_RELATIONS</code>), <code>minigraphrag.search.bm25.BM25</code> and <code>reciprocal_rank_fusion</code>.</li>
+  <li>Dates, not datetimes, are enough for the script; say what changes if you need ordering within a day.</li>
+  <li>Retrieval must never return a fact outside the question's time scope, whatever its similarity.</li>
+</ul>
+
+<h2>Milestones</h2>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C3.1 <span class="level">The bi-temporal store</span></h4>
+  <p>Start with the data structure, tested without any model.</p>
+  <ol>
+    <li>Create a <code>MemoryGraph</code> holding a <code>new_temporal_graph()</code>, a dict of episodes and an alias table. The user is an entity too.</li>
+    <li>Implement <code>entity(name)</code>: normalize with <code>normalize_name</code>; if no exact match, attach a short name to the one known name that contains it (“Jonas” to “Jonas Vehl”).</li>
+    <li>Implement <code>add(source, relation, target, fact, valid_from, valid_to, episode, contradicts)</code>. If an identical open fact exists, attach the episode as extra evidence and stop. For source-exclusive relations, close conflicting open edges. Close the edges listed in <code>contradicts</code>. Then call <code>add_fact</code>, which handles target-exclusive relations such as <code>CTO_OF</code>.</li>
+    <li>Closing an edge sets <code>prior_valid_to</code>, <code>valid_to</code> and <code>invalidated_at</code>, the three fields <code>is_valid</code> reads for record-time queries, plus <code>invalidated_by</code> so an answer can cite the episode that ended the fact.</li>
+  </ol>
+  <pre data-file="memory/graph.py (starter)"><code class="language-python">from minigraphrag.temporal import add_fact, is_valid, new_temporal_graph, parse_date
+
+SOURCE_EXCLUSIVE = {"HAS_TITLE", "REPORTS_TO", "LIVES_IN"}
+
+
+class MemoryGraph:
+    def __init__(self, user: str):
+        self.G = new_temporal_graph()
+        self.episodes, self.aliases = {}, {}
+        self.user = self.entity(user, "PERSON")
+
+    def invalidate(self, u, v, key, ended, learned, episode_id):
+        ...  # TODO: close the interval, keep the prior value
+
+    def add(self, source, relation, target, fact, valid_from, valid_to, episode, contradicts=()):
+        ...  # TODO: dedupe, source-side exclusivity, LLM contradictions, add_fact</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>After adding “Jonas Vehl HAS_TITLE CTO” (valid 2021) and later “Jonas Vehl HAS_TITLE Chief Scientist” (valid 2026-03, learned 2026-03-27), the first edge has <code>valid_to</code> 2026-03-01 and <code>invalidated_at</code> 2026-03-27, and both edges still exist.</li>
+    <li><code>is_valid(old_edge, date(2026, 2, 1), known_at=date(2026, 2, 1))</code> is True, and <code>is_valid(old_edge, date(2026, 4, 1))</code> is False.</li>
+    <li>Telling the memory the same fact twice produces one edge with two episodes.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="memory/graph.py"><code class="language-python">"""A bi-temporal memory graph for one user, built on minigraphrag.temporal.
+
+Field names follow minigraphrag.temporal. Graphiti calls the same four timestamps
+valid_at (valid_from), invalid_at (valid_to), created_at (recorded_at), expired_at (invalidated_at).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date
+
+import networkx as nx
+
+from minigraphrag.resolution import normalize_name
+from minigraphrag.temporal import EXCLUSIVE_RELATIONS, add_fact, is_valid, new_temporal_graph, parse_date
+
+# One target per source at a time: a person has one job title, one manager.
+SOURCE_EXCLUSIVE = {"HAS_TITLE", "REPORTS_TO", "LIVES_IN"}
+# One source per target at a time: a company has one CTO (minigraphrag's EXCLUSIVE_RELATIONS).
+TARGET_EXCLUSIVE = set(EXCLUSIVE_RELATIONS)
+
+
+@dataclass
+class Episode:
+    id: str
+    session: str
+    speaker: str
+    text: str
+    reference_time: date
+    fact_keys: list = field(default_factory=list)
+
+
+class MemoryGraph:
+    def __init__(self, user: str):
+        self.G: nx.MultiDiGraph = new_temporal_graph()
+        self.episodes: dict[str, Episode] = {}
+        self.aliases: dict[str, str] = {}          # normalized surface form -&gt; canonical node
+        self.user = self.entity(user, "PERSON")
+
+    # ---------------------------------------------------------------- entities
+    def entity(self, name: str, etype: str = "") -&gt; str:
+        """Resolve a surface form: same normalized name, or the one known name that contains it ("Jonas")."""
+        key = normalize_name(name)
+        if key in self.aliases:
+            node = self.aliases[key]
+        else:
+            short = [n for k, n in self.aliases.items() if set(key.split()) &lt; set(k.split())]
+            node = short[0] if len(short) == 1 else name
+            self.aliases[key] = node
+        if node not in self.G:
+            self.G.add_node(node, type=etype, names=[name])
+        elif name not in self.G.nodes[node]["names"]:
+            self.G.nodes[node]["names"].append(name)
+        return node
+
+    # ---------------------------------------------------------------- facts
+    def valid_facts(self, at: date, known_at: date | None = None):
+        for u, v, k, d in self.G.edges(keys=True, data=True):
+            if is_valid(d, at, known_at):
+                yield u, v, k, d
+
+    def invalidate(self, u: str, v: str, key: int, ended: date, learned: date, episode_id: str) -&gt; None:
+        """Close an edge's validity at `ended`; keep the old value so record-time queries still work."""
+        d = self.G.edges[u, v, key]
+        d["prior_valid_to"], d["valid_to"], d["invalidated_at"] = d["valid_to"], ended, learned
+        d["invalidated_by"] = episode_id
+
+    def add(self, source: str, relation: str, target: str, fact: str, valid_from, valid_to,
+            episode: Episode, contradicts: list[tuple] = ()) -&gt; tuple:
+        vf = parse_date(valid_from) or episode.reference_time
+        rec = episode.reference_time
+        # Duplicate of a fact we already hold? Just attach the episode as extra evidence.
+        for u, v, k, d in self.G.edges(keys=True, data=True):
+            if (u, v, d["relation"]) == (source, target, relation) and d["invalidated_at"] is None:
+                d["episodes"].append(episode.id)
+                return (u, v, k)
+        # Rule-based contradictions for single-valued relations on the source side.
+        if relation in SOURCE_EXCLUSIVE:
+            for _, v, k, d in list(self.G.out_edges(source, keys=True, data=True)):
+                if d["relation"] == relation and v != target and d["invalidated_at"] is None \
+                        and (d["valid_to"] is None or d["valid_to"] &gt; vf):
+                    self.invalidate(source, v, k, vf, rec, episode.id)
+        # LLM-detected contradictions (see contradictions.py).
+        for u, v, k in contradicts:
+            if self.G.edges[u, v, k]["invalidated_at"] is None:
+                self.invalidate(u, v, k, vf, rec, episode.id)
+        # add_fact handles target-side exclusivity (CTO_OF) and stamps recorded_at.
+        key = add_fact(self.G, source, relation, target, vf, valid_to, recorded_at=rec, description=fact,
+                       exclusive=relation in TARGET_EXCLUSIVE)
+        self.G.edges[source, target, key].update(episodes=[episode.id], fact=fact)
+        episode.fact_keys.append((source, target, key))
+        return (source, target, key)</code></pre>
+    <p>Why two kinds of exclusivity: <code>add_fact</code> in minigraphrag only knows target-side exclusivity (one CTO per company), which it checks on incoming edges of the target. A job title is exclusive on the <em>source</em> side (one title per person), which needs outgoing edges of the source. Getting this wrong in either direction is a classic bug: treating <code>CO_LEADS</code> as exclusive would make Jonas stop co-leading Tern the moment Priya is recorded as co-lead.</p>
+    <p>Why the guard <code>d["valid_to"] is None or d["valid_to"] &gt; vf</code>: if an old fact already ended before the new one began (Priya's lead-engineer title ended in March 2026 and a hypothetical later title begins in 2027), there is nothing to contradict.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C3.2 <span class="level">Extracting dated facts from conversation</span></h4>
+  <p>Conversation text is harder than news articles: “I”, “our CTO”, “this month” and “the end of June” all need resolving against who is speaking and when.</p>
+  <ol>
+    <li>Write an extraction prompt that gives the speaker's name and the message date, lists preferred relation names, and asks for JSON facts with <code>valid_from</code> and <code>valid_to</code>.</li>
+    <li>Include the last few turns as context, so “Jonas and I co-lead it” can resolve “it” to Project Tern.</li>
+    <li>Parse with <code>parse_json_response</code>, drop facts missing a source, relation or target, and normalize relation names to UPPER_SNAKE_CASE.</li>
+    <li>Test with a stub model before using a real one.</li>
+  </ol>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>On “Deepcast has supplied our sonar since 2022, but ... supply ends at the end of June” sent on 2025-05-20, a capable model should return SUPPLIED with <code>valid_from</code> 2022 and <code>valid_to</code> 2025-06-30.</li>
+    <li>On “I'm now the CTO of Kestrel Labs” sent on 2026-03-27 by Priya Nair, the source is “Priya Nair”, never “I”.</li>
+    <li>A malformed record in the model's JSON is skipped without losing the others.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="memory/extract.py"><code class="language-python">"""Turn one conversation turn (an episode) into entities and dated facts."""
+from __future__ import annotations
+
+from minigraphrag.llm import parse_json_response
+
+EXTRACT_PROMPT = """You maintain a memory of facts a user tells an assistant.
+Speaker: {speaker}. The message was sent on {reference_time}.
+Extract facts stated in the message as JSON:
+{{"facts": [{{"source": "...", "relation": "UPPER_SNAKE_CASE", "target": "...", "fact": "one sentence",
+  "valid_from": "YYYY-MM or YYYY-MM-DD or null", "valid_to": "YYYY-MM or YYYY-MM-DD or null"}}]}}
+Rules:
+- Replace I/me/my with "{speaker}". Use full names for people and organizations.
+- Prefer these relations when they fit: HAS_TITLE (target is a job title), WORKS_AT, LEADS, CO_LEADS,
+  CTO_OF, CEO_OF, SUPPLIED, ACQUIRED, INVESTED_IN.
+- Resolve relative dates ("this month", "end of June") against the sent date. valid_from is when the
+  fact became true, not when it was said; null if unknown.
+- Only facts stated in the message. No opinions, no questions.
+Recent conversation for context:
+{history}
+Message:
+{text}"""
+
+
+def extract_facts(llm, speaker: str, text: str, reference_time, history: str = "") -&gt; list[dict]:
+    data = parse_json_response(llm.complete(
+        EXTRACT_PROMPT.format(speaker=speaker, reference_time=reference_time, history=history or "(none)", text=text),
+        json=True))
+    facts = []
+    for f in data.get("facts", []):
+        if all(isinstance(f.get(k), str) and f[k].strip() for k in ("source", "relation", "target")):
+            f["relation"] = f["relation"].strip().upper().replace(" ", "_")
+            facts.append(f)
+    return facts</code></pre>
+    <p><code>valid_from</code> is not the message date. “Jonas Vehl is our CTO”, said in May 2025, does not mean he became CTO in May 2025. A careful model returns null; a careless one fills in a year from world knowledge it has no business using. The script's oracle uses 2021 because the running example says so. When <code>valid_from</code> is null, <code>add()</code> falls back to the episode date, which under-states how long the fact has held. That is the safe direction for “who is the CTO now?” and the wrong direction for “who was CTO in 2024?”. Log how often valid times are defaulted.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C3.3 <span class="level">Contradictions beyond the schema</span></h4>
+  <p>Schema rules catch job titles and CTOs. They do not catch “These days I spend all my time on Tern” superseding “Most of my time goes to Sentinel”. That needs judgment.</p>
+  <ol>
+    <li>Collect candidate facts: currently valid facts that share an endpoint with the new fact. This keeps the prompt small and the check cheap.</li>
+    <li>Ask the model which candidates can no longer be true if the new fact is true, stressing that added detail or facts that can hold simultaneously are not contradictions.</li>
+    <li>Return edge keys for valid ids only, and pass them to <code>add()</code>.</li>
+  </ol>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>With a stub model that flags candidate 0, the Sentinel focus fact gets <code>valid_to</code> 2025-09-01 and <code>invalidated_by</code> ep-2 when the Tern fact arrives.</li>
+    <li>With a real model, “Jonas Vehl co-leads Project Tern” must not invalidate “Priya Nair co-leads Project Tern”; if it does, the prompt's “can hold at the same time” rule is not landing.</li>
+    <li>An out-of-range id in the model's reply is ignored.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="memory/contradictions.py"><code class="language-python">"""Ask an LLM which existing facts a new fact makes no longer true."""
+from __future__ import annotations
+
+from datetime import date
+
+from minigraphrag.llm import parse_json_response
+
+CONTRADICTION_PROMPT = """New fact (learned {today}): {new_fact}
+Existing facts that are currently believed true:
+{existing}
+Which existing facts can no longer be true if the new fact is true? A fact that adds detail
+or can hold at the same time is NOT a contradiction.
+Return JSON {{"contradicted": [ids]}}."""
+
+
+def candidate_facts(memory, source: str, target: str, today: date, limit: int = 10):
+    """Only facts that share an endpoint with the new fact can contradict it; this keeps the prompt small."""
+    out = []
+    for u, v, k, d in memory.valid_facts(today):
+        if {u, v} &amp; {source, target}:
+            out.append((u, v, k, d))
+    return out[:limit]
+
+
+def find_contradictions(llm, memory, source: str, target: str, fact: str, today: date) -&gt; list[tuple]:
+    cands = candidate_facts(memory, source, target, today)
+    if not cands:
+        return []
+    listing = "\n".join(f"[{i}] {d.get('fact') or d['description']} (since {d['valid_from']})"
+                        for i, (_, _, _, d) in enumerate(cands))
+    data = parse_json_response(llm.complete(
+        CONTRADICTION_PROMPT.format(new_fact=fact, existing=listing, today=today), json=True))
+    ids = [i for i in data.get("contradicted", []) if isinstance(i, int) and 0 &lt;= i &lt; len(cands)]
+    return [(cands[i][0], cands[i][1], cands[i][2]) for i in ids]</code></pre>
+    <pre data-file="tests/test_contradiction.py"><code class="language-python">from memory.agent import MemoryAgent
+class Stub:
+    """Extraction returns one fact per message; the contradiction check flags candidate 0."""
+    def __init__(self): self.n = 0
+    def complete(self, prompt, system=None, json=False):
+        if "You maintain a memory" in prompt:
+            msg = prompt.rsplit("Message:\n", 1)[-1]
+            target = "Project Sentinel" if "Sentinel" in msg else "Project Tern"
+            return '{"facts": [{"source": "Priya Nair", "relation": "FOCUSES_ON", "target": "%s", "fact": "Priya Nair spends her time on %s", "valid_from": null, "valid_to": null}]}' % (target, target)
+        if "can no longer be true" in prompt:
+            return '{"contradicted": [0]}' if "[0]" in prompt else '{"contradicted": []}'
+        return "OK"
+agent = MemoryAgent(Stub(), "Priya Nair")
+agent.remember("Most of my time goes to Sentinel.", "2025-05-20")
+agent.remember("These days I spend all my time on Tern.", "2025-09-01")
+for u, v, k, d in agent.memory.G.edges(keys=True, data=True):
+    print(v, d["valid_from"], d["valid_to"], d["invalidated_at"], d.get("invalidated_by"))</code></pre>
+    <pre><code class="language-bash">$ PYTHONPATH=. python tests/test_contradiction.py
+Project Sentinel 2025-05-20 2025-09-01 2025-09-01 ep-2
+Project Tern 2025-09-01 None None None</code></pre>
+    <p>Cost: one contradiction call per new fact that has candidates, which dominates write cost in a chatty conversation. Two cheap reductions: skip the call when every candidate's relation is in a known non-exclusive set (such as <code>CO_LEADS</code>), and batch all facts from one episode into a single call. Measure how many invalidations the LLM layer adds beyond the rules; if it is near zero on your traffic, the rules may be enough.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C3.4 <span class="level">Time-scoped hybrid retrieval</span></h4>
+  <p>Retrieval has two jobs, in this order: pick the right slice of time, then rank within it.</p>
+  <ol>
+    <li><code>time_scope(question, today)</code>: a month name (without a year, the most recent such month), a year, or nothing (today). If the question asks what the user <em>told</em> the assistant or what it <em>would have said</em>, also set <code>known_at</code> to the end of the window.</li>
+    <li>Filter edges with an interval-overlap version of <code>is_valid</code> that honors <code>known_at</code> by using <code>prior_valid_to</code> for invalidations the memory had not yet learned.</li>
+    <li>Rewrite first-person words to the user's name for the text channels.</li>
+    <li>Rank the surviving facts three ways: embedding similarity, BM25, and hops from the user node in the snapshot graph. Fuse with <code>reciprocal_rank_fusion</code>.</li>
+  </ol>
+  <pre data-file="memory/retrieve.py (starter)"><code class="language-python">from minigraphrag.search.bm25 import BM25
+from minigraphrag.search.hybrid import reciprocal_rank_fusion
+
+
+def valid_during(d, start, end, known_at):
+    ...  # TODO: overlap of [valid_from, valid_to) with [start, end], as believed at known_at
+
+
+def search_memory(memory, question, today, k=6):
+    ...  # TODO: scope, filter, three rankings, RRF</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>“Who was the CTO of Kestrel Labs in 2024?” asked in April 2026 returns Jonas Vehl's CTO_OF fact and not Priya's.</li>
+    <li>“Back in February, who would you have said was CTO?” returns Jonas: in February 2026 the memory had not yet learned about the change.</li>
+    <li>“Who supplies our sonar?” asked in April 2026 returns no SUPPLIED fact.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="memory/retrieve.py"><code class="language-python">"""Hybrid memory search: semantic + BM25 + graph distance from the user, restricted in time, fused with RRF."""
+from __future__ import annotations
+
+import calendar
+import re
+from datetime import date
+
+import networkx as nx
+
+from minigraphrag.embeddings import HashingEmbedder
+from minigraphrag.search.bm25 import BM25
+from minigraphrag.search.hybrid import reciprocal_rank_fusion
+from minigraphrag.temporal import parse_date
+
+MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
+RECALL_CUES = re.compile(r"\b(did i (tell|say)|had i|would you have|did you (know|think)|back then)\b", re.I)
+
+
+def time_scope(question: str, today: date) -&gt; tuple[date, date, date | None]:
+    """(start, end, known_at) implied by the question. Default: now, as currently known."""
+    q = question.lower()
+    year = re.search(r"\b(20\d\d)\b", q)
+    month = next((MONTHS[w] for w in re.findall(r"[a-z]+", q) if w in MONTHS), None)
+    if month:
+        y = int(year.group(1)) if year else (today.year if month &lt;= today.month else today.year - 1)
+        start, end = date(y, month, 1), date(y, month, calendar.monthrange(y, month)[1])
+    elif year:
+        start, end = date(int(year.group(1)), 1, 1), date(int(year.group(1)), 12, 31)
+    else:
+        return today, today, None
+    # "What did I tell you ... in January" asks about what memory held then, not only what was true then.
+    return start, end, (end if RECALL_CUES.search(question) else None)
+
+
+def valid_during(d: dict, start: date, end: date, known_at: date | None) -&gt; bool:
+    valid_to = d["valid_to"]
+    if known_at is not None:
+        if d["recorded_at"] &gt; known_at:
+            return False
+        if d["invalidated_at"] is not None and d["invalidated_at"] &gt; known_at:
+            valid_to = d["prior_valid_to"]
+    return d["valid_from"] &lt;= end and (valid_to is None or start &lt; valid_to)
+
+
+def search_memory(memory, question: str, today, k: int = 6, embedder=None) -&gt; tuple[list[dict], tuple]:
+    today = parse_date(today)
+    start, end, known_at = time_scope(question, today)
+    facts = [(u, v, key, d) for u, v, key, d in memory.G.edges(keys=True, data=True)
+             if valid_during(d, start, end, known_at)]
+    if not facts:
+        return [], (start, end, known_at)
+    # "my title" is about the user: name them so keyword and embedding channels can match.
+    query = re.sub(r"\b(I|me|my|mine|myself)\b", memory.user, question, flags=re.I)
+    texts = [d.get("fact") or f"{u} {d['relation']} {v}" for u, v, _, d in facts]
+    ids = [str(i) for i in range(len(facts))]
+
+    embedder = embedder or HashingEmbedder()
+    sims = embedder.embed(texts) @ embedder.embed([query])[0]
+    semantic = [ids[i] for i in sims.argsort()[::-1]]
+    keyword = [ids[i] for i, _ in BM25(texts).search(query, top_k=len(texts))]
+    # Graph distance: facts touching nodes close to the user rank higher ("my role", "our CTO").
+    snap = nx.Graph()
+    snap.add_nodes_from(memory.G.nodes())
+    snap.add_edges_from((u, v) for u, v, _, _ in facts)
+    hops = nx.single_source_shortest_path_length(snap, memory.user)
+    near = sorted(range(len(facts)), key=lambda i: min(hops.get(facts[i][0], 99), hops.get(facts[i][1], 99)))
+    graph = [ids[i] for i in near]
+
+    fused = reciprocal_rank_fusion([semantic, keyword, graph], k=60)
+    out = []
+    for fid, score in fused[:k]:
+        u, v, key, d = facts[int(fid)]
+        out.append({"fact": texts[int(fid)], "source": u, "relation": d["relation"], "target": v,
+                    "valid_from": str(d["valid_from"]), "valid_to": str(d["valid_to"]) if d["valid_to"] else None,
+                    "recorded_at": str(d["recorded_at"]), "episodes": d.get("episodes", []), "score": round(score, 4)})
+    return out, (start, end, known_at)</code></pre>
+    <p>The pronoun rewrite was added after a failing probe, and the failure is worth understanding. “What did I tell you my title was in January?” correctly scoped to January 2026 as known on 31 January, leaving two HAS_TITLE facts: Priya's lead-engineer title and Jonas's CTO title. Without the rewrite, “my title” matches both facts equally in BM25, and with the default <code>HashingEmbedder</code> Jonas's fact ranks first, so the agent answered “CTO”. Replacing “my” with “Priya Nair” lets both text channels prefer her fact, and the graph channel agrees because her own facts are zero hops from the user node.</p>
+    <p>Why hops from the user help: in personal memory, “our CTO”, “my team” and “my title” are about the user's neighborhood. Graphiti uses the same idea when you pass a center node to its search, reranking by graph distance.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C3.5 <span class="level">The agent and the chat loop</span></h4>
+  <ol>
+    <li><code>MemoryAgent.remember</code>: create the episode, extract with recent history, resolve entities, check contradictions, add facts.</li>
+    <li><code>MemoryAgent.ask</code>: scope and retrieve, then answer with a system prompt that states today's date, the time window, whether the question is about past knowledge, and every fact with its validity period and episode ids.</li>
+    <li>A terminal loop: statements are remembered, questions are answered, and a line prefixed <code>on YYYY-MM-DD:</code> replays a past conversation.</li>
+  </ol>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>Replaying the script through the chat loop with a real model, then asking “Who is the CTO?”, produces an answer that names Priya Nair, mentions the change from Jonas Vehl in March 2026, and cites the episode.</li>
+    <li>The system prompt for “What did I tell you my title was in January?” contains “as remembered on 2026-01-31”.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="memory/agent.py"><code class="language-python">"""The chat agent: remember every user turn, answer from memory with validity periods in the prompt."""
+from __future__ import annotations
+
+from datetime import date
+
+from minigraphrag.temporal import parse_date
+
+from .contradictions import find_contradictions
+from .extract import extract_facts
+from .graph import Episode, MemoryGraph
+from .retrieve import search_memory
+
+ANSWER_SYSTEM = """You are an assistant with long-term memory. Today is {today}.
+The question concerns the period {start} to {end}{known}.
+Memory facts (each with the period it was true; "until None" means still true):
+{facts}
+Answer from these facts only. When facts changed over time, say what was true when.
+Cite episodes like [ep-3]. If memory has nothing relevant, say you don't know."""
+
+
+class MemoryAgent:
+    def __init__(self, llm, user: str, contradiction_llm=None):
+        self.llm, self.memory = llm, MemoryGraph(user)
+        self.contradiction_llm = contradiction_llm or llm
+        self.history: list[str] = []
+
+    def remember(self, text: str, when, session: str = "s1") -&gt; Episode:
+        when = parse_date(when)
+        ep = Episode(f"ep-{len(self.memory.episodes) + 1}", session, self.memory.user, text, when)
+        self.memory.episodes[ep.id] = ep
+        for f in extract_facts(self.llm, self.memory.user, text, when, "\n".join(self.history[-6:])):
+            src, tgt = self.memory.entity(f["source"]), self.memory.entity(f["target"])
+            contradicted = find_contradictions(self.contradiction_llm, self.memory, src, tgt, f.get("fact", ""), when)
+            self.memory.add(src, f["relation"], tgt, f.get("fact", ""), f.get("valid_from"), f.get("valid_to"),
+                            ep, contradicted)
+        self.history.append(f"{self.memory.user}: {text}")
+        return ep
+
+    def ask(self, question: str, today) -&gt; dict:
+        today = parse_date(today)
+        hits, (start, end, known_at) = search_memory(self.memory, question, today)
+        facts = "\n".join(f"- {h['fact']} (true {h['valid_from']} until {h['valid_to']}; "
+                          f"learned {h['recorded_at']}) [{', '.join(h['episodes'])}]" for h in hits)
+        system = ANSWER_SYSTEM.format(today=today, start=start, end=end, facts=facts or "(none)",
+                                      known=f", as remembered on {known_at}" if known_at else "")
+        return {"answer": self.llm.complete(question, system=system), "facts": hits,
+                "scope": [str(start), str(end), str(known_at) if known_at else None]}</code></pre>
+    <pre data-file="memory/chat.py"><code class="language-python">"""A terminal chat loop: every user turn is remembered; questions are also answered from memory."""
+from __future__ import annotations
+
+import json
+import sys
+from datetime import date
+
+from minigraphrag.llm import get_llm
+
+from .agent import MemoryAgent
+
+
+def main(user: str, llm_name: str = "openai", session: str | None = None) -&gt; None:
+    agent = MemoryAgent(get_llm(llm_name, cache_dir=".cache/llm"), user)
+    session = session or date.today().isoformat()
+    print(f"Memory chat for {user}. Prefix a line with 'on YYYY-MM-DD:' to replay an old conversation.")
+    for line in sys.stdin:
+        text, when = line.strip(), date.today().isoformat()
+        if not text:
+            continue
+        if text.lower().startswith("on ") and ":" in text:
+            when, text = text[3:].split(":", 1)
+            when, text = when.strip(), text.strip()
+        if text.endswith("?"):
+            out = agent.ask(text, when)
+            print(out["answer"])
+            print("  facts used:", json.dumps([f"{h['fact']} [{h['valid_from']}..{h['valid_to']}]" for h in out["facts"]]))
+        else:
+            ep = agent.remember(text, when, session)
+            print(f"  remembered {len(ep.fact_keys)} fact(s) as {ep.id}")
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:])</code></pre>
+    <p>The validity periods in the answer prompt do real work. Without them the model sees “Jonas Vehl is the CTO of Kestrel Labs” and “Priya Nair is the CTO of Kestrel Labs” side by side and has to guess. The post-graph-rag paper (<a href="33-research-map.html">Chapter 33</a>) reports the same effect at scale: carrying each relation's validity period through to synthesis was the largest single contribution in its ablation, moving its temporal-reasoning score on LongMemEval from 0.496 to 0.881. You can test the effect on this script by deleting the periods from <code>ANSWER_SYSTEM</code> and re-running the probes with a real model.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C3.6 <span class="level">The scripted multi-session evaluation</span></h4>
+  <p>Memory bugs hide in time: a probe passes today and fails after the next session. Evaluate with a fixed script and probes that cover each way time can matter.</p>
+  <ol>
+    <li>Write the script as data: session, date, text, and the facts a careful extractor should produce.</li>
+    <li>Write probes: current fact, past fact by valid time, past knowledge by record time, a fact about another person, a fact that has ended, and a fact about the user.</li>
+    <li>Run with an <strong>oracle extractor</strong> that returns the scripted facts. This isolates memory logic: storage, invalidation and retrieval.</li>
+    <li>Run again with a real LLM extracting. The difference between the two runs is the extractor's error.</li>
+    <li>Score the top retrieved fact for the probe's relation, and separately judge the final answers.</li>
+  </ol>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>All probes pass with the oracle extractor.</li>
+    <li>With a real extractor, a table of which probes fail and whether extraction, contradiction detection or retrieval caused each failure.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="memory/script_eval.py"><code class="language-python">"""Scripted multi-session evaluation: facts change, and the memory must keep up."""
+from __future__ import annotations
+
+import json
+
+from minigraphrag.llm import MockLLM
+
+from .agent import MemoryAgent
+
+# Three sessions with Priya Nair. Each turn carries the facts a careful extractor should produce,
+# so the script can run with an oracle extractor (tests memory logic) or a real LLM (tests everything).
+SCRIPT = [
+    {"session": "s1", "when": "2025-05-20",
+     "text": "I'm Priya Nair, lead engineer on Project Sentinel at Kestrel Labs. Jonas Vehl is our CTO.",
+     "facts": [["Priya Nair", "HAS_TITLE", "Lead engineer", "Priya Nair is a lead engineer at Kestrel Labs", "2023", None],
+               ["Priya Nair", "LEADS", "Project Sentinel", "Priya Nair leads engineering on Project Sentinel", "2023", None],
+               ["Jonas Vehl", "CTO_OF", "Kestrel Labs", "Jonas Vehl is the CTO of Kestrel Labs", "2021", None],
+               ["Jonas Vehl", "HAS_TITLE", "CTO", "Jonas Vehl's title is CTO", "2021", None]]},
+    {"session": "s1", "when": "2025-05-20",
+     "text": "Deepcast has supplied our sonar since 2022, but after Marlow Dynamics bought them they told us supply ends at the end of June.",
+     "facts": [["Deepcast", "SUPPLIED", "Kestrel Labs", "Deepcast supplied sonar modules to Kestrel Labs", "2022", "2025-06-30"],
+               ["Marlow Dynamics", "ACQUIRED", "Deepcast", "Marlow Dynamics acquired Deepcast", "2025-04", None]]},
+    {"session": "s2", "when": "2025-07-02",
+     "text": "We kicked off Project Tern this week to build our own sonar. Jonas and I co-lead it.",
+     "facts": [["Priya Nair", "CO_LEADS", "Project Tern", "Priya Nair co-leads Project Tern", "2025-06-30", None],
+               ["Jonas Vehl", "CO_LEADS", "Project Tern", "Jonas Vehl co-leads Project Tern", "2025-06-30", None]]},
+    {"session": "s3", "when": "2026-03-27",
+     "text": "Big change this month: I'm now the CTO of Kestrel Labs, and Jonas became Chief Scientist.",
+     "facts": [["Priya Nair", "CTO_OF", "Kestrel Labs", "Priya Nair is the CTO of Kestrel Labs", "2026-03", None],
+               ["Priya Nair", "HAS_TITLE", "CTO", "Priya Nair's title is CTO", "2026-03", None],
+               ["Jonas Vehl", "HAS_TITLE", "Chief Scientist", "Jonas Vehl's title is Chief Scientist", "2026-03", None]]},
+]
+
+# (question, asked on, expected target or source that must be the top-ranked matching fact, relation)
+PROBES = [
+    ("Who is the CTO of Kestrel Labs?", "2026-04-01", "Priya Nair", "CTO_OF"),
+    ("What is my title?", "2026-04-01", "CTO", "HAS_TITLE"),
+    ("What did I tell you my title was in January?", "2026-04-01", "Lead engineer", "HAS_TITLE"),
+    ("Who was the CTO of Kestrel Labs in 2024?", "2026-04-01", "Jonas Vehl", "CTO_OF"),
+    ("What is Jonas Vehl's title?", "2026-04-01", "Chief Scientist", "HAS_TITLE"),
+    ("Who supplied our sonar in 2024?", "2026-04-01", "Deepcast", "SUPPLIED"),
+    ("Who supplies our sonar?", "2026-04-01", None, "SUPPLIED"),        # nothing valid now
+    ("Back in February, who would you have said was CTO of Kestrel Labs?", "2026-04-01", "Jonas Vehl", "CTO_OF"),
+]
+
+
+class OracleLLM(MockLLM):
+    """Returns the scripted facts for extraction prompts; defers everything else to MockLLM."""
+
+    def complete(self, prompt, system=None, json=False):
+        if "You maintain a memory of facts" in prompt:
+            message = prompt.rsplit("Message:\n", 1)[-1]
+            turn = next(t for t in SCRIPT if t["text"] == message.strip())
+            return json_dumps({"facts": [dict(zip(["source", "relation", "target", "fact", "valid_from", "valid_to"], f))
+                                         for f in turn["facts"]]})
+        if "can no longer be true" in prompt:
+            return '{"contradicted": []}'    # rules only; the LLM layer is tested separately
+        return super().complete(prompt, system=system, json=json)
+
+
+def json_dumps(obj):
+    return json.dumps(obj)
+
+
+def run(llm) -&gt; list[dict]:
+    agent = MemoryAgent(llm, "Priya Nair")
+    for turn in SCRIPT:
+        agent.remember(turn["text"], turn["when"], turn["session"])
+    results = []
+    for question, today, expected, relation in PROBES:
+        out = agent.ask(question, today)
+        matching = [h for h in out["facts"] if h["relation"] == relation]
+        got = None
+        if matching:
+            got = matching[0]["source"] if relation == "CTO_OF" else matching[0]["target"]
+            if relation == "SUPPLIED":
+                got = matching[0]["source"]
+        results.append({"question": question, "scope": out["scope"], "expected": expected, "got": got,
+                        "ok": got == expected})
+    return results, agent
+
+
+if __name__ == "__main__":
+    results, agent = run(OracleLLM())
+    for r in results:
+        print(("PASS " if r["ok"] else "FAIL ") + json.dumps(r))
+    print(f"{sum(r['ok'] for r in results)}/{len(results)} probes passed")</code></pre>
+    <pre><code class="language-bash">$ python -m memory.script_eval
+PASS {"question": "Who is the CTO of Kestrel Labs?", "scope": ["2026-04-01", "2026-04-01", null], "expected": "Priya Nair", "got": "Priya Nair", "ok": true}
+PASS {"question": "What is my title?", ... "got": "CTO", "ok": true}
+PASS {"question": "What did I tell you my title was in January?", "scope": ["2026-01-01", "2026-01-31", "2026-01-31"], "expected": "Lead engineer", "got": "Lead engineer", "ok": true}
+PASS {"question": "Who was the CTO of Kestrel Labs in 2024?", ... "got": "Jonas Vehl", "ok": true}
+PASS {"question": "What is Jonas Vehl's title?", ... "got": "Chief Scientist", "ok": true}
+PASS {"question": "Who supplied our sonar in 2024?", ... "got": "Deepcast", "ok": true}
+PASS {"question": "Who supplies our sonar?", ... "expected": null, "got": null, "ok": true}
+PASS {"question": "Back in February, who would you have said was CTO of Kestrel Labs?", "scope": ["2026-02-01", "2026-02-28", "2026-02-28"], "expected": "Jonas Vehl", "got": "Jonas Vehl", "ok": true}
+8/8 probes passed</code></pre>
+    <p>Failures to expect with a real extractor, and where to fix them:</p>
+    <table>
+      <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>“Who is the CTO?” returns both people</td><td>Relation extracted as <code>IS_CTO_OF</code> or <code>ROLE</code>, so exclusivity never fires</td><td>Map relation synonyms to the schema after parsing; add examples to the prompt</td></tr>
+        <tr><td>Jonas has two current titles</td><td>Title extracted as “Chief Scientist of Kestrel Labs” for one fact and “CTO” for the other, different relation names</td><td>Normalize titles as targets; keep the organization in a separate WORKS_AT fact</td></tr>
+        <tr><td>“In 2024” returns nothing about Deepcast</td><td><code>valid_from</code> defaulted to the message date 2025-05-20</td><td>Prompt for explicit start dates (“since 2022”); count defaulted dates</td></tr>
+        <tr><td>“Jonas” becomes a second node</td><td>The extractor returns the short form from “Jonas and I”, and either no full name is known yet or two known names contain it, so the containment rule in <code>entity()</code> declines to merge</td><td>Pass more history so the model writes the full name, or seed the memory with the user's known contacts; verify with a probe on Jonas's facts</td></tr>
+      </tbody>
+    </table>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Milestone C3.7 <span class="level">Compare with Graphiti</span></h4>
+  <p>Run the same script through Graphiti and compare probe by probe. Graphiti needs a graph database (Neo4j or FalkorDB, among others) and an LLM and embedder; check its README for current requirements.</p>
+  <ol>
+    <li>Add each turn as an episode with <code>add_episode</code>, passing the session date as <code>reference_time</code> and one <code>group_id</code> for the user.</li>
+    <li>For each probe, call <code>search</code> and inspect each returned edge's <code>fact</code>, <code>valid_at</code>, <code>invalid_at</code> and <code>expired_at</code>.</li>
+    <li>Apply your own time filter to Graphiti's edges for as-of probes, and record which probes need it.</li>
+    <li>Write a comparison table: probe results, write latency and LLM calls per episode, and what each system makes easy or hard.</li>
+  </ol>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="compare/graphiti_run.py"><code class="language-python">"""Run the Capstone 3 script through Graphiti (requires graphiti-core, Neo4j, and LLM credentials)."""
+import asyncio
+from datetime import datetime, timezone
+
+from graphiti_core import Graphiti
+from graphiti_core.nodes import EpisodeType
+
+from memory.script_eval import PROBES, SCRIPT
+
+
+def ts(day: str) -&gt; datetime:
+    return datetime.fromisoformat(day).replace(tzinfo=timezone.utc)
+
+
+async def main():
+    graphiti = Graphiti("bolt://localhost:7687", "neo4j", "password")
+    try:
+        await graphiti.build_indices_and_constraints()
+        for i, turn in enumerate(SCRIPT):
+            await graphiti.add_episode(
+                name=f"{turn['session']}-turn-{i}",
+                episode_body=f"Priya Nair: {turn['text']}",
+                source=EpisodeType.message,
+                source_description="chat with Priya Nair",
+                reference_time=ts(turn["when"]),
+                group_id="priya",
+            )
+        for question, asked_on, expected, relation in PROBES:
+            edges = await graphiti.search(question, group_ids=["priya"], num_results=8)
+            print(f"\n{question} (expected {expected})")
+            for e in edges:
+                print(f"  {e.fact} | valid_at={e.valid_at} invalid_at={e.invalid_at} expired_at={e.expired_at}")
+    finally:
+        await graphiti.close()
+
+
+asyncio.run(main())</code></pre>
+    <p>What the comparison usually shows, as concepts rather than scores (run it to get your own):</p>
+    <table>
+      <thead><tr><th>Aspect</th><th>Your memory</th><th>Graphiti</th></tr></thead>
+      <tbody>
+        <tr><td>Timestamps</td><td>Four per edge, dates</td><td>Four per edge (<code>valid_at</code>, <code>invalid_at</code>, <code>created_at</code>, <code>expired_at</code>), timezone-aware datetimes</td></tr>
+        <tr><td>Contradictions</td><td>Schema rules plus an LLM check over shared-endpoint facts</td><td>LLM-driven edge resolution and invalidation during <code>add_episode</code>, with history preserved</td></tr>
+        <tr><td>Entity resolution</td><td>Normalized names and a containment rule</td><td>LLM- and embedding-based deduplication against existing nodes</td></tr>
+        <tr><td>Search</td><td>Semantic, BM25 and hops from the user, fused by RRF, after a time filter</td><td>Hybrid semantic, keyword and graph search; RRF by default, graph-distance reranking when you pass <code>center_node_uuid</code></td></tr>
+        <tr><td>As-of questions</td><td>Built in: <code>time_scope</code> plus <code>known_at</code></td><td>Timestamps are returned on edges; the time-window logic for a question is yours to write, or use its search filters</td></tr>
+        <tr><td>Operations</td><td>In-process NetworkX, nothing to run</td><td>A graph database, async API, production features such as custom entity types and communities</td></tr>
+      </tbody>
+    </table>
+    <p>The honest conclusion for most readers: your implementation makes the temporal logic visible and testable; Graphiti gives you better extraction and deduplication and a database-backed service. The as-of layer you wrote in C3.4 is useful on top of either.</p>
+  </details>
+</section>
+
+<h2>Evaluation rubric</h2>
+<table>
+  <thead><tr><th>Area</th><th>Weight</th><th>Meets expectations</th><th>Exceeds expectations</th></tr></thead>
+  <tbody>
+    <tr><td>Bi-temporal store</td><td>20%</td><td>Four timestamps; no deletions; source- and target-side exclusivity; dedupe with episode evidence</td><td>Property-based tests that random fact sequences never produce two current holders of an exclusive relation</td></tr>
+    <tr><td>Extraction</td><td>15%</td><td>Speaker and date resolution; JSON parsing that skips bad records without losing good ones</td><td>Relation synonym normalization with measured effect on probes</td></tr>
+    <tr><td>Contradictions</td><td>15%</td><td>Rules plus LLM check over shared-endpoint candidates</td><td>Batching per episode; measured precision of LLM invalidations on 20 hand-labelled cases</td></tr>
+    <tr><td>Retrieval</td><td>20%</td><td>Time scope with known-at; three rankings fused; never returns out-of-scope facts</td><td>Relative expressions (“last spring”, “before Tern started”) resolved from memory itself</td></tr>
+    <tr><td>Evaluation</td><td>20%</td><td>Oracle and real-extractor runs with failures attributed to a component</td><td>A second, longer script (20+ turns) of your own with at least five fact changes</td></tr>
+    <tr><td>Graphiti comparison</td><td>10%</td><td>Same script, probe-by-probe table</td><td>Write cost and latency per episode for both systems</td></tr>
+  </tbody>
+</table>
+
+<h2>Stretch goals</h2>
+<ul>
+  <li><strong>Datetimes and ordering.</strong> Switch to timezone-aware datetimes so two corrections on the same day apply in order; add a probe that fails with dates only.</li>
+  <li><strong>Forgetting on request.</strong> “Forget what I told you about my title” should hide facts from retrieval without destroying the audit trail. Decide and document the semantics.</li>
+  <li><strong>Memory of documents too.</strong> Feed the Kestrel articles in as episodes with their publication dates and compare the resulting timeline with <code>kestrel_timeline()</code> in minigraphrag.</li>
+  <li><strong>Community summaries of memory.</strong> Cluster the memory graph and summarize each cluster to answer “what do you know about my work?” with global-search style map-reduce.</li>
+  <li><strong>LongMemEval-style probes.</strong> Read the task categories used by long-horizon chat memory benchmarks and add one probe of each kind to your script.</li>
+</ul>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In February 2026 the memory held “Jonas Vehl CTO_OF Kestrel Labs” with no end. On 27 March it learned Priya became CTO in March. Asked in April “who would you have said was CTO back in February?”, which fields make the answer Jonas?</p>
+  <ol>
+    <li><code>valid_from</code> only</li>
+    <li data-correct><code>invalidated_at</code> after the known-at date, so <code>prior_valid_to</code> (None) is used and the old fact still counts as valid</li>
+    <li><code>recorded_at</code> of Priya's fact being in 2026</li>
+    <li>The graph distance from the user node</li>
+  </ol>
+  <div class="explain">Record-time queries roll back invalidations the memory had not learned yet by using the interval end it believed before. Priya's fact is also excluded because its <code>recorded_at</code> is after the known-at date, but that alone would not make Jonas's closed fact count.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why is <code>HAS_TITLE</code> checked on the source side while <code>CTO_OF</code> is checked on the target side?</p>
+  <ol>
+    <li>minigraphrag only supports one kind</li>
+    <li>Titles are strings and companies are entities</li>
+    <li data-correct>A person holds one title at a time, while a company has one CTO at a time; the single-valued end of the relation differs</li>
+    <li>Source-side checks are cheaper</li>
+  </ol>
+  <div class="explain">Exclusivity is a property of which end of the relation can have only one partner at a time. Applying it on the wrong end would, for example, stop a person from being CTO whenever anyone else was recorded as CTO of any company.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why run the scripted evaluation with an oracle extractor before a real LLM?</p>
+  <ol>
+    <li>Because real LLMs cannot extract from chat</li>
+    <li>To make the tests faster only</li>
+    <li>Because Graphiti requires it</li>
+    <li data-correct>To isolate storage, invalidation and retrieval bugs from extraction errors, so each failure can be attributed to a component</li>
+  </ol>
+  <div class="explain">If the oracle run passes and the real run fails, the extractor is the cause. Without the oracle run, every failure is ambiguous.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A probe “Who supplies our sonar?” asked in April 2026 should return no current supplier. Which design choice guarantees retrieval cannot return the Deepcast fact regardless of similarity?</p>
+  <ol>
+    <li>Giving BM25 a higher weight in fusion</li>
+    <li data-correct>Filtering facts by the question's time scope before any ranking</li>
+    <li>Lowering the embedding dimension</li>
+    <li>Adding more episodes about Deepcast</li>
+  </ol>
+  <div class="explain">Rankings reorder candidates; only a filter excludes them. Time scoping is a hard constraint, so it runs first.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Why not overwrite the old fact when a new one arrives?</summary>
+  <div><p>Because the old fact was true, and people ask about the past (“who was CTO when the bleaching was detected?”), about what they said (“what did I tell you in January?”), and about why the assistant changed its answer. Overwriting destroys all three. Invalidation keeps them at the cost of one filter in every query.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How does this differ from summarizing the conversation into the prompt?</summary>
+  <div><p>A running summary is cheap and works for short relationships, but it loses dates, merges contradictory statements into vague prose, and grows or truncates. A graph memory keeps each fact separately with its time and source episode, so retrieval can pick exactly the facts a question needs and the answer can cite them. Many production agents use both: a short summary for tone and context, a graph for facts.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What if the user is wrong or joking?</summary>
+  <div><p>Record what was said, not what is true: the memory is a record of the user's statements, which is why episodes are kept and cited. For high-stakes facts, attach a confidence or a status (stated, confirmed, contradicted by a document) in the edge attributes, and phrase answers accordingly (“you told me in May that...”).</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does this scale beyond one user?</summary>
+  <div><p>The design scales by partitioning: one graph per user or per group, as Graphiti does with <code>group_id</code>. Within a partition, write cost is dominated by the extraction and contradiction calls per message, and read cost by retrieval over that user's facts, which stays small. Move from NetworkX to a database when you need concurrency and persistence, keeping the four timestamps and the query semantics unchanged.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I handle relative dates like “last spring”?</summary>
+  <div><p>Resolve them at write time against the episode's date, in the extraction prompt, and store absolute dates. At read time, <code>time_scope</code> in the reference only handles months and years; for “last spring” or “before Tern started”, either expand the parser or ask the model to output a date range for the question, and validate that range before filtering with it.</p></div>
+</details>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Agent memory needs two timelines: when a fact was true and when the agent learned it.</li>
+    <li>New facts close old ones instead of deleting them; <code>prior_valid_to</code> is what makes “what did you believe then” answerable.</li>
+    <li>Declare exclusivity per relation and per end; use an LLM only for contradictions the schema cannot express.</li>
+    <li>Scope by time first, then rank with semantic, keyword and graph-distance signals fused by RRF.</li>
+    <li>Put validity periods into the answer prompt so the model does not have to guess which fact is current.</li>
+    <li>Evaluate with a scripted multi-session conversation, first with an oracle extractor, then with a real one.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Rasmussen et al. <a href="https://arxiv.org/abs/2501.13956">Zep: A Temporal Knowledge Graph Architecture for Agent Memory</a>. <span class="venue">arXiv 2501.13956, 2025</span></li>
+  <li>Zep. <a href="https://github.com/getzep/graphiti">Graphiti</a>. <span class="venue">GitHub</span></li>
+  <li>Xu et al. <a href="https://arxiv.org/abs/2502.12110">A-MEM: Agentic Memory for LLM Agents</a>. <span class="venue">arXiv 2502.12110, 2025</span></li>
+  <li>Packer et al. <a href="https://arxiv.org/abs/2310.08560">MemGPT: Towards LLMs as Operating Systems</a>. <span class="venue">arXiv 2310.08560, 2023</span></li>
+  <li>Rajah. <a href="https://arxiv.org/abs/2608.24921">post-graph-rag: A PostgreSQL-Native Bi-Temporal Graph RAG Engine with Temporal Grounding at Synthesis</a>. <span class="venue">arXiv 2608.24921, 2026</span></li>
+  <li>Jiménez Gutiérrez et al. <a href="https://arxiv.org/abs/2502.14802">From RAG to Memory: Non-Parametric Continual Learning for Large Language Models</a>. <span class="venue">arXiv 2502.14802, 2025</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("c3-memory", function (el, cfg, api) {
+  const W = 720, left = 250, right = 16, rowH = 26, top = 30;
+  const H = top + cfg.facts.length * rowH + 30;
+  const toMonths = (s) => { const p = String(s).split("-").map(Number); return p[0] * 12 + (p[1] || 1) - 1 + ((p[2] || 1) - 1) / 31; };
+  const t0 = toMonths(cfg.start), t1 = toMonths(cfg.end) + 1;
+  const X = (s) => left + ((toMonths(s) - t0) / (t1 - t0)) * (W - left - right);
+  const { stage } = api.frame(el, cfg);
+  const svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title }, stage);
+  const axis = api.svgEl("g", {}, svg);
+  for (let y = +cfg.start.slice(0, 4); y <= +cfg.end.slice(0, 4); y++) {
+    const x = X(y + "-01");
+    api.svgEl("line", { x1: x, y1: top - 8, x2: x, y2: H - 22, style: "stroke:var(--rule);stroke-width:1" }, axis);
+    const t = api.svgEl("text", { x: x + 3, y: H - 8, style: "fill:var(--muted);font-size:11px" }, axis); t.textContent = y;
+  }
+  const recLine = api.svgEl("line", { y1: top - 12, y2: H - 22, style: "stroke:var(--edge);stroke-width:2;stroke-dasharray:5 4" }, svg);
+  const recLabel = api.svgEl("text", { y: top - 16, "text-anchor": "middle", style: "fill:var(--edge);font-size:11px" }, svg);
+  const probeLine = api.svgEl("line", { y1: top - 12, y2: H - 22, style: "stroke:var(--node);stroke-width:2" }, svg);
+  const probeLabel = api.svgEl("text", { y: H - 24, "text-anchor": "middle", style: "fill:var(--node);font-size:11px;font-weight:650" }, svg);
+  const rows = cfg.facts.map((f, i) => {
+    const y = top + i * rowH;
+    const g = api.svgEl("g", {}, svg);
+    const label = api.svgEl("text", { x: 8, y: y + 15, style: "fill:var(--ink);font-size:11.5px" }, g); label.textContent = f.label;
+    const bar = api.svgEl("rect", { y: y + 5, height: 14, rx: 3 }, g);
+    const tail = api.svgEl("path", {}, g);
+    return { f, g, label, bar, tail, y };
+  });
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const bar = api.controls(el);
+  const lab = api.h("label", {}, bar, "Ask about ");
+  const months = []; for (let m = t0; m < t1; m++) months.push(m);
+  const slider = api.h("input", { type: "range", min: 0, max: months.length - 1, value: Math.round(toMonths(cfg.probe) - t0) }, lab);
+  const sval = api.h("b", {}, lab);
+  let step = 0;
+  const fmtM = (m) => Math.floor(m / 12) + "-" + String(Math.floor(m % 12) + 1).padStart(2, "0");
+  function render() {
+    const s = cfg.sessions[step], rec = toMonths(s.date);
+    const probe = months[+slider.value] + 0.5;
+    sval.textContent = fmtM(months[+slider.value]);
+    recLine.setAttribute("x1", X(s.date)); recLine.setAttribute("x2", X(s.date));
+    recLabel.setAttribute("x", X(s.date) - 6); recLabel.setAttribute("text-anchor", "end"); recLabel.textContent = "memory as of " + s.date;
+    const px = left + ((probe - t0) / (t1 - t0)) * (W - left - right);
+    probeLine.setAttribute("x1", px); probeLine.setAttribute("x2", px);
+    probeLabel.setAttribute("x", px); probeLabel.textContent = "valid at " + fmtM(months[+slider.value]);
+    const used = [];
+    rows.forEach((r) => {
+      const f = r.f;
+      const known = toMonths(f.rec) <= rec;
+      const invalKnown = f.inval && toMonths(f.inval) <= rec;
+      const end = invalKnown || (f.to && !f.inval) ? f.to : null;
+      const x0 = X(f.from), x1 = end ? X(end) : W - right;
+      const valid = known && toMonths(f.from) <= probe && (end === null || probe < toMonths(end));
+      const col = api.groupColor(f.group);
+      r.g.style.opacity = known ? 1 : 0.18;
+      r.bar.setAttribute("x", x0); r.bar.setAttribute("width", Math.max(2, x1 - x0));
+      r.bar.setAttribute("style", "fill:color-mix(in srgb," + col + " " + (valid ? 75 : 25) + "%, var(--panel));stroke:" + col + ";stroke-width:" + (valid ? 2 : 1));
+      if (invalKnown) {
+        r.tail.setAttribute("d", "M" + x1 + "," + (r.y + 2) + " L" + x1 + "," + (r.y + 22));
+        r.tail.setAttribute("style", "stroke:var(--bad);stroke-width:3;fill:none");
+      } else {
+        r.tail.setAttribute("d", end ? "" : "M" + (x1 - 7) + "," + (r.y + 7) + " L" + x1 + "," + (r.y + 12) + " L" + (x1 - 7) + "," + (r.y + 17) + " z");
+        r.tail.setAttribute("style", "fill:" + col + ";stroke:none");
+      }
+      r.label.style.fontWeight = valid ? 650 : 400;
+      if (valid) used.push(f.label);
+    });
+    cap.innerHTML = "<strong>" + api.escapeHtml(s.label) + ".</strong> Priya said: “" + api.escapeHtml(s.said) + "”<br>" +
+      "Red ticks mark facts the memory has closed. Facts the memory would use for a question about " + fmtM(months[+slider.value]) + ", as known on " + s.date + ": " +
+      (used.length ? used.map((u) => "<span class=\"viz-chip node\">" + api.escapeHtml(u) + "</span>").join(" ") : "none");
+  }
+  slider.addEventListener("input", render);
+  api.h("span", { class: "grow" }, bar);
+  const p = api.player(el, cfg.sessions.length, (i) => { step = i; render(); }, { interval: 2600 });
+});
+</script>
+</body>
+</html>

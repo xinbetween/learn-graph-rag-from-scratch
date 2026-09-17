@@ -6,7 +6,7 @@ from playwright.async_api import async_playwright
 SITE = Path(__file__).resolve().parent.parent / "site"
 BASE = "http://localhost:8765/"
 slugs = re.findall(r'slug: "([^"]+)"', (SITE / "assets/js/curriculum.js").read_text())
-pages = ["index.html"] + [f"chapters/{s}.html" for s in slugs]
+pages = ["index.html"] + [f"chapters/{s}.html" for s in slugs] + ["zh/index.html"] + [f"zh/chapters/{s}.html" for s in slugs]
 
 async def check(ctx, path, width):
     pg = await ctx.new_page()

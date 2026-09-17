@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cost, latency and scale | Graph RAG from Scratch</title>
+<meta name="description" content="Model where GraphRAG spends tokens and time, estimate indexing and query cost for your corpus, and apply the levers that cut it: deferred LLM use, NLP extraction, small extractors, caching and concurrency.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/26-cost-scaling.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/26-cost-scaling.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/26-cost-scaling.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="26-cost-scaling" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Cost, latency and scale</h1>
+  <p class="lede">GraphRAG moves work from query time to indexing time, and that work is paid in LLM calls. In this chapter you build a cost model you can run before you index anything, then learn the levers that cut indexing and query cost without quietly wrecking quality.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Break indexing cost into extraction, gleaning, claims, summarization, reports and embeddings, and estimate each from corpus size and settings</li>
+      <li>Estimate calls, tokens and latency per query for basic, local, global and DRIFT search</li>
+      <li>Explain how LazyGraphRAG, FastGraphRAG, fast-graphrag and LightRAG reduce or defer LLM use, and what each gives up</li>
+      <li>Decide when a small or distilled extractor model is good enough, and how to prove it</li>
+      <li>Apply response caching, prompt-prefix caching, concurrency and rate limiting to an indexing run</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Where indexing cost goes</h2>
+<p>Vector RAG has one indexing cost that grows with the corpus: embeddings. GraphRAG adds LLM calls at almost every stage you built in Part 2. Before you optimize anything, count them. The pipeline in <code>minigraphrag/indexer.py</code> makes these calls:</p>
+<table>
+  <thead><tr><th>Stage</th><th>Chapter</th><th>LLM calls</th><th>What drives the count</th></tr></thead>
+  <tbody>
+    <tr><td>Entity and relationship extraction</td><td><a href="08-entity-relation-extraction.html">8</a></td><td>1 per text unit</td><td>Corpus size divided by chunk stride</td></tr>
+    <tr><td>Gleaning</td><td>8</td><td>Up to 2g − 1 extra per text unit</td><td><code>max_gleanings</code> g; transcript grows each round</td></tr>
+    <tr><td>Claim extraction</td><td><a href="10-claims-temporal.html">10</a></td><td>1 per text unit (if enabled)</td><td><code>IndexConfig.extract_claims</code></td></tr>
+    <tr><td>Description summarization</td><td><a href="09-entity-resolution.html">9</a></td><td>1 per entity or relationship with several descriptions</td><td>How often things are mentioned more than once</td></tr>
+    <tr><td>Community reports</td><td><a href="12-community-reports.html">12</a></td><td>1 per community with 2 or more nodes, at every level</td><td>Graph size and <code>max_cluster_size</code></td></tr>
+    <tr><td>Embeddings</td><td><a href="13-storage-indexing.html">13</a></td><td>Not LLM calls; batched embedding requests</td><td>Tokens in text units, descriptions and reports</td></tr>
+  </tbody>
+</table>
+<p>You can see the real counts on the Kestrel corpus right now, for free, by wrapping <code>MockLLM</code> in a counter that routes each prompt by the same markers <code>MockLLM</code> uses. With the default <code>IndexConfig</code> (300-word chunks, 50-word overlap, one gleaning round, claims on), the 12 documents become 24 text units and the run makes <strong>122 LLM calls</strong>: 24 extraction, 24 gleaning continuations, 24 claim extractions, 46 summaries and 4 community reports. Set <code>max_gleanings=0</code> and it drops to 84. The summary count is specific to what <code>MockLLM</code> extracts, but the shape is general: the per-chunk stages dominate the count, and every setting that multiplies per-chunk work multiplies the bill. Exercise 26.3 walks through the measurement.</p>
+
+<h3>A cost model you can run before indexing</h3>
+<p>Let <em>T</em> be corpus tokens, <em>c</em> the chunk size and <em>o</em> the overlap, all in tokens. The number of text units is</p>
+<p style="text-align:center"><em>N</em> = ⌈(<em>T</em> − <em>o</em>) / (<em>c</em> − <em>o</em>)⌉</p>
+<p>Extraction with <em>g</em> gleaning rounds mirrors <code>extract_from_unit</code>: one extraction call, then for each round a continue call, and a yes/no loop check after every round except the last. The upper bound on calls per chunk is therefore 1 + <em>g</em> + max(<em>g</em> − 1, 0), which is 1 when <em>g</em> = 0 and 2<em>g</em> otherwise. It is an upper bound because the loop stops early when the model answers N.</p>
+<p>Calls are not the whole story, because each gleaning call re-sends the whole transcript. With a fixed prompt template of <em>P</em> tokens and a first-pass output of <em>r</em>·<em>c</em> tokens, the input of the first continuation call is already <em>P</em> + <em>c</em> + <em>r</em>·<em>c</em> plus the continue instruction. Cost per stage <em>s</em> is then</p>
+<p style="text-align:center">cost<sub>s</sub> = (<em>I<sub>s</sub></em> · <em>p</em><sub>in</sub> + <em>O<sub>s</sub></em> · <em>p</em><sub>out</sub>) / 10<sup>6</sup></p>
+<p>where <em>I<sub>s</sub></em> and <em>O<sub>s</sub></em> are total input and output tokens for the stage and the prices are per million tokens. Total indexing cost is the sum over stages plus embedding tokens times the embedding price. Summaries and reports scale with how much <em>content</em> the corpus has, not with chunk size, so the model estimates them per thousand corpus tokens.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 262" role="img" aria-labelledby="glean-title">
+      <title id="glean-title">Input tokens of the four calls made for one 600-token chunk with two gleaning rounds. Every call re-sends the template and chunk, and later calls also re-send earlier outputs.</title>
+      <text class="d-text small" x="10" y="16">Call</text>
+      <text class="d-text small" x="566" y="16">Tokens</text>
+      <text class="d-text bold" x="10" y="50">1. Extract</text>
+      <rect class="d-box node" x="130" y="32" width="240" height="28" rx="3"/>
+      <rect class="d-box edge" x="370" y="32" width="96" height="28" rx="3"/>
+      <text class="d-text small" x="566" y="50">2,100 in, 240 out</text>
+      <text class="d-text bold" x="10" y="95">2. Continue</text>
+      <rect class="d-box node" x="130" y="77" width="240" height="28" rx="3"/>
+      <rect class="d-box edge" x="370" y="77" width="96" height="28" rx="3"/>
+      <rect class="d-box comm" x="466" y="77" width="38" height="28" rx="3"/>
+      <rect class="d-box bad" x="504" y="77" width="8" height="28"/>
+      <text class="d-text small" x="566" y="95">2,390 in, 120 out</text>
+      <text class="d-text bold" x="10" y="140">3. Loop check</text>
+      <rect class="d-box node" x="130" y="122" width="240" height="28" rx="3"/>
+      <rect class="d-box edge" x="370" y="122" width="96" height="28" rx="3"/>
+      <rect class="d-box comm" x="466" y="122" width="58" height="28" rx="3"/>
+      <rect class="d-box bad" x="504" y="122" width="8" height="28"/>
+      <rect class="d-box bad" x="524" y="122" width="7" height="28"/>
+      <text class="d-text small" x="566" y="140">2,550 in, 1 out</text>
+      <text class="d-text bold" x="10" y="185">4. Continue</text>
+      <rect class="d-box node" x="130" y="167" width="240" height="28" rx="3"/>
+      <rect class="d-box edge" x="370" y="167" width="96" height="28" rx="3"/>
+      <rect class="d-box comm" x="466" y="167" width="58" height="28" rx="3"/>
+      <rect class="d-box bad" x="504" y="167" width="8" height="28"/>
+      <rect class="d-box bad" x="524" y="167" width="7" height="28"/>
+      <rect class="d-box bad" x="531" y="167" width="8" height="28"/>
+      <text class="d-text small" x="566" y="185">2,601 in, 120 out</text>
+      <text class="d-text small" x="250" y="50" text-anchor="middle">template (1,500)</text>
+      <text class="d-text small" x="418" y="50" text-anchor="middle">chunk (600)</text>
+      <line class="d-line dash" x1="130" y1="204" x2="466" y2="204"/>
+      <line class="d-line" x1="130" y1="199" x2="130" y2="209"/>
+      <line class="d-line" x1="466" y1="199" x2="466" y2="209"/>
+      <text class="d-text small" x="298" y="222" text-anchor="middle">identical prefix in all four calls: a prompt cache can bill it at a discount</text>
+      <rect class="d-box node" x="130" y="236" width="14" height="12"/><text class="d-text small" x="150" y="246">template</text>
+      <rect class="d-box edge" x="220" y="236" width="14" height="12"/><text class="d-text small" x="240" y="246">chunk</text>
+      <rect class="d-box comm" x="295" y="236" width="14" height="12"/><text class="d-text small" x="315" y="246">earlier outputs</text>
+      <rect class="d-box bad" x="420" y="236" width="14" height="12"/><text class="d-text small" x="440" y="246">follow-up instructions</text>
+    </svg>
+  </div>
+  <figcaption>One chunk, two gleaning rounds, four calls and 9,641 input tokens, against 2,100 with no gleaning. Bar widths are to scale under the assumptions in the worked estimate below. The template and chunk repeat in every call, which is why putting variable text last (Chapter 8) matters for prompt caching.</figcaption>
+</figure>
+
+<h3>A worked estimate for a 1M-token corpus</h3>
+<p>Take a corpus of one million tokens, roughly a few thousand pages of reports and articles, and these stated assumptions. Change any of them and the arithmetic below changes with it; that is the point of writing them down.</p>
+<ul>
+  <li>Chunks of 600 tokens with 100 overlap, one gleaning round, claims off.</li>
+  <li>Extraction template of 1,500 tokens. Production prompts with several worked examples are often in the 1,000 to 2,000 range; measure yours with <code>count_tokens</code>. The <code>minigraphrag</code> template has no worked examples and comes to about 330 tokens by the word-count estimate.</li>
+  <li>First-pass output is 0.4 × chunk tokens (240), each gleaning round outputs half that (120), the continue instruction is 50 tokens.</li>
+  <li>Two summarization calls per thousand corpus tokens, at 500 tokens in and 150 out (<code>summarize_max_tokens</code> = 150).</li>
+  <li>0.2 community reports per thousand corpus tokens, at 3,000 tokens in (under <code>report_max_tokens</code> = 4,000) and 800 out.</li>
+  <li>Prices are parameters. For the arithmetic we use <strong>placeholder</strong> prices of 1.00 per million input tokens, 4.00 per million output tokens and 0.02 per million embedding tokens, in some currency unit. They are not any provider's real prices; substitute your own.</li>
+</ul>
+<p>Chunks: ⌈(1,000,000 − 100) / 500⌉ = 2,000. Per chunk, the extraction call reads 1,500 + 600 = 2,100 tokens and writes 240; the continuation reads 2,100 + 240 + 50 = 2,390 and writes 120. That is 4,490 in and 360 out per chunk, so 8.98M in and 0.72M out across the corpus.</p>
+<table>
+  <thead><tr><th>Stage</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th><th>Cost (placeholder prices)</th><th>Share</th></tr></thead>
+  <tbody>
+    <tr><td>Extraction + 1 gleaning</td><td>4,000</td><td>8,980,000</td><td>720,000</td><td>8.98 + 2.88 = 11.86</td><td>77%</td></tr>
+    <tr><td>Summaries</td><td>2,000</td><td>1,000,000</td><td>300,000</td><td>1.00 + 1.20 = 2.20</td><td>14%</td></tr>
+    <tr><td>Community reports</td><td>200</td><td>600,000</td><td>160,000</td><td>0.60 + 0.64 = 1.24</td><td>8%</td></tr>
+    <tr><td>Embeddings</td><td>n/a</td><td>1,660,000</td><td>n/a</td><td>0.03</td><td>under 1%</td></tr>
+    <tr><td><strong>Total</strong></td><td><strong>6,200</strong></td><td><strong>10,580,000</strong></td><td><strong>1,180,000</strong></td><td><strong>15.33</strong></td><td></td></tr>
+  </tbody>
+</table>
+<p>The embedding tokens are the 2,000 chunks at 600 tokens each (1.2M) plus summarized descriptions (0.3M) and reports (0.16M). Three things stand out. Extraction is about three quarters of the bill. Output tokens are a small fraction of the volume but, at a typical output-to-input price ratio, a large fraction of the cost. And embeddings are a rounding error next to the LLM stages.</p>
+<p>Now vary one knob at a time. Two gleaning rounds raise extraction to 8,000 calls and 19.28M input tokens, and the total to 26.60: gleaning is the most expensive single setting in the pipeline. Halving the chunk size to 300 tokens gives 5,000 chunks and a total of 25.93, while 1,200-token chunks give 909 chunks and 11.48. Turning claims on (1,000-token template, output 0.2 × chunk) adds 2,000 calls and 4.16. None of these numbers say which setting is <em>right</em>; smaller chunks and gleaning buy recall, and Chapter 25 is how you find out whether you needed it.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Microsoft GraphRAG documentation, Indexing methods</span>
+  <p>The GraphRAG docs describe graph extraction as roughly 75% of indexing cost, which is why their cheaper FastGraphRAG method replaces exactly that stage with NLP. The worked estimate above lands in the same place from first principles: under our assumptions extraction is 77% of the bill.</p>
+</div>
+
+<h3>Play with the model</h3>
+<p>The calculator runs the same model. Drag corpus size and chunk size, add gleaning rounds, and set your own prices. The method switch shows a FastGraphRAG-style index, where extraction and summarization use no LLM and only community reports do. The cache slider models a re-run where a fraction of calls hit a response cache.</p>
+
+<div class="viz" data-viz="ch26-cost">
+<script type="application/json">
+{
+  "title": "Indexing cost calculator",
+  "subtitle": "Prices are placeholders; set your own",
+  "defaults": {"corpusExp": 60, "chunk": 600, "overlap": 100, "gleanings": 1, "priceIn": 1.0, "priceOut": 4.0, "priceEmbed": 0.02, "cache": 0},
+  "assumptions": {"promptTokens": 1500, "continueTokens": 50, "loopCheckTokens": 40, "outputRatio": 0.4, "gleaningRatio": 0.5,
+    "summariesPer1k": 2.0, "summaryIn": 500, "summaryOut": 150, "reportsPer1k": 0.2, "reportIn": 3000, "reportOut": 800}
+}
+</script>
+</div>
+
+<p>Things to try: set gleanings to 3 and watch extraction input tokens grow faster than calls; drop chunk size to 200 and see the call count jump; switch to NLP extraction and notice that the bill is now dominated by reports, which is where FastGraphRAG still spends its LLM budget.</p>
+
+<h3>The estimator in code</h3>
+<p>Put the model in code so a cost estimate is one function call away whenever someone proposes indexing a new corpus. This teaching module is not part of the <code>minigraphrag</code> package as shipped; add it yourself.</p>
+
+<pre data-file="minigraphrag/cost.py"><code class="language-python">"""Back-of-envelope cost model for a GraphRAG index. Every number is an assumption you can override."""
+import math
+from dataclasses import dataclass
+
+
+@dataclass
+class Prices:
+    """Per 1M tokens. PLACEHOLDERS, not real prices: copy yours from your provider's price sheet."""
+    input_per_m: float = 1.00
+    output_per_m: float = 4.00
+    embed_per_m: float = 0.02
+
+
+@dataclass
+class Assumptions:
+    extraction_prompt_tokens: int = 1500   # template + worked examples
+    continue_prompt_tokens: int = 50       # GLEANING_CONTINUE_PROMPT
+    loop_check_prompt_tokens: int = 40     # GLEANING_LOOP_CHECK_PROMPT
+    output_ratio: float = 0.4              # first-pass output tokens / chunk tokens
+    gleaning_output_ratio: float = 0.5     # each gleaning round / first-pass output
+    claims_prompt_tokens: int = 1000
+    claims_output_ratio: float = 0.2
+    summaries_per_1k_tokens: float = 2.0   # entities + relationships needing a summary
+    summary_input_tokens: int = 500
+    summary_output_tokens: int = 150       # IndexConfig.summarize_max_tokens
+    reports_per_1k_tokens: float = 0.2     # communities at all levels
+    report_input_tokens: int = 3000        # capped by IndexConfig.report_max_tokens
+    report_output_tokens: int = 800
+
+
+@dataclass
+class Stage:
+    calls: float = 0
+    input_tokens: float = 0
+    output_tokens: float = 0
+
+    def cost(self, p: Prices) -&gt; float:
+        return (self.input_tokens * p.input_per_m + self.output_tokens * p.output_per_m) / 1e6
+
+    def times(self, n: float) -&gt; "Stage":
+        return Stage(self.calls * n, self.input_tokens * n, self.output_tokens * n)
+
+
+def n_chunks(corpus_tokens: int, chunk_size: int, overlap: int) -&gt; int:
+    return max(1, math.ceil((corpus_tokens - overlap) / (chunk_size - overlap)))
+
+
+def extraction_per_chunk(chunk_size: int, max_gleanings: int, a: Assumptions) -&gt; Stage:
+    """Mirror extract_from_unit. Upper bound: assumes the loop check always answers Y."""
+    first = a.output_ratio * chunk_size
+    transcript = a.extraction_prompt_tokens + chunk_size
+    s = Stage(1, transcript, first)
+    transcript += first
+    for i in range(max_gleanings):
+        transcript += a.continue_prompt_tokens
+        more = a.gleaning_output_ratio * first
+        s.calls += 1; s.input_tokens += transcript; s.output_tokens += more
+        transcript += more
+        if i == max_gleanings - 1:
+            break                                  # no loop check after the last round
+        s.calls += 1; s.input_tokens += transcript + a.loop_check_prompt_tokens; s.output_tokens += 1
+        transcript += a.loop_check_prompt_tokens + 1
+    return s
+
+
+def estimate_index_cost(corpus_tokens: int, chunk_size: int = 600, overlap: int = 100,
+                        max_gleanings: int = 1, extract_claims: bool = False,
+                        prices: Prices | None = None, a: Assumptions | None = None) -&gt; dict:
+    prices, a = prices or Prices(), a or Assumptions()
+    n = n_chunks(corpus_tokens, chunk_size, overlap)
+    k = corpus_tokens / 1000
+    stages = {"extraction": extraction_per_chunk(chunk_size, max_gleanings, a).times(n)}
+    if extract_claims:
+        per = Stage(1, a.claims_prompt_tokens + chunk_size, a.claims_output_ratio * chunk_size)
+        stages["claims"] = per.times(n)
+    stages["summaries"] = Stage(1, a.summary_input_tokens, a.summary_output_tokens).times(
+        round(k * a.summaries_per_1k_tokens))
+    stages["reports"] = Stage(1, a.report_input_tokens, a.report_output_tokens).times(
+        round(k * a.reports_per_1k_tokens))
+    embed_tokens = n * chunk_size + stages["summaries"].output_tokens + stages["reports"].output_tokens
+    rows = {name: {"calls": round(s.calls), "input": round(s.input_tokens),
+                   "output": round(s.output_tokens), "cost": round(s.cost(prices), 2)}
+            for name, s in stages.items()}
+    rows["embeddings"] = {"tokens": round(embed_tokens), "cost": round(embed_tokens * prices.embed_per_m / 1e6, 2)}
+    return {"chunks": n, "stages": rows, "total": round(sum(r["cost"] for r in rows.values()), 2)}
+
+
+# estimate_index_cost(1_000_000)["total"]  -&gt; 15.33 with the placeholder prices</code></pre>
+
+<h3>What the model leaves out</h3>
+<p>A spreadsheet estimate is a floor, not a forecast. Real runs add:</p>
+<ul>
+  <li><strong>Failures and retries.</strong> Rate-limit errors, timeouts and unparseable outputs are re-sent. Budget a few percent, and log retries so you know the real figure.</li>
+  <li><strong>Prompt tuning and experiments.</strong> You will index a sample many times while tuning prompts and chunk sizes. Those runs often cost more than the final full index.</li>
+  <li><strong>Re-indexing.</strong> A full rebuild after every document change repeats the whole bill. <a href="27-incremental-temporal.html">Chapter 27</a> shows how to pay only for what changed.</li>
+  <li><strong>Reasoning tokens.</strong> Models that think before answering bill hidden output tokens, which can multiply the output column for extraction.</li>
+</ul>
+
+<div class="callout paper">
+  <span class="callout-title">Sanchez and Dehnad, The Commercial Tax (2026)</span>
+  <p>This audit of multi-hop retrieval benchmarks points out that published results rarely report what systems cost to build. The authors report that three of the five systems they audited did not disclose indexing cost, and that published GraphRAG indexing-cost estimates for the same corpus varied by about 11 times. They model embedding, graph construction and question answering separately, and find embedding far cheaper than the downstream stages. They also distinguish API embedders, which charge on every re-index, from self-hosted ones. Report your own index cost next to your quality numbers.</p>
+</div>
+
+<h2>Query cost and latency by mode</h2>
+<p>Indexing is paid once per corpus version. Queries are paid forever, and latency is felt by every user. The search modes from Part 3 differ by more than an order of magnitude.</p>
+
+<h3>Calls per query</h3>
+<p>Using the <code>minigraphrag</code> defaults and the same placeholder prices, with a 400-token system prompt and 500-token answers:</p>
+<table>
+  <thead><tr><th>Mode</th><th>LLM calls</th><th>Input tokens</th><th>Output tokens</th><th>Cost per query</th><th>Latency shape</th></tr></thead>
+  <tbody>
+    <tr><td>Basic (<code>basic_search</code>, 4,000-token context)</td><td>1</td><td>4,400</td><td>500</td><td>0.0064</td><td>One generation</td></tr>
+    <tr><td>Local (<code>local_search</code>, 8,000-token context)</td><td>1</td><td>8,400</td><td>500</td><td>0.0104</td><td>One generation; retrieval is in-memory</td></tr>
+    <tr><td>LightRAG or HippoRAG style</td><td>2</td><td>about 6,700</td><td>about 560</td><td>about 0.009</td><td>Keyword or entity call, then generation</td></tr>
+    <tr><td>DRIFT (3 follow-ups)</td><td>5</td><td>31,900</td><td>2,700</td><td>0.043</td><td>Primer, parallel local searches, reduce</td></tr>
+    <tr><td>Global, static map-reduce</td><td>41</td><td>142,400</td><td>12,800</td><td>0.19</td><td>Parallel map calls, then reduce</td></tr>
+  </tbody>
+</table>
+<p>The global row assumes 150 reports at the chosen level, 800 tokens each, packed into 3,000-token batches (<code>global_search</code>'s default <code>max_context_tokens</code>). The map stage needs ⌈150 × 800 / 3,000⌉ = 40 calls, each reading 3,400 tokens and writing about 300; the reduce call reads the surviving half of the points. Global search costs about 30 times a basic query and nearly 20 times a local one here, and its cost grows with the number of reports, which grows with the corpus. Local search cost does not.</p>
+
+<h3>Latency budgets for global search</h3>
+<p>Map calls are independent, so you run them in parallel. With <em>M</em> map calls, concurrency <em>C</em>, a typical map call time <em>t</em><sub>map</sub> and a reduce time <em>t</em><sub>reduce</sub>, wall-clock time is roughly</p>
+<p style="text-align:center"><em>L</em> ≈ ⌈<em>M</em> / <em>C</em>⌉ · <em>t</em><sub>map</sub> + <em>t</em><sub>reduce</sub></p>
+<p>The slowest call in each wave sets the pace, so use a high percentile for <em>t</em><sub>map</sub>, not the mean.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 236" role="img" aria-labelledby="lat-title">
+      <title id="lat-title">Wall-clock time for global search with 40 map calls of 5 seconds and a 12-second reduce: sequential takes 212 seconds, concurrency 8 takes 37 seconds, concurrency 40 takes 17 seconds.</title>
+      <line class="d-line faint" x1="150" y1="30" x2="150" y2="196"/>
+      <line class="d-line faint" x1="270" y1="30" x2="270" y2="196"/>
+      <line class="d-line faint" x1="390" y1="30" x2="390" y2="196"/>
+      <line class="d-line faint" x1="510" y1="30" x2="510" y2="196"/>
+      <text class="d-text small" x="150" y="214" text-anchor="middle">0 s</text>
+      <text class="d-text small" x="270" y="214" text-anchor="middle">10 s</text>
+      <text class="d-text small" x="390" y="214" text-anchor="middle">20 s</text>
+      <text class="d-text small" x="510" y="214" text-anchor="middle">30 s</text>
+      <text class="d-text small" x="600" y="214" text-anchor="middle">time</text>
+      <text class="d-text bold" x="10" y="58">Sequential</text>
+      <rect class="d-box bad" x="150" y="40" width="440" height="28" rx="4"/>
+      <text class="d-text small" x="370" y="58" text-anchor="middle">40 map calls one after another (200 s), then reduce</text>
+      <text class="d-text bold" x="604" y="58">212 s</text>
+      <text class="d-text bold" x="10" y="116">Concurrency 8</text>
+      <rect class="d-box node" x="150" y="98" width="58" height="28" rx="4"/>
+      <rect class="d-box node" x="210" y="98" width="58" height="28" rx="4"/>
+      <rect class="d-box node" x="270" y="98" width="58" height="28" rx="4"/>
+      <rect class="d-box node" x="330" y="98" width="58" height="28" rx="4"/>
+      <rect class="d-box node" x="390" y="98" width="58" height="28" rx="4"/>
+      <text class="d-text small" x="179" y="116" text-anchor="middle">8 maps</text>
+      <text class="d-text small" x="239" y="116" text-anchor="middle">8 maps</text>
+      <text class="d-text small" x="299" y="116" text-anchor="middle">8 maps</text>
+      <text class="d-text small" x="359" y="116" text-anchor="middle">8 maps</text>
+      <text class="d-text small" x="419" y="116" text-anchor="middle">8 maps</text>
+      <rect class="d-box edge" x="450" y="98" width="144" height="28" rx="4"/>
+      <text class="d-text small" x="522" y="116" text-anchor="middle">reduce</text>
+      <text class="d-text bold" x="604" y="116">37 s</text>
+      <text class="d-text bold" x="10" y="174">Concurrency 40</text>
+      <rect class="d-box node" x="150" y="156" width="58" height="28" rx="4"/>
+      <text class="d-text small" x="179" y="174" text-anchor="middle">40 maps</text>
+      <rect class="d-box edge" x="210" y="156" width="144" height="28" rx="4"/>
+      <text class="d-text small" x="282" y="174" text-anchor="middle">reduce</text>
+      <text class="d-text bold" x="366" y="174">17 s</text>
+      <text class="d-text small" x="420" y="174">needs a burst of about 150K tokens</text>
+    </svg>
+  </div>
+  <figcaption>Global search latency with 40 map calls at 5 s each and a 12 s reduce (illustrative timings; the sequential bar is not to scale). Concurrency collapses the map stage, but the reduce call is a floor you can only lower with a faster model, shorter inputs or streaming.</figcaption>
+</figure>
+
+<p>If an interactive product needs answers in a few seconds, static global search over a large corpus will not fit, however parallel. The options, roughly in order of how much they change the system:</p>
+<ul>
+  <li><strong>Search a coarser level.</strong> Higher-level reports are fewer, so <em>M</em> shrinks. You lose detail on specific questions.</li>
+  <li><strong>Dynamic community selection.</strong> <code>global_search(..., dynamic=True)</code> rates reports top-down and skips subtrees of irrelevant ones (<a href="15-global-search.html">Chapter 15</a>). Rating calls are cheap per call but add a sequential phase per level.</li>
+  <li><strong>Stream the reduce.</strong> The user sees text as soon as the reduce starts. Time to first token matters more than total time for perceived latency.</li>
+  <li><strong>Route queries.</strong> Most questions are not global. A cheap classifier that sends "Who is the CTO of Kestrel Labs?" to local search and only "What are the main themes?" to global search changes average cost far more than any micro-optimization.</li>
+  <li><strong>Precompute.</strong> For a known set of dashboard-style sensemaking questions, run global search at indexing time and cache the answer until the index changes.</li>
+  <li><strong>Defer differently.</strong> DRIFT and LazyGraphRAG spend a bounded budget per query instead of touching every report.</li>
+</ul>
+
+<h2>Cheaper graphs: defer or replace the LLM</h2>
+<p>If extraction is three quarters of the cost, the big wins come from not running an LLM over every chunk. There are two broad strategies: <em>replace</em> LLM extraction with cheaper NLP, or <em>defer</em> LLM work until a query tells you which part of the corpus matters.</p>
+
+<h3>LazyGraphRAG: defer everything to query time</h3>
+<p>Microsoft Research described LazyGraphRAG in a November 2024 blog post. Its index uses no LLM at all. It extracts noun phrases as concepts, links concepts that co-occur, and uses graph statistics to optimize the concept graph and find a hierarchical community structure. The blog puts indexing cost at the same level as vector RAG and 0.1% of full GraphRAG's. All LLM use happens at query time, and one parameter, the <em>relevance test budget</em>, controls how much.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "LazyGraphRAG: indexing without an LLM, spending a budget at query time",
+  "perRow": 3,
+  "stages": [
+    {"label": "Index with NLP", "detail": "Extract noun phrases as concepts and record their co-occurrences. Use graph statistics to optimize the concept graph and extract hierarchical communities. No LLM calls: the index costs about what vector RAG costs."},
+    {"label": "Refine the query", "detail": "An LLM identifies relevant subqueries and recombines them into a single expanded query. For <em>What risks does Kestrel Labs face?</em> that might yield supplier dependence, competition and regulation."},
+    {"label": "Rank chunks, then communities", "detail": "For each subquery, rank text chunks by similarity, then rank communities by their top-ranked chunks. This is the best-first part of the search."},
+    {"label": "Test relevance", "detail": "An LLM relevance assessor rates chunks against the subquery. Every rating spends part of the <strong>relevance test budget</strong>, the single knob that trades cost for quality."},
+    {"label": "Deepen", "detail": "Search proceeds in an iterative deepening manner, combining best-first and breadth-first dynamics. It recurses into relevant sub-communities after z successive communities yield zero relevant chunks."},
+    {"label": "Extract claims and answer", "detail": "Relevant chunks are grouped by community, an LLM extracts subquery-relevant claims from each group, and the claims are mapped and reduced into the final answer."}
+  ]
+}
+</script>
+</div>
+
+<p>The blog reports that at 4% of the query cost of GraphRAG global search, LazyGraphRAG significantly outperformed the competing methods on its test of 100 synthetic queries (50 local, 50 global) over 5,590 AP news articles, and that comparable quality came at more than 700 times lower query cost than global search. Treat these as one team's evaluation on one dataset. The durable lesson is structural: when most of the corpus is never relevant to any question, paying an LLM to summarize all of it up front is waste.</p>
+<p>The price is paid elsewhere. There are no entity descriptions or community reports to browse, and query latency now includes relevance testing. If you need a navigable, curated graph (for analysts, for Text2Cypher, for audit), a lazy index is not a substitute.</p>
+
+<h3>FastGraphRAG: NLP extraction inside Microsoft GraphRAG</h3>
+<p>Microsoft GraphRAG ships two indexing methods, chosen with <code>graphrag index --method standard</code> (the default) or <code>--method fast</code>. In FastGraphRAG, entities are noun phrases extracted with NLP libraries such as NLTK or spaCy and have no descriptions; relationships are defined by two noun phrases co-occurring in a text unit. The LLM is used only for community reports, which are written from the text units that contain each community's noun phrases. The docs are candid about the trade-off: the graph is noisier and less directly relevant, so FastGraphRAG fits summary questions answered by global search, while the standard method fits when you need high-fidelity entities and graph exploration. They also recommend much smaller text units for the fast method, 50 to 100 tokens, so that co-occurrence within a unit means something; with 600-token units almost every noun phrase co-occurs with every other. You will run both in <a href="28-frameworks-in-practice.html">Chapter 28</a>.</p>
+<p>On Kestrel, a noun-phrase extractor would happily produce nodes like "sonar module", "outside contracts" and "quarterly reef monitoring". Some are useful concepts; many are noise. Co-occurrence edges between "Marlow Dynamics" and "Deepcast" would appear, but with no description saying <em>acquired</em>. Question 1 ("Why did Kestrel Labs start Project Tern?") depends on exactly that relation label, which is why fast indexing hurts local, multi-hop questions more than global ones.</p>
+
+<h3>fast-graphrag, LightRAG and schema-constrained graphs</h3>
+<p><strong>fast-graphrag</strong> (circlemind-ai) is a separate open-source project, not the Microsoft method with a similar name. It still uses an LLM to extract a graph, steered by a domain description, example queries and entity types you supply, but it skips community reports and answers queries with PageRank-based graph exploration, the Personalized PageRank you built in <a href="17-ppr-hipporag.html">Chapter 17</a>. Its README claims a large cost saving over Microsoft GraphRAG on a sample book; that is a vendor benchmark, useful as a direction rather than a number to plan with.</p>
+<p><strong>LightRAG</strong> (<a href="16-lightrag.html">Chapter 16</a>) also drops community reports. Its dual-level retrieval matches keywords against entity and relationship descriptions, so there is no report stage to pay for, and new documents are merged in by taking the union of the new and existing node and edge sets instead of re-clustering. You give up the global sensemaking answers that reports make possible.</p>
+<p>Two 2026 papers push on <em>what</em> goes into the graph rather than how it is built:</p>
+<ul>
+  <li><strong>HCG-RAG</strong> builds schema-constrained causal graphs instead of extracting every entity and relationship. The authors report 3 to 20 times fewer nodes and 8 to 135 times fewer build-time LLM calls than the most LLM-intensive baseline, while matching or beating entity-relation systems on medical and clinical benchmarks. Their summary: what is placed in the graph matters more than how many nodes it has.</li>
+  <li><strong>LiteRAG</strong> attacks query cost. It replaces LLM-controlled retrieval with query-conditioned algorithmic exploration and reasoning-chain context construction. The abstract reports over 100 times lower latency and over 99% lower cost than GraphRAG Global and DRIFT on one benchmark, with ablations crediting query-adaptive thresholding and community-aware hub penalization.</li>
+</ul>
+
+<table>
+  <thead><tr><th>Approach</th><th>LLM at indexing</th><th>LLM at query</th><th>Community reports</th><th>What you give up</th></tr></thead>
+  <tbody>
+    <tr><td>Standard GraphRAG</td><td>Extraction, gleaning, summaries, reports</td><td>1 call (local) to many (global)</td><td>Yes</td><td>Money and indexing time</td></tr>
+    <tr><td>FastGraphRAG (Microsoft)</td><td>Reports only</td><td>Same as standard</td><td>Yes, from raw text units</td><td>Entity descriptions, typed relations; noisier graph</td></tr>
+    <tr><td>LazyGraphRAG</td><td>None</td><td>Query refinement, relevance tests, claim extraction</td><td>No</td><td>A browsable graph; per-query latency</td></tr>
+    <tr><td>LightRAG</td><td>Extraction and profiling</td><td>Keyword extraction, answer</td><td>No</td><td>Corpus-wide sensemaking via reports</td></tr>
+    <tr><td>fast-graphrag</td><td>Guided extraction</td><td>Answer; retrieval via PageRank</td><td>No</td><td>Reports; relies on good domain hints</td></tr>
+    <tr><td>Schema-constrained (HCG-RAG)</td><td>Fewer, targeted calls</td><td>Answer</td><td>Depends on design</td><td>Anything outside the schema</td></tr>
+  </tbody>
+</table>
+
+<h2>Smaller extractor models and distillation</h2>
+<p>The other way to cut extraction cost is to keep the stage and use a cheaper model. Extraction is a narrow, repetitive task with a fixed format and a fixed type list, which is exactly the kind of task where a small model can approach a large one.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Komarov et al., RAGU (2026)</span>
+  <p>RAGU separates extraction from consolidation: two-stage typed extraction, DBSCAN-backed deduplication, LLM summarization and Leiden communities. The authors argue that the skills an in-pipeline LLM needs are language skills that grow only weakly with model size, and train Meno-Lite-0.1, a 7-billion-parameter model that they report outperforms Qwen2.5-32B on knowledge-graph construction. The system runs on a single GPU.</p>
+</div>
+
+<h3>A distillation recipe</h3>
+<ol>
+  <li><strong>Label with a teacher.</strong> Run your best model over a few thousand representative chunks with your production prompt. Keep the raw outputs; you are building a supervised dataset of chunk to records.</li>
+  <li><strong>Clean the labels.</strong> Parse with <code>parse_extraction_output</code>, drop malformed records, normalize types. The student learns your format exactly as the parser wants it.</li>
+  <li><strong>Fine-tune a student.</strong> A 1B to 8B open model with parameter-efficient fine-tuning is typical. Train on the prompt and the teacher's output.</li>
+  <li><strong>Evaluate against gold, not the teacher.</strong> Hand-label a small set of Kestrel-style chunks and measure entity and relationship precision and recall for teacher and student (<a href="25-evaluation.html">Chapter 25</a>). Then run end-to-end question answering on both indexes. A student that loses a few points of relationship recall may lose nothing on your questions, or may lose the one edge question 1 needs.</li>
+  <li><strong>Cascade.</strong> Use the student by default and escalate a chunk to the teacher when parsing fails, when it yields suspiciously few records for its length, or when it contains entity types the student handles poorly.</li>
+</ol>
+<p>Self-hosting changes the cost shape rather than removing it. Instead of paying per token you pay for GPU hours, which rewards batching and high utilization, and makes a one-off 10M-token index cheap while a trickle of small updates may cost more per token than an API.</p>
+
+<h2>Engineering levers: caching, batching, concurrency, rate limits</h2>
+<p>These levers do not change what the pipeline computes. They change how many times you pay for it and how long you wait.</p>
+
+<h3>Response caching with CachedLLM</h3>
+<p>You will re-run indexing many times: after a parser fix, a resolution threshold change, a new community algorithm. None of those change the extraction prompts, so none should pay for extraction again. <code>CachedLLM</code> in <code>minigraphrag/llm.py</code> wraps any LLM and stores each response on disk under the SHA-256 hash of the model name, system prompt, prompt and JSON flag.</p>
+
+<pre data-file="examples/cached_index.py"><code class="language-python">from minigraphrag.llm import CachedLLM, MockLLM, get_llm
+from minigraphrag.indexer import IndexConfig, build_index
+
+# Explicit wrapping: works with any object that has complete(prompt, system=None, json=False).
+llm = CachedLLM(MockLLM(), cache_dir=".cache/llm")
+build_index("data/corpus", "out/run1", llm, config=IndexConfig(max_gleanings=1))
+print(llm.hits, llm.misses)        # 0 122 : a cold cache pays for every call
+
+# Change something downstream of extraction and re-run with a fresh wrapper on the same cache.
+llm = CachedLLM(MockLLM(), cache_dir=".cache/llm")
+build_index("data/corpus", "out/run2", llm, config=IndexConfig(max_gleanings=1, max_cluster_size=6))
+print(llm.hits, llm.misses)        # 122 2 : smaller clusters add 2 communities; only their reports miss
+
+# The factory does the same wrapping from a short name.
+llm = get_llm("openai", cache_dir=".cache/llm")</code></pre>
+
+<p>The first run's 0 hits and 122 misses are what you will see on the Kestrel corpus with <code>MockLLM</code>; an identical second run gives 122 hits and 0 misses. In the second run, smaller clusters split the graph into 6 communities instead of 4: every earlier call hits, and only the 2 new communities' reports are paid for. Three properties make the cache safe:</p>
+<ul>
+  <li><strong>The key is the full input.</strong> Edit a prompt template and every key changes, so stale outputs are never served. The flip side: a one-character prompt edit invalidates the whole cache for that stage.</li>
+  <li><strong>The key includes the model name.</strong> Switching models does not return another model's answers.</li>
+  <li><strong>Determinism.</strong> Use temperature 0 where your provider allows it. A cache over a sampled model is still correct, but it freezes one sample, which can hide how unstable an extraction is.</li>
+</ul>
+<p>Microsoft GraphRAG has the same idea built in: an LLM cache configured in the settings file that <code>graphrag init</code> generates, and a <code>--cache / --no-cache</code> switch on <code>graphrag index</code> and <code>graphrag update</code>.</p>
+
+<h3>Prompt-prefix caching</h3>
+<p>Response caching helps when the whole input repeats. Provider-side prompt caching helps when only the <em>beginning</em> repeats. Many hosted LLM APIs can store the processed state of a long, identical prefix and bill later requests that reuse it at a reduced input rate, often with lower latency; some do this automatically, others need an explicit cache marker. Extraction is a near-perfect fit: a 1,500-token template followed by a 600-token chunk. In the gleaning diagram above, the template is identical across every call for every chunk, and the template plus chunk is identical across the four calls for one chunk.</p>
+<p>To benefit, keep the fixed part first and byte-identical: no timestamps, request ids or shuffled examples in the template, and the chunk text last. Check your provider's minimum cacheable length, cache lifetime and pricing, and model the discount as a lower effective <em>p</em><sub>in</sub> for the cached share of input tokens.</p>
+
+<h3>Batching and concurrency</h3>
+<p>Extraction calls for different chunks are independent, so indexing is embarrassingly parallel up to your rate limits. Three kinds of batching are worth separating:</p>
+<ul>
+  <li><strong>Embedding batches.</strong> Send many texts per embedding request. <code>Embedder.embed</code> already takes a list.</li>
+  <li><strong>Concurrent LLM calls.</strong> Run many independent requests at once. This cuts wall-clock time, not cost.</li>
+  <li><strong>Provider batch APIs.</strong> Several providers accept a file of requests, process it asynchronously within a time window, and bill at a discount. Indexing rarely needs answers in seconds, so this is often the cheapest way to build a large index. Gleaning complicates it, because round two depends on round one: submit one batch per round.</li>
+</ul>
+
+<h3>Rate limits set your floor on indexing time</h3>
+<p>Providers limit requests per minute (RPM) and tokens per minute (TPM). Whichever binds first sets the minimum wall-clock time:</p>
+<p style="text-align:center">time<sub>min</sub> ≈ max(total tokens / TPM, total calls / RPM)</p>
+<p>For the 1M-token worked estimate: 10.58M input plus 1.18M output is 11.76M tokens over 6,200 calls. At a TPM limit of 200,000 that is at least 11,760,000 / 200,000 ≈ 59 minutes, whatever your concurrency; the RPM limit would bind only below about 105 requests per minute (6,200 calls in 59 minutes). Raising concurrency past the point where you hit TPM only produces 429 errors and retries.</p>
+
+<pre data-file="examples/parallel_extract.py"><code class="language-python">import random
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+from minigraphrag.extraction import extract_from_unit
+from minigraphrag.tokens import count_tokens
+
+
+class TokenBucket:
+    """Allow at most `per_minute` tokens per minute, refilled continuously."""
+
+    def __init__(self, per_minute: int):
+        self.capacity = self.level = per_minute
+        self.rate = per_minute / 60.0
+        self.updated = time.monotonic()
+        self.lock = threading.Lock()
+
+    def take(self, n: int) -&gt; None:
+        n = min(n, self.capacity)
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                self.level = min(self.capacity, self.level + (now - self.updated) * self.rate)
+                self.updated = now
+                if self.level &gt;= n:
+                    self.level -= n
+                    return
+                wait = (n - self.level) / self.rate
+            time.sleep(wait)
+
+
+class RateLimitedLLM:
+    """Wrap an LLM: reserve estimated tokens before each call, retry with jittered backoff."""
+
+    def __init__(self, llm, tpm: int, expected_output: int = 400, retries: int = 5):
+        self.llm, self.bucket = llm, TokenBucket(tpm)
+        self.expected_output, self.retries = expected_output, retries
+
+    def complete(self, prompt, system=None, json=False):
+        self.bucket.take(count_tokens((system or "") + prompt) + self.expected_output)
+        for attempt in range(self.retries):
+            try:
+                return self.llm.complete(prompt, system=system, json=json)
+            except Exception:                        # narrow this to your client's rate-limit error
+                if attempt == self.retries - 1:
+                    raise
+                time.sleep(min(60, 2 ** attempt) * random.uniform(0.5, 1.5))
+
+
+def extract_all(llm, units, entity_types, max_gleanings=1, workers=16, tpm=200_000):
+    limited = RateLimitedLLM(llm, tpm)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda u: extract_from_unit(limited, u, entity_types, max_gleanings), units))</code></pre>
+
+<p>Put the rate limiter <em>inside</em> the cache (<code>CachedLLM(RateLimitedLLM(real_llm, tpm))</code>) so cache hits do not consume token budget. Order the rest of <code>build_index</code> the same way: extraction for all chunks in parallel, then resolution and graph building (no LLM), then summaries in parallel, then reports level by level, since a parent report may use its children's reports.</p>
+
+<h3>Embedding cost</h3>
+<p>In the worked estimate, embeddings are 0.03 of 15.33. That matches the finding in The Commercial Tax that embedding is far cheaper than graph construction and answering. Embedding decisions still matter for scale in two other ways: a self-hosted embedder costs nothing per re-index, which matters if you rebuild often; and vector dimensionality drives storage and search memory across entities, relationships, text units and reports (<a href="13-storage-indexing.html">Chapter 13</a>). Do not let embedding price drive the choice; let retrieval quality on your evaluation set drive it.</p>
+
+<h2>Choosing levers without losing quality</h2>
+<p>Every lever in this chapter trades something. The table puts them side by side with the check that tells you whether the trade was acceptable.</p>
+<table>
+  <thead><tr><th>Lever</th><th>Typical saving</th><th>Quality risk</th><th>How to check</th></tr></thead>
+  <tbody>
+    <tr><td>Fewer gleaning rounds</td><td>Large on extraction input tokens</td><td>Lower entity recall, especially late in long chunks</td><td>Entity recall against a gold set (Chapter 25)</td></tr>
+    <tr><td>Larger chunks</td><td>Fewer extraction calls</td><td>Fewer entity references per token</td><td>Same, plus multi-hop answer accuracy</td></tr>
+    <tr><td>Claims off</td><td>One call per chunk</td><td>Weaker temporal and claim-based answers</td><td>Temporal question slice (questions 6 and 7)</td></tr>
+    <tr><td>NLP extraction (FastGraphRAG)</td><td>Most of extraction and summary cost</td><td>Noisy nodes, no relation descriptions</td><td>Local and multi-hop slices; global slice usually holds up better</td></tr>
+    <tr><td>Deferred LLM (LazyGraphRAG)</td><td>Nearly all indexing cost</td><td>Query latency, no browsable graph</td><td>Per-query cost and latency at your target budget</td></tr>
+    <tr><td>Small or distilled extractor</td><td>Per-token price or GPU hours</td><td>Missed or mistyped relations</td><td>Extraction precision and recall, then end-to-end QA</td></tr>
+    <tr><td>Response cache</td><td>All repeated calls</td><td>None if keys include the full input</td><td>Hit rate on re-runs</td></tr>
+    <tr><td>Prompt-prefix cache</td><td>Discount on repeated prefix tokens</td><td>None</td><td>Cached-token counts in provider usage data</td></tr>
+    <tr><td>Query routing</td><td>Avoids global search for most questions</td><td>Misrouted global questions get thin answers</td><td>Router accuracy per question type</td></tr>
+  </tbody>
+</table>
+<div class="callout tip">
+  <span class="callout-title">Always report cost next to quality</span>
+  <p>Put indexing cost, cost per query and p95 latency in the same table as your answer metrics. A method that wins by two points at ten times the cost is a different decision from one that wins at the same cost, and a comparison that hides cost is not a fair comparison.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 26.1 <span class="level">Warm-up</span></h4>
+  <p>By hand, estimate extraction calls and tokens for a 250,000-token corpus with 1,200-token chunks, 200-token overlap and <code>max_gleanings=2</code>. Use the chapter's assumptions (1,500-token template, output 0.4 × chunk, gleaning output half of that, 50-token continue prompt, 40-token loop check with a 1-token answer). Express the extraction cost in terms of <em>p</em><sub>in</sub> and <em>p</em><sub>out</sub>, then evaluate it with the placeholder prices.</p>
+  <details class="hint"><summary>Hint</summary><p>Write out the four calls for one chunk and the transcript length before each, as in the gleaning diagram, then multiply by the number of chunks.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Chunks: ⌈(250,000 − 200) / 1,000⌉ = ⌈249.8⌉ = 250.</p>
+    <p>One chunk: first output 0.4 × 1,200 = 480; each gleaning output 240.</p>
+    <ul>
+      <li>Extract: input 1,500 + 1,200 = 2,700; output 480. Transcript is now 3,180.</li>
+      <li>Continue 1: input 3,180 + 50 = 3,230; output 240. Transcript 3,470.</li>
+      <li>Loop check: input 3,470 + 40 = 3,510; output 1. Transcript 3,511.</li>
+      <li>Continue 2: input 3,511 + 50 = 3,561; output 240. No loop check after the last round.</li>
+    </ul>
+    <p>Per chunk: 4 calls, 2,700 + 3,230 + 3,510 + 3,561 = 13,001 input tokens, 480 + 240 + 1 + 240 = 961 output tokens.</p>
+    <p>Corpus: 1,000 calls, 3,250,250 input tokens, 240,250 output tokens. Cost = 3.25025 · <em>p</em><sub>in</sub> + 0.24025 · <em>p</em><sub>out</sub>. With the placeholders (1.00 and 4.00): 3.25 + 0.96 = 4.21. <code>estimate_index_cost(250_000, 1200, 200, 2)</code> returns the same 4.21 for extraction. The calls are an upper bound: if the model answers N at the loop check, the fourth call never happens and per-chunk input drops to 2,700 + 3,230 + 3,510 = 9,440.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 26.2 <span class="level">Core</span></h4>
+  <p>A product team wants global search answers within 15 seconds. The index has 300 reports at the chosen level averaging 600 tokens, map batches hold 4,000 tokens of reports, p95 map latency is 4 s and reduce latency is 10 s. Your provider allows 16 concurrent requests and a TPM of 150,000. (a) What is the latency at concurrency 16? (b) Is concurrency alone enough to meet the budget? (c) Propose two changes that would, and estimate their effect.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>(a)</strong> Map calls: ⌈300 × 600 / 4,000⌉ = ⌈45⌉ = 45. Waves at concurrency 16: ⌈45/16⌉ = 3. Latency ≈ 3 × 4 + 10 = 22 s.</p>
+    <p><strong>(b)</strong> To reach 15 s the map stage must fit in 5 s, which means one wave: concurrency 45. Each map call reads about 4,000 + 400 = 4,400 tokens, so one wave is about 198,000 input tokens in a few seconds. That exceeds the TPM limit of 150,000 before counting outputs, and the provider allows only 16 concurrent requests. Concurrency alone cannot do it.</p>
+    <p><strong>(c)</strong> Options, with estimates:</p>
+    <ul>
+      <li><strong>Search one level up.</strong> If the parent level has 60 reports of 800 tokens: ⌈48,000 / 4,000⌉ = 12 map calls, one wave at concurrency 16, about 12 × 4,400 = 52,800 tokens. Latency ≈ 4 + 10 = 14 s. Specific questions lose detail.</li>
+      <li><strong>Dynamic community selection.</strong> If rating prunes to 40 relevant reports, map calls drop to ⌈24,000 / 4,000⌉ = 6, but the rating phase adds sequential levels of rating calls; with a fast small rater and parallel rating within a level it can fit, but measure it.</li>
+      <li><strong>Stream the reduce.</strong> Does not change the 22 s total, but first tokens arrive after about 12 s, which may satisfy the real requirement if it is about perceived responsiveness.</li>
+      <li><strong>Route and precompute.</strong> Send non-global questions to local search (one call, a few seconds), and precompute answers to the handful of recurring global questions ("What are the main themes?") at indexing time.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 26.3 <span class="level">Core</span></h4>
+  <p>Write a wrapper that counts LLM calls and input tokens <em>per task</em> (extraction, continue, loop check, claims, summarize, report) and run <code>build_index</code> on the Kestrel corpus with <code>MockLLM</code> for <code>max_gleanings</code> of 0, 1 and 2. Then run it twice through a <code>CachedLLM</code> sharing one cache directory. Explain every difference in the counts.</p>
+  <details class="hint"><summary>Hint</summary><p><code>minigraphrag.prompts.MARKERS</code> maps each task name to a phrase found in its prompt, in an order that checks gleaning prompts before the extraction prompt they contain.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import collections, tempfile
+from minigraphrag import prompts as P
+from minigraphrag.indexer import IndexConfig, build_index
+from minigraphrag.llm import CachedLLM, MockLLM
+from minigraphrag.tokens import count_tokens
+
+class TaskCounter:
+    def __init__(self, llm):
+        self.llm = llm
+        self.calls, self.tokens = collections.Counter(), collections.Counter()
+
+    def complete(self, prompt, system=None, json=False):
+        full = f"{system or ''}\n{prompt}"
+        task = next((t for t, marker in P.MARKERS.items() if marker in full), "other")
+        self.calls[task] += 1
+        self.tokens[task] += count_tokens(full)
+        return self.llm.complete(prompt, system=system, json=json)
+
+for g in (0, 1, 2):
+    llm = TaskCounter(MockLLM())
+    index = build_index("data/corpus", tempfile.mkdtemp(), llm, config=IndexConfig(max_gleanings=g))
+    print(g, dict(llm.calls), sum(llm.calls.values()),
+          index.graph.number_of_nodes(), index.graph.number_of_edges())
+
+cache = tempfile.mkdtemp()
+for run in (1, 2):
+    llm = CachedLLM(MockLLM(), cache)
+    build_index("data/corpus", tempfile.mkdtemp(), llm)
+    print("run", run, "hits", llm.hits, "misses", llm.misses)</code></pre>
+    <p>Output on the current corpus and <code>MockLLM</code>:</p>
+    <table>
+      <thead><tr><th>max_gleanings</th><th>extraction</th><th>continue</th><th>loop_check</th><th>claims</th><th>summarize</th><th>report</th><th>total</th><th>nodes / edges</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>24</td><td>0</td><td>0</td><td>24</td><td>32</td><td>4</td><td>84</td><td>17 / 33</td></tr>
+        <tr><td>1</td><td>24</td><td>24</td><td>0</td><td>24</td><td>46</td><td>4</td><td>122</td><td>17 / 54</td></tr>
+        <tr><td>2</td><td>24</td><td>24</td><td>24</td><td>24</td><td>46</td><td>4</td><td>146</td><td>17 / 54</td></tr>
+      </tbody>
+    </table>
+    <p>Explanations. There are 24 text units, so extraction and claims are 24 each at every setting. One gleaning round adds one continue call per chunk. <code>MockLLM</code> deliberately omits weak relationships on the first pass and adds them when asked to continue, so edges rise from 33 to 54, and more edges now have several descriptions, which raises summarize calls from 32 to 46. With two rounds, the loop check runs after round one; <code>MockLLM</code> has nothing left to add and answers N, so the second continue call never happens: 24 extra loop checks, no extra continues, and an identical graph. That is the upper bound of 2g calls per chunk not being reached. The cached runs print 0 hits and 122 misses, then 122 hits and 0 misses: identical prompts produce identical keys. Token counts depend on whether <code>tiktoken</code> is installed, since <code>count_tokens</code> falls back to an estimate of 4 tokens per 3 words.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 26.4 <span class="level">Core</span></h4>
+  <p>Choose an indexing strategy (standard GraphRAG, FastGraphRAG-style, LazyGraphRAG-style, or LightRAG-style) for each workload and justify it in terms of cost shape and question types. (a) An analyst team asks a few dozen open-ended questions a month over 20M tokens of news. (b) A support bot answers thousands of specific questions a day about 300K tokens of product docs that change weekly. (c) A due-diligence tool must show a browsable, cited graph of companies, people and deals, like the Kestrel graph, for a fixed 2M-token data room.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>(a) LazyGraphRAG-style, or FastGraphRAG with global search.</strong> Standard indexing of 20M tokens is about 20 times the worked estimate, and almost all of it would summarize articles nobody asks about. Few queries a month means a higher per-query spend is fine. If you need reusable community reports for recurring themes, FastGraphRAG keeps those at the cost of a noisier graph, which matters less for sensemaking questions.</p>
+    <p><strong>(b) LightRAG-style or standard local search with incremental updates.</strong> The corpus is small, so indexing cost is modest; the problem is query volume and churn. Global map-reduce per query is far too expensive at thousands a day. Specific questions suit entity- and keyword-anchored retrieval at one or two calls per query, and incremental merging (Chapter 27) avoids weekly full rebuilds.</p>
+    <p><strong>(c) Standard GraphRAG, possibly with a schema.</strong> The graph itself is the product: typed relations like ACQUIRED and BOARD_MEMBER_OF, descriptions and provenance must be good enough to show to a person. The corpus is fixed, so indexing is paid once. A schema-constrained extractor in the spirit of HCG-RAG could cut calls and noise, since the entity and relation types are known in advance.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 26.5 <span class="level">Stretch</span></h4>
+  <p>Extend the estimator with provider-side prompt caching. Assume the cached share of an input is billed at a fraction <em>d</em> of the normal input price, that only the extraction template is cached for the first call of each chunk, and that the template plus chunk plus all earlier transcript is cached for later calls of the same chunk. Compute the extraction cost for the 1M-token worked estimate with one gleaning round and <em>d</em> = 0.1, using the placeholder prices.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Per chunk with one gleaning round there are two calls.</p>
+    <ul>
+      <li>Call 1: 2,100 input tokens, of which the 1,500-token template is cached and 600 are not. Effective input tokens: 1,500 × 0.1 + 600 = 750.</li>
+      <li>Call 2: 2,390 input tokens. The previous call's full input (2,100) is a cached prefix; the model output (240) and continue prompt (50) are new. Effective: 2,100 × 0.1 + 290 = 500.</li>
+    </ul>
+    <p>Effective input per chunk: 1,250 instead of 4,490. Across 2,000 chunks: 2.5M effective input tokens. Output is unchanged at 0.72M. Extraction cost: 2.5 × 1.00 + 0.72 × 4.00 = 2.50 + 2.88 = 5.38, down from 11.86. Output tokens now dominate the stage, so the next lever is output length: terser descriptions or fewer gleaning records.</p>
+    <pre><code class="language-python">def extraction_cost_with_prefix_cache(chunk_size, max_gleanings, prices, a, discount=0.1):
+    first = a.output_ratio * chunk_size
+    transcript = a.extraction_prompt_tokens + chunk_size
+    effective = a.extraction_prompt_tokens * discount + chunk_size
+    output = first
+    cached_prefix = transcript          # the whole first input is now cached
+    transcript += first
+    for i in range(max_gleanings):
+        transcript += a.continue_prompt_tokens
+        effective += cached_prefix * discount + (transcript - cached_prefix)
+        cached_prefix = transcript
+        more = a.gleaning_output_ratio * first
+        output += more
+        transcript += more
+        if i == max_gleanings - 1:
+            break
+        effective += cached_prefix * discount + (transcript - cached_prefix) + a.loop_check_prompt_tokens
+        cached_prefix = transcript + a.loop_check_prompt_tokens
+        output += 1
+        transcript += a.loop_check_prompt_tokens + 1
+    return (effective * prices.input_per_m + output * prices.output_per_m) / 1e6
+
+# extraction_cost_with_prefix_cache(600, 1, Prices(), Assumptions()) * 2000  -&gt; 5.38</code></pre>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Under typical settings, which indexing stage accounts for most of a standard GraphRAG index's LLM cost?</p>
+  <ol>
+    <li>Community report generation</li>
+    <li>Embedding text units and descriptions</li>
+    <li data-correct>Entity and relationship extraction, including gleaning</li>
+    <li>Description summarization</li>
+  </ol>
+  <div class="explain">Extraction runs over every chunk, and gleaning re-sends the transcript. The GraphRAG docs put graph extraction at roughly 75% of indexing cost, and the worked estimate gives 77%. Embeddings are under 1%.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does going from one to two gleaning rounds more than double the extraction input tokens?</p>
+  <ol>
+    <li>The second round uses a longer prompt template</li>
+    <li>Each round re-chunks the document with more overlap</li>
+    <li>Output tokens are counted twice</li>
+    <li data-correct>Later calls re-send the template, chunk and all earlier outputs, and a loop-check call is added between rounds</li>
+  </ol>
+  <div class="explain">With two rounds a chunk makes four calls whose inputs grow as the transcript grows: 2,100, 2,390, 2,550 and 2,601 tokens in the worked example, against 4,490 total for one round.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What does LazyGraphRAG do at indexing time?</p>
+  <ol>
+    <li data-correct>Extracts noun phrases and co-occurrences with NLP and builds a concept graph with hierarchical communities, without calling an LLM</li>
+    <li>Extracts entities with a small LLM and defers only community reports</li>
+    <li>Nothing: it builds the whole graph from scratch for each query</li>
+    <li>Writes community reports but skips entity extraction</li>
+  </ol>
+  <div class="explain">LazyGraphRAG defers all LLM use to query time. Its index uses NLP noun-phrase extraction and graph statistics, so indexing costs about what vector RAG costs.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In Microsoft GraphRAG's FastGraphRAG method, where is the LLM still used during indexing?</p>
+  <ol>
+    <li>Entity extraction only</li>
+    <li>Relationship descriptions only</li>
+    <li data-correct>Community report generation</li>
+    <li>Nowhere; the LLM is only used at query time</li>
+  </ol>
+  <div class="explain">FastGraphRAG uses NLP noun phrases as entities and text-unit co-occurrence as relationships, and keeps the LLM for community reports, written from the text units containing each entity. No LLM at indexing at all describes LazyGraphRAG.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You raise indexing concurrency from 32 to 128 workers and the run gets no faster, with many 429 errors. What is the most likely cause?</p>
+  <ol>
+    <li>The response cache is full</li>
+    <li>Python threads cannot run LLM calls concurrently</li>
+    <li>Gleaning makes calls depend on each other across chunks</li>
+    <li data-correct>The provider's tokens-per-minute limit was already binding, so extra workers only trigger rate-limit errors and retries</li>
+  </ol>
+  <div class="explain">Minimum wall-clock time is total tokens divided by TPM, whatever the concurrency. Threads are fine for I/O-bound API calls, and gleaning dependencies exist only within a chunk.</div>
+</div>
+
+<div class="quiz">
+  <p class="q"><code>CachedLLM</code> keys responses by a hash of model name, system prompt, prompt and JSON flag. You fix a typo in the community report prompt and re-index. What happens?</p>
+  <ol>
+    <li>All calls hit the cache, so the fix has no effect until you clear it</li>
+    <li data-correct>Extraction, claims and summary calls hit the cache; report calls miss and are re-run with the new prompt</li>
+    <li>Every call misses, because any prompt change invalidates the whole cache</li>
+    <li>Report calls hit the cache because the community contents did not change</li>
+  </ol>
+  <div class="explain">Only prompts whose text changed get new keys. That makes the cache both safe (no stale reports) and cheap (no repeated extraction).</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I use the cheapest model for every stage?</summary>
+  <div><p>Stages have different failure costs. A weak extractor silently drops relations, and nothing downstream can recover an edge that was never extracted. A weak summarizer produces blander descriptions, which mostly hurts ranking. A weak report writer affects global answers directly. A common split is a mid-size or distilled model for extraction, a small model for summaries and relevance rating, and a stronger model for reports and final answers. Decide per stage with the stage metrics from Chapter 25.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Are the placeholder prices in this chapter realistic?</summary>
+  <div><p>They are chosen to make arithmetic easy and to reflect that output tokens usually cost several times more than input tokens. Real prices differ across providers and models and change often, so the estimator takes them as parameters. Plug in your provider's current numbers and your measured token counts from a small sample run.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I get real token counts instead of assumptions?</summary>
+  <div><p>Index a random 1% to 5% sample of the corpus with a counting wrapper like the one in Exercise 26.3, and read the usage fields your provider returns for each call. Fit the assumptions (output ratio, summaries and reports per thousand tokens) from the sample, then extrapolate. Summaries and reports grow a little slower than linearly as mentions of the same entities repeat, so a linear extrapolation is slightly pessimistic.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does GraphRAG scale to 100M tokens?</summary>
+  <div><p>Indexing does, if you can pay for it and wait: cost and time grow roughly linearly and parallelize well. The harder limits are elsewhere. Static global search grows with the number of reports, so it needs dynamic selection, a coarser level or a lazy approach. Community detection on a graph with millions of nodes is fast, but the report stage above it is not. And a full rebuild becomes impractical, which is why incremental updates (Chapter 27) stop being optional.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is a lazy approach always better than building the full graph up front?</summary>
+  <div><p>No. Deferring work is best when queries are few and touch a small part of the corpus. When many users ask overlapping questions, you pay the deferred work again and again, and precomputed summaries amortize better. Lazy indexing also gives you no graph to inspect, visualize, curate or query with Cypher. Compare total cost over the index's expected lifetime: indexing cost plus queries per day times cost per query times days.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a cost report for your index</h3>
+  <p>Produce the document you would want before approving a GraphRAG build: what it will cost, how long it will take, and which settings buy what.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>minigraphrag/cost.py</code> with <code>estimate_index_cost</code> and a query-cost function, prices passed as parameters, with unit tests for chunk and call counts</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A sample run on the Kestrel corpus (or 5% of your own) with a per-task counting wrapper, and the assumptions refitted from measured tokens</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A table of estimated cost and minimum indexing time (from your TPM limit) for your full corpus at <code>max_gleanings</code> 0, 1 and 2 and two chunk sizes</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Measured cost per query and p95 latency for basic, local, global and DRIFT search on the canonical questions</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>CachedLLM</code> plus rate-limited, concurrent extraction run, with cache hit rate on a second run after changing a downstream setting</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>One cost reduction you applied, with its effect on an answer-quality metric from Chapter 25</span></li>
+  </ul>
+  <p><strong>Done when</strong> your estimate for the sample run is within 25% of the measured cost, and you can state what the cheapest acceptable configuration costs and what quality it gives up.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Extraction dominates indexing cost; gleaning and small chunks multiply it, and embeddings barely register.</li>
+    <li>Write the cost model down with explicit assumptions and prices as parameters, then calibrate it on a sample run.</li>
+    <li>Query cost ranges from one call (local, basic) to dozens (static global search); route queries and bound global search with levels, dynamic selection or deferred approaches.</li>
+    <li>LazyGraphRAG defers all LLM use to query time; FastGraphRAG keeps the LLM only for reports; LightRAG and fast-graphrag skip reports. Each gives up something specific.</li>
+    <li>Small or distilled extractors can be good enough, but prove it with extraction metrics and end-to-end answers, and cascade hard chunks to a stronger model.</li>
+    <li>Cache responses by full-input hash, keep prompt prefixes stable for provider caching, and let TPM limits, not worker counts, set your concurrency.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Edge, Trinh and Larson. <a href="https://www.microsoft.com/en-us/research/blog/lazygraphrag-setting-a-new-standard-for-quality-and-cost/">LazyGraphRAG: Setting a new standard for quality and cost</a>. <span class="venue">Microsoft Research blog, November 2024</span></li>
+  <li>Microsoft. <a href="https://microsoft.github.io/graphrag/index/methods/">GraphRAG indexing methods: Standard GraphRAG and FastGraphRAG</a>. <span class="venue">GraphRAG documentation</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>. <span class="venue">GitHub</span></li>
+  <li>Circlemind. <a href="https://github.com/circlemind-ai/fast-graphrag">fast-graphrag</a>. <span class="venue">GitHub</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>Sanchez and Dehnad. <a href="https://arxiv.org/abs/2608.16096">The Commercial Tax: Rent-vs-Own Blind Spots in Multi-Hop Retrieval Benchmarks</a>. <span class="venue">arXiv 2608.16096, 2026</span></li>
+  <li>Coll Tejeda, García López and Barcelona-Pons. <a href="https://arxiv.org/abs/2609.10239">LiteRAG: Cost-Efficient Graph-Based Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2609.10239, 2026</span></li>
+  <li>Saouda et al. <a href="https://arxiv.org/abs/2607.22592">Structure Over Scale: Schema-Constrained Causal Graphs for RAG</a>. <span class="venue">arXiv 2607.22592, 2026</span></li>
+  <li>Komarov et al. <a href="https://arxiv.org/abs/2607.11683">RAGU: A Multi-Step GraphRAG Engine with a Compact Domain-Adapted LLM</a>. <span class="venue">arXiv 2607.11683, 2026</span></li>
+  <li>Guo et al. and HKUDS. <a href="https://github.com/HKUDS/LightRAG">LightRAG repository</a>. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch26-cost", function (el, cfg, api) {
+  const d = Object.assign({corpusExp: 60, chunk: 600, overlap: 100, gleanings: 1, priceIn: 1, priceOut: 4, priceEmbed: 0.02, cache: 0}, cfg.defaults || {});
+  const A = Object.assign({promptTokens: 1500, continueTokens: 50, loopCheckTokens: 40, outputRatio: 0.4, gleaningRatio: 0.5,
+    summariesPer1k: 2, summaryIn: 500, summaryOut: 150, reportsPer1k: 0.2, reportIn: 3000, reportOut: 800}, cfg.assumptions || {});
+  const { stage } = api.frame(el, cfg);
+  const stats = api.h("div", { class: "viz-grid" }, stage);
+  stats.style.gridTemplateColumns = "repeat(auto-fit, minmax(120px, 1fr))";
+  const statEls = {};
+  [["chunks", "Text units"], ["calls", "LLM calls"], ["input", "Input tokens"], ["output", "Output tokens"], ["cost", "Estimated cost"]].forEach(function (p) {
+    const box = api.h("div", {}, stats);
+    box.style.cssText = "border:1px solid var(--rule);border-radius:6px;padding:8px 10px;background:var(--paper)";
+    api.h("div", { class: "viz-sub" }, box, p[1]);
+    const v = api.h("div", {}, box, "0");
+    v.style.cssText = "font-size:1.2rem;font-weight:650;font-variant-numeric:tabular-nums";
+    statEls[p[0]] = v;
+  });
+  const barWrap = api.h("div", {}, stage);
+  barWrap.style.cssText = "display:flex;height:30px;margin:4px 14px 8px;border-radius:6px;overflow:hidden;border:1px solid var(--rule)";
+  const table = api.h("div", {}, stage);
+  table.style.cssText = "padding:0 14px 12px;overflow-x:auto";
+
+  const bar = api.controls(el);
+  function slider(label, min, max, step, value, fmt) {
+    const L = api.h("label", {}, bar, label + " ");
+    const s = api.h("input", { type: "range", min: min, max: max, step: step, value: value, "aria-label": label }, L);
+    const out = api.h("span", { class: "stepno" }, L);
+    s._fmt = fmt; s._out = out;
+    s.addEventListener("input", render);
+    return s;
+  }
+  const sCorpus = slider("Corpus", 47, 73, 1, d.corpusExp, function (v) { return big(Math.pow(10, v / 10)); });
+  const sChunk = slider("Chunk", 200, 2400, 100, d.chunk, function (v) { return v + " tok"; });
+  const sGlean = slider("Gleanings", 0, 3, 1, d.gleanings, function (v) { return String(v); });
+  const sIn = slider("Input price", 0.1, 15, 0.1, d.priceIn, function (v) { return (+v).toFixed(1) + "/1M"; });
+  const sOut = slider("Output price", 0.1, 60, 0.1, d.priceOut, function (v) { return (+v).toFixed(1) + "/1M"; });
+  const sCache = slider("Cache hits", 0, 90, 10, d.cache, function (v) { return v + "%"; });
+  const ML = api.h("label", {}, bar, "Extraction ");
+  const method = api.h("select", { "aria-label": "Extraction method" }, ML);
+  api.h("option", { value: "llm" }, method, "LLM (standard)");
+  api.h("option", { value: "nlp" }, method, "NLP (fast)");
+  method.addEventListener("change", render);
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+
+  function big(x) {
+    if (x >= 1e6) return (x / 1e6).toFixed(x >= 1e7 ? 1 : 2).replace(/\.?0+$/, "") + "M";
+    if (x >= 1e3) return Math.round(x / 1e3) + "K";
+    return String(Math.round(x));
+  }
+  function extractionPerChunk(c, g) {
+    const first = A.outputRatio * c;
+    let t = A.promptTokens + c;
+    const s = { calls: 1, input: t, output: first };
+    t += first;
+    for (let i = 0; i < g; i++) {
+      t += A.continueTokens;
+      const more = A.gleaningRatio * first;
+      s.calls += 1; s.input += t; s.output += more; t += more;
+      if (i === g - 1) break;
+      s.calls += 1; s.input += t + A.loopCheckTokens; s.output += 1; t += A.loopCheckTokens + 1;
+    }
+    return s;
+  }
+  function render() {
+    [sCorpus, sChunk, sGlean, sIn, sOut, sCache].forEach(function (s) { s._out.textContent = s._fmt(+s.value); });
+    const T = Math.round(Math.pow(10, +sCorpus.value / 10));
+    const c = +sChunk.value, o = Math.min(d.overlap, c - 50), g = +sGlean.value;
+    const pin = +sIn.value, pout = +sOut.value, miss = 1 - (+sCache.value) / 100;
+    const nlp = method.value === "nlp";
+    const n = Math.max(1, Math.ceil((T - o) / (c - o)));
+    const k = T / 1000;
+    const per = extractionPerChunk(c, g);
+    const ns = Math.round(k * A.summariesPer1k), nr = Math.round(k * A.reportsPer1k);
+    const stages = [
+      { label: "Extraction", calls: nlp ? 0 : n * per.calls, input: nlp ? 0 : n * per.input, output: nlp ? 0 : n * per.output },
+      { label: "Summaries", calls: nlp ? 0 : ns, input: nlp ? 0 : ns * A.summaryIn, output: nlp ? 0 : ns * A.summaryOut },
+      { label: "Reports", calls: nr, input: nr * A.reportIn, output: nr * A.reportOut }
+    ];
+    let calls = 0, inp = 0, outp = 0, cost = 0;
+    stages.forEach(function (s) {
+      s.calls *= miss; s.input *= miss; s.output *= miss;
+      s.cost = (s.input * pin + s.output * pout) / 1e6;
+      calls += s.calls; inp += s.input; outp += s.output; cost += s.cost;
+    });
+    const embedTokens = n * c + (nlp ? 0 : ns * A.summaryOut) + nr * A.reportOut;
+    const embedCost = embedTokens * d.priceEmbed / 1e6;
+    stages.push({ label: "Embeddings", calls: 0, input: embedTokens, output: 0, cost: embedCost });
+    cost += embedCost;
+    statEls.chunks.textContent = n.toLocaleString();
+    statEls.calls.textContent = Math.round(calls).toLocaleString();
+    statEls.input.textContent = big(inp);
+    statEls.output.textContent = big(outp);
+    statEls.cost.textContent = cost.toFixed(2);
+    barWrap.innerHTML = "";
+    stages.forEach(function (s, i) {
+      const share = cost > 0 ? s.cost / cost : 0;
+      const seg = api.h("div", {}, barWrap);
+      seg.style.cssText = "width:" + (share * 100) + "%;background:color-mix(in srgb," + api.groupColor(i + 1) + " 55%, var(--panel));display:flex;align-items:center;justify-content:center;font-size:.75rem;overflow:hidden;white-space:nowrap;transition:width .2s;color:var(--ink)";
+      seg.textContent = share > 0.12 ? s.label + " " + Math.round(share * 100) + "%" : "";
+      seg.title = s.label;
+    });
+    let rows = '<table style="margin:0;font-size:.82rem"><thead><tr><th>Stage</th><th>Calls</th><th>Input</th><th>Output</th><th>Cost</th><th>Share</th></tr></thead><tbody>';
+    stages.forEach(function (s, i) {
+      rows += '<tr><td><i style="display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;background:' + api.groupColor(i + 1) + '"></i>' + s.label +
+        "</td><td>" + (s.label === "Embeddings" ? "n/a" : Math.round(s.calls).toLocaleString()) + "</td><td>" + big(s.input) + "</td><td>" + (s.label === "Embeddings" ? "n/a" : big(s.output)) +
+        "</td><td>" + s.cost.toFixed(2) + "</td><td>" + (cost > 0 ? Math.round(100 * s.cost / cost) : 0) + "%</td></tr>";
+    });
+    table.innerHTML = rows + "</tbody></table>";
+    const top = stages.slice().sort(function (a, b) { return b.cost - a.cost; })[0];
+    let msg = "<strong>" + top.label + "</strong> is the largest cost here (" + Math.round(100 * top.cost / (cost || 1)) + "%). ";
+    if (!nlp && g > 0) msg += "Each chunk makes up to " + per.calls + " extraction calls reading " + Math.round(per.input).toLocaleString() + " input tokens in total, versus " + (A.promptTokens + c).toLocaleString() + " with no gleaning. ";
+    if (nlp) msg += "With NLP extraction only community reports and embeddings remain; reports scale with content, not chunk size. ";
+    if (miss < 1) msg += "A " + sCache.value + "% cache hit rate scales every LLM stage by " + miss.toFixed(1) + ". ";
+    msg += "Overlap is fixed at " + o + " tokens; prices are per million tokens in any currency unit.";
+    cap.innerHTML = msg;
+  }
+  render();
+});
+</script>
+</body>
+</html>

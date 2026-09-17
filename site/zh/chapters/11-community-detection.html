@@ -1,0 +1,911 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Community detection: Louvain and Leiden | Graph RAG from Scratch</title>
+<meta name="description" content="Compute modularity by hand, implement Louvain from scratch, see why Leiden's refinement step guarantees connected communities, and build the hierarchical partition GraphRAG summarizes.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/11-community-detection.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/11-community-detection.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/11-community-detection.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="11-community-detection" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Community detection: Louvain and Leiden</h1>
+  <p class="lede">Global questions like “what are the main themes in this corpus?” have no single chunk that answers them. GraphRAG's answer is to split the entity graph into communities and summarize each one. In this chapter you compute modularity by hand, implement Louvain from scratch, and learn why GraphRAG uses hierarchical Leiden instead.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain why communities are the unit of summarization for global questions and why a hierarchy helps</li>
+      <li>Compute modularity Q and the modularity gain ΔQ of moving a node, by hand and in code</li>
+      <li>Implement Louvain's local-moving and aggregation phases and trace them on the Kestrel graph</li>
+      <li>Use the resolution parameter deliberately and recognize the resolution limit</li>
+      <li>Explain Louvain's badly connected communities and how Leiden's refinement phase fixes them</li>
+      <li>Build a hierarchical partition with a maximum cluster size, control randomness with seeds, and evaluate the result</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why communities</h2>
+<p>By now the Kestrel corpus is a resolved graph (<a href="09-entity-resolution.html">Chapter 9</a>) of 17 core entities and their relationships. Local search (<a href="14-local-search.html">Chapter 14</a>) will answer “What connects Priya Nair to Deepcast?” by starting at those two nodes and walking outwards. But canonical question 4, <em>“What are the main themes in this corpus?”</em>, has no starting node. Vector RAG fails at it too: the top-k chunks for “main themes” are whichever chunks happen to use theme-like words (<a href="03-where-rag-breaks.html">Chapter 3</a>).</p>
+<p>The GraphRAG paper's idea is to precompute answers to “what is going on in this part of the corpus?” before anyone asks. To do that, it needs parts. A <strong>community</strong> is a set of nodes that are more densely connected to each other than to the rest of the graph. In Kestrel you can almost see them: the reef science cluster around Project Sentinel, Tidewater Institute and Halden Reef; the supply-chain cluster of Marlow Dynamics, Deepcast and Project Tern; the funding pair Brightwater Capital and Lena Park; the regulation cluster of the Ocean Health Act, the city council and Port Avalon.</p>
+<p>Communities serve three purposes in GraphRAG:</p>
+<ul>
+  <li><strong>Summarization units.</strong> Each community gets an LLM-written report (<a href="12-community-reports.html">Chapter 12</a>). A community is small enough for its entities and relationships to fit in a prompt, and coherent enough that the report has a topic.</li>
+  <li><strong>Global search.</strong> Global search (<a href="15-global-search.html">Chapter 15</a>) maps the question over community reports and reduces the partial answers. The themes in question 4 are, roughly, the communities.</li>
+  <li><strong>A hierarchy of zoom levels.</strong> Big communities are split into sub-communities. Coarse levels give broad themes (“Kestrel's business”), fine levels give specific ones (“the Deepcast supply shock”), and a query can pick the level that fits.</li>
+</ul>
+<p>Community detection is unsupervised: nobody labels the themes. So you need an objective that says what a good partition is. The one GraphRAG uses is modularity.</p>
+
+<h2>Modularity</h2>
+<p>A partition puts every node in exactly one community. A good partition has many edges inside communities and few between them. “Many” needs a baseline, because a community of hubs will have internal edges by chance. <strong>Modularity</strong> (Newman and Girvan, 2004) compares the fraction of edge weight inside communities with the fraction you would expect if edges were rewired at random while keeping every node's degree.</p>
+
+<h3>The formula</h3>
+<p>Let <em>m</em> be the total edge weight, <em>A<sub>ij</sub></em> the weight between nodes <em>i</em> and <em>j</em>, <em>k<sub>i</sub></em> the (weighted) degree of <em>i</em>, and <em>c<sub>i</sub></em> its community. Then</p>
+<p style="text-align:center">Q = (1 / 2<em>m</em>) Σ<sub><em>i</em>,<em>j</em></sub> [ <em>A<sub>ij</sub></em> − γ · <em>k<sub>i</sub> k<sub>j</sub></em> / 2<em>m</em> ] · δ(<em>c<sub>i</sub></em>, <em>c<sub>j</sub></em>)</p>
+<p>The term <em>k<sub>i</sub> k<sub>j</sub></em>/2<em>m</em> is the expected weight between <em>i</em> and <em>j</em> in a random graph with the same degrees; δ is 1 when both nodes share a community. γ is the <strong>resolution</strong>, 1 in the original definition. Summing over pairs inside each community gives the form you will actually compute:</p>
+<p style="text-align:center">Q = Σ<sub><em>c</em></sub> [ <em>L<sub>c</sub></em> / <em>m</em> − γ · ( <em>d<sub>c</sub></em> / 2<em>m</em> )² ]</p>
+<p>where <em>L<sub>c</sub></em> is the edge weight inside community <em>c</em> and <em>d<sub>c</sub></em> is the sum of degrees of its nodes. The first term is “share of edges inside <em>c</em>”; the second is “share you would expect inside <em>c</em> by chance”. Q is always less than 1; it is 0 when everything is in one community, negative when communities have fewer internal edges than chance, and values above roughly 0.3 usually indicate real structure.</p>
+
+<h3>A fully worked example</h3>
+<p>Take six Kestrel entities and seven unweighted edges: a funding triangle (Kestrel Labs, Brightwater Capital, Lena Park), a reef triangle (Project Sentinel, Halden Reef, the bleaching event), and the bridge “Kestrel Labs runs Project Sentinel”.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="mod-title">
+      <title id="mod-title">Two triangles joined by one bridge edge, with modularity computed for three partitions</title>
+      <ellipse class="d-area" cx="115" cy="150" rx="105" ry="120"/>
+      <ellipse class="d-area" cx="365" cy="150" rx="105" ry="120"/>
+      <line class="d-line" x1="80" y1="70" x2="160" y2="150"/>
+      <line class="d-line" x1="80" y1="70" x2="80" y2="230"/>
+      <line class="d-line" x1="80" y1="230" x2="160" y2="150"/>
+      <line class="d-line hot" x1="160" y1="150" x2="320" y2="150"/>
+      <line class="d-line" x1="320" y1="150" x2="400" y2="70"/>
+      <line class="d-line" x1="320" y1="150" x2="400" y2="230"/>
+      <line class="d-line" x1="400" y1="70" x2="400" y2="230"/>
+      <circle class="d-node" cx="160" cy="150" r="16"/>
+      <circle class="d-node" cx="80" cy="70" r="16"/>
+      <circle class="d-node" cx="80" cy="230" r="16"/>
+      <circle class="d-node alt" cx="320" cy="150" r="16"/>
+      <circle class="d-node alt" cx="400" cy="70" r="16"/>
+      <circle class="d-node alt" cx="400" cy="230" r="16"/>
+      <text class="d-text bold" x="160" y="155" text-anchor="middle">K</text>
+      <text class="d-text bold" x="80" y="75" text-anchor="middle">B</text>
+      <text class="d-text bold" x="80" y="235" text-anchor="middle">P</text>
+      <text class="d-text bold" x="320" y="155" text-anchor="middle">S</text>
+      <text class="d-text bold" x="400" y="75" text-anchor="middle">H</text>
+      <text class="d-text bold" x="400" y="235" text-anchor="middle">E</text>
+      <text class="d-text small" x="160" y="186" text-anchor="middle">k = 3</text>
+      <text class="d-text small" x="80" y="42" text-anchor="middle">k = 2</text>
+      <text class="d-text small" x="80" y="266" text-anchor="middle">k = 2</text>
+      <text class="d-text small" x="320" y="186" text-anchor="middle">k = 3</text>
+      <text class="d-text small" x="400" y="42" text-anchor="middle">k = 2</text>
+      <text class="d-text small" x="400" y="266" text-anchor="middle">k = 2</text>
+      <text class="d-text small" x="240" y="140" text-anchor="middle">runs</text>
+      <text class="d-text bold" x="490" y="40">m = 7, 2m = 14</text>
+      <text class="d-text small" x="490" y="64">Two triangles:</text>
+      <text class="d-text mono" x="490" y="82">2 × (3/7 − (7/14)²)</text>
+      <text class="d-text mono" x="490" y="100">= 2 × 0.1786 = 0.357</text>
+      <text class="d-text small" x="490" y="132">Everything together:</text>
+      <text class="d-text mono" x="490" y="150">7/7 − (14/14)² = 0</text>
+      <text class="d-text small" x="490" y="182">All singletons:</text>
+      <text class="d-text mono" x="490" y="200">−(9+4+4+9+4+4)/196</text>
+      <text class="d-text mono" x="490" y="218">= −0.173</text>
+      <text class="d-text small" x="490" y="250">K = Kestrel Labs, B = Brightwater,</text>
+      <text class="d-text small" x="490" y="266">P = Lena Park, S = Sentinel,</text>
+      <text class="d-text small" x="490" y="282">H = Halden Reef, E = bleaching event</text>
+    </svg>
+  </div>
+  <figcaption>The two-triangle partition has modularity 0.357. Putting everything in one community gives exactly 0, and leaving every node alone is negative because no edge is inside any community.</figcaption>
+</figure>
+
+<p>Step by step for the two-triangle partition. Degrees: K and S have 3, the other four have 2, so 2<em>m</em> = 14 and <em>m</em> = 7.</p>
+<ul>
+  <li>Community {K, B, P}: internal edges K–B, K–P, B–P, so <em>L</em> = 3. Degree sum <em>d</em> = 3 + 2 + 2 = 7. Contribution 3/7 − (7/14)² = 0.4286 − 0.25 = 0.1786.</li>
+  <li>Community {S, H, E}: the same by symmetry, 0.1786.</li>
+  <li>Q = 0.357. The bridge K–S is the only edge not counted in any <em>L<sub>c</sub></em>.</li>
+</ul>
+<p>Now a worse partition: move Kestrel Labs to the reef side, giving {B, P} and {K, S, H, E}. The first has <em>L</em> = 1 (B–P) and <em>d</em> = 4, contributing 1/7 − (4/14)² = 0.1429 − 0.0816 = 0.0612. The second has <em>L</em> = 4 (K–S, S–H, S–E, H–E) and <em>d</em> = 10, contributing 4/7 − (10/14)² = 0.5714 − 0.5102 = 0.0612. Q = 0.122, far below 0.357: Kestrel Labs brought two internal edges' worth of degree into a community where it has only one edge.</p>
+<p>Click nodes in the calculator below to move them between communities, and drag the resolution slider. The caption shows each community's two terms.</p>
+
+<div class="viz" data-viz="ch11-modularity">
+<script type="application/json">
+{
+  "title": "Modularity calculator",
+  "subtitle": "Click a node to change its community",
+  "height": 300,
+  "nodes": [
+    {"id": "K", "label": "Kestrel Labs", "x": 36, "y": 50, "c": 0},
+    {"id": "B", "label": "Brightwater", "x": 12, "y": 18, "c": 0},
+    {"id": "P", "label": "Lena Park", "x": 12, "y": 82, "c": 0},
+    {"id": "S", "label": "Project Sentinel", "x": 64, "y": 50, "c": 1},
+    {"id": "H", "label": "Halden Reef", "x": 88, "y": 18, "c": 1},
+    {"id": "E", "label": "Bleaching event", "x": 88, "y": 82, "c": 1}
+  ],
+  "edges": [
+    {"source": "K", "target": "B"}, {"source": "K", "target": "P"}, {"source": "B", "target": "P"},
+    {"source": "K", "target": "S"},
+    {"source": "S", "target": "H"}, {"source": "S", "target": "E"}, {"source": "H", "target": "E"}
+  ]
+}
+</script>
+</div>
+
+<p>Two experiments worth doing. Put everything in one community and slide γ below 2/7 ≈ 0.286 (0.25 on the slider): the single community now beats the two triangles. And put Sentinel alone in a third community: Q drops to 0.194, because a node on its own contributes only the negative term −(3/14)².</p>
+
+<h3>The gain of moving one node</h3>
+<p>Louvain never recomputes Q from scratch. It asks a cheaper question: <em>how much does Q change if I move node i into community C?</em> Take <em>i</em> out of its community first, so it sits alone. The gain of inserting an isolated node <em>i</em> into <em>C</em> is</p>
+<p style="text-align:center">ΔQ(<em>i</em> → <em>C</em>) = <em>k<sub>i,in</sub></em>(<em>C</em>) / <em>m</em> − γ · Σ<sub>tot</sub>(<em>C</em>) · <em>k<sub>i</sub></em> / 2<em>m</em>²</p>
+<p>where <em>k<sub>i,in</sub></em>(<em>C</em>) is the edge weight from <em>i</em> into <em>C</em> and Σ<sub>tot</sub>(<em>C</em>) is the total degree of <em>C</em>'s nodes (without <em>i</em>). Everything is local: you need <em>i</em>'s edges and one running total per community. The gain of moving <em>i</em> from <em>A</em> to <em>B</em> is ΔQ(<em>i</em> → <em>B</em>) − ΔQ(<em>i</em> → <em>A</em> without <em>i</em>).</p>
+<p>Check it on the move above: Kestrel Labs from {K, B, P} to {S, H, E}, with <em>k<sub>K</sub></em> = 3, <em>m</em> = 7 and 2<em>m</em>² = 98.</p>
+<ul>
+  <li>Back into its own community without it, {B, P}: <em>k<sub>in</sub></em> = 2 (edges to B and P), Σ<sub>tot</sub> = 4. ΔQ = 2/7 − 4 · 3/98 = 0.2857 − 0.1224 = 0.1633.</li>
+  <li>Into {S, H, E}: <em>k<sub>in</sub></em> = 1 (edge to S), Σ<sub>tot</sub> = 7. ΔQ = 1/7 − 7 · 3/98 = 0.1429 − 0.2143 = −0.0714.</li>
+  <li>Net change: −0.0714 − 0.1633 = −0.2347. And indeed 0.1224 − 0.3571 = −0.2347.</li>
+</ul>
+<p>A positive example from the start of Louvain, where every node is alone: move Lena Park into Brightwater's singleton community. Removing her from her own singleton gains nothing (<em>k<sub>in</sub></em> = 0, Σ<sub>tot</sub> = 0), and inserting her next to Brightwater gives 1/7 − 2 · 2/98 = 0.1429 − 0.0408 = +0.1020. You can verify with full recomputation: Q goes from −34/196 to −14/196, a change of 20/196 = 0.1020.</p>
+
+<pre data-file="minigraphrag/communities.py"><code class="language-python">def modularity(G: nx.Graph, partition: list[set], resolution: float = 1.0, weight: str = "weight") -&gt; float:
+    """Newman modularity of `partition` (a list of node sets covering G)."""
+    m = G.size(weight=weight)
+    if m == 0:
+        return 0.0
+    q = 0.0
+    for community in partition:
+        inside = G.subgraph(community).size(weight=weight)
+        degree = sum(d for _, d in G.degree(community, weight=weight))
+        q += inside / m - resolution * (degree / (2 * m)) ** 2
+    return q</code></pre>
+
+<h2>Louvain from scratch</h2>
+<p>Maximizing modularity exactly is NP-hard. The <strong>Louvain method</strong> (Blondel, Guillaume, Lambiotte and Lefebvre, 2008) is a greedy heuristic that is fast enough for graphs with millions of nodes and finds high-modularity partitions in practice. It alternates two phases until nothing changes.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="louv-title">
+      <title id="louv-title">Louvain phase one moves nodes locally, phase two aggregates communities into super-nodes</title>
+      <defs>
+        <marker id="c11arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <text class="d-text bold" x="20" y="24">Start: singletons</text>
+      <line class="d-line faint" x1="60" y1="70" x2="100" y2="110"/><line class="d-line faint" x1="60" y1="70" x2="60" y2="150"/><line class="d-line faint" x1="60" y1="150" x2="100" y2="110"/>
+      <line class="d-line faint" x1="100" y1="110" x2="160" y2="110"/>
+      <line class="d-line faint" x1="160" y1="110" x2="200" y2="70"/><line class="d-line faint" x1="160" y1="110" x2="200" y2="150"/><line class="d-line faint" x1="200" y1="70" x2="200" y2="150"/>
+      <circle class="d-node" cx="60" cy="70" r="11"/><circle class="d-node warm" cx="60" cy="150" r="11"/><circle class="d-node alt" cx="100" cy="110" r="11"/>
+      <circle class="d-node" cx="160" cy="110" r="11"/><circle class="d-node warm" cx="200" cy="70" r="11"/><circle class="d-node alt" cx="200" cy="150" r="11"/>
+      <text class="d-text small" x="20" y="194">Q = −0.173</text>
+      <line class="d-line" x1="232" y1="110" x2="262" y2="110" marker-end="url(#c11arrow)"/>
+      <text class="d-text bold" x="270" y="24">Phase 1: local moving</text>
+      <ellipse class="d-area" cx="320" cy="110" rx="42" ry="58"/>
+      <ellipse class="d-area" cx="430" cy="110" rx="42" ry="58"/>
+      <line class="d-line" x1="300" y1="70" x2="340" y2="110"/><line class="d-line" x1="300" y1="70" x2="300" y2="150"/><line class="d-line" x1="300" y1="150" x2="340" y2="110"/>
+      <line class="d-line hot" x1="340" y1="110" x2="410" y2="110"/>
+      <line class="d-line" x1="410" y1="110" x2="450" y2="70"/><line class="d-line" x1="410" y1="110" x2="450" y2="150"/><line class="d-line" x1="450" y1="70" x2="450" y2="150"/>
+      <circle class="d-node" cx="300" cy="70" r="11"/><circle class="d-node" cx="300" cy="150" r="11"/><circle class="d-node" cx="340" cy="110" r="11"/>
+      <circle class="d-node alt" cx="410" cy="110" r="11"/><circle class="d-node alt" cx="450" cy="70" r="11"/><circle class="d-node alt" cx="450" cy="150" r="11"/>
+      <text class="d-text small" x="270" y="194">Each node joins the neighbor</text>
+      <text class="d-text small" x="270" y="210">community with the best ΔQ.</text>
+      <text class="d-text small" x="270" y="226">Q = 0.357</text>
+      <line class="d-line" x1="485" y1="110" x2="515" y2="110" marker-end="url(#c11arrow)"/>
+      <text class="d-text bold" x="525" y="24">Phase 2: aggregate</text>
+      <circle class="d-node" cx="560" cy="110" r="24"/>
+      <circle class="d-node alt" cx="640" cy="110" r="24"/>
+      <line class="d-line hot" x1="584" y1="110" x2="616" y2="110"/>
+      <path class="d-line" d="M548,88 C530,50 590,50 572,88"/>
+      <path class="d-line" d="M628,88 C610,50 670,50 652,88"/>
+      <text class="d-text small" x="560" y="46" text-anchor="middle">self-loop 3</text>
+      <text class="d-text small" x="640" y="46" text-anchor="middle">self-loop 3</text>
+      <text class="d-text small" x="600" y="102" text-anchor="middle">1</text>
+      <text class="d-text small" x="525" y="194">Communities become nodes.</text>
+      <text class="d-text small" x="525" y="210">Merging the two gives Q = 0,</text>
+      <text class="d-text small" x="525" y="226">so Louvain stops.</text>
+    </svg>
+  </div>
+  <figcaption>Louvain on the six-node example. Internal edges become self-loops on super-nodes, which preserves Q exactly, so phase 1 on the aggregated graph continues from where the last level stopped.</figcaption>
+</figure>
+
+<h3>Phase 1: local moving</h3>
+<ol>
+  <li>Put every node in its own community.</li>
+  <li>Visit nodes in some order (random, controlled by a seed). For node <em>i</em>, compute the weight from <em>i</em> into each neighboring community, remove <em>i</em> from its community, and compute ΔQ for inserting it into each neighboring community and back into its own.</li>
+  <li>Move <em>i</em> to the community with the largest gain (stay if no gain is positive relative to staying).</li>
+  <li>Repeat passes over all nodes until a full pass moves nothing.</li>
+</ol>
+<p>Only neighboring communities are considered, because moving a node into a community it has no edges to always has negative gain (<em>k<sub>i,in</sub></em> = 0).</p>
+
+<h3>Phase 2: aggregation</h3>
+<p>Build a new graph whose nodes are the communities found in phase 1. The weight between two super-nodes is the total weight of edges between their communities; the weight inside a community becomes a self-loop. Modularity of the aggregated graph with singleton communities equals modularity of the phase-1 partition, so no progress is lost. Run phase 1 again on the smaller graph. Stop when phase 1 makes no move. The result maps every original node to its final super-node.</p>
+
+<h3>Watching phase 1 on Kestrel</h3>
+<p>The visualization runs phase 1 on the 17-entity Kestrel graph. Edge weights count how many relations connect a pair (Okafor–Kestrel has weight 2 for co-founding and being CEO; Brightwater–Kestrel has weight 2 for two funding rounds). Each step is one move that raised modularity. Each community that survives to the end of phase 1 keeps one color throughout; grey marks temporary communities that later dissolve.</p>
+
+<div class="viz" data-viz="louvain">
+<script type="application/json">
+{
+  "title": "Louvain phase 1 on the Kestrel entity graph",
+  "subtitle": "One step per improving move",
+  "height": 440,
+  "seed": 2,
+  "interval": 1100,
+  "nodes": [
+    {"id": "kestrel", "label": "Kestrel Labs", "x": 52, "y": 42},
+    {"id": "okafor", "label": "Dr. Mira Okafor", "x": 36, "y": 20},
+    {"id": "vehl", "label": "Jonas Vehl", "x": 58, "y": 12},
+    {"id": "brightwater", "label": "Brightwater Capital", "x": 78, "y": 18},
+    {"id": "park", "label": "Lena Park", "x": 90, "y": 36},
+    {"id": "nair", "label": "Priya Nair", "x": 44, "y": 64},
+    {"id": "tern", "label": "Project Tern", "x": 62, "y": 64},
+    {"id": "deepcast", "label": "Deepcast", "x": 80, "y": 78},
+    {"id": "marlow", "label": "Marlow Dynamics", "x": 90, "y": 56},
+    {"id": "sentinel", "label": "Project Sentinel", "x": 26, "y": 52},
+    {"id": "twi", "label": "Tidewater Institute", "x": 20, "y": 22},
+    {"id": "ruiz", "label": "Dr. Ana Ruiz", "x": 6, "y": 36},
+    {"id": "halden", "label": "Halden Reef", "x": 8, "y": 70},
+    {"id": "bleaching", "label": "Bleaching event", "x": 20, "y": 88},
+    {"id": "oha", "label": "Ocean Health Act", "x": 30, "y": 74},
+    {"id": "portavalon", "label": "Port Avalon", "x": 44, "y": 90},
+    {"id": "council", "label": "City Council", "x": 62, "y": 90}
+  ],
+  "edges": [
+    {"source": "okafor", "target": "kestrel", "weight": 2},
+    {"source": "vehl", "target": "kestrel", "weight": 2},
+    {"source": "nair", "target": "kestrel", "weight": 1},
+    {"source": "okafor", "target": "twi", "weight": 1},
+    {"source": "nair", "target": "marlow", "weight": 1},
+    {"source": "ruiz", "target": "twi", "weight": 1},
+    {"source": "kestrel", "target": "sentinel", "weight": 1},
+    {"source": "twi", "target": "sentinel", "weight": 1},
+    {"source": "nair", "target": "sentinel", "weight": 1},
+    {"source": "sentinel", "target": "halden", "weight": 1},
+    {"source": "sentinel", "target": "bleaching", "weight": 1},
+    {"source": "bleaching", "target": "halden", "weight": 1},
+    {"source": "ruiz", "target": "halden", "weight": 1},
+    {"source": "brightwater", "target": "kestrel", "weight": 2},
+    {"source": "park", "target": "brightwater", "weight": 1},
+    {"source": "park", "target": "kestrel", "weight": 1},
+    {"source": "deepcast", "target": "kestrel", "weight": 1},
+    {"source": "marlow", "target": "deepcast", "weight": 1},
+    {"source": "marlow", "target": "kestrel", "weight": 1},
+    {"source": "kestrel", "target": "tern", "weight": 1},
+    {"source": "vehl", "target": "tern", "weight": 1},
+    {"source": "nair", "target": "tern", "weight": 1},
+    {"source": "tern", "target": "deepcast", "weight": 1},
+    {"source": "oha", "target": "sentinel", "weight": 1},
+    {"source": "council", "target": "kestrel", "weight": 1},
+    {"source": "kestrel", "target": "portavalon", "weight": 1},
+    {"source": "twi", "target": "portavalon", "weight": 1},
+    {"source": "council", "target": "portavalon", "weight": 1},
+    {"source": "oha", "target": "council", "weight": 1}
+  ]
+}
+</script>
+</div>
+
+<p>With this visiting order, phase 1 ends with five communities and Q ≈ 0.300: the Kestrel leadership and funding group {Kestrel Labs, Okafor, Vehl, Brightwater, Lena Park}, the reef science group {Project Sentinel, Tidewater Institute, Ana Ruiz, Halden Reef, bleaching event}, the regulation group {Ocean Health Act, Port Avalon, City Council}, and two pairs, {Priya Nair, Marlow Dynamics} and {Project Tern, Deepcast}. Phase 2 would collapse those pairs into super-nodes, and the next round of local moving would merge them into one supply-chain community {Priya Nair, Marlow Dynamics, Project Tern, Deepcast}. That is exactly what the full reference implementation returns with <code>seed=1</code>: four communities with Q = 0.338. The pairs illustrate why aggregation matters: a single node moving alone can't see that two pairs belong together.</p>
+
+<h3>The implementation</h3>
+<p><code>minigraphrag</code> implements Louvain in about 80 lines on plain adjacency dictionaries. Phase 1 is <code>_one_level</code>; phase 2 is <code>_aggregate</code>.</p>
+
+<pre data-file="minigraphrag/communities.py"><code class="language-python">def _one_level(adj: dict, resolution: float, rng: random.Random) -&gt; tuple[dict, bool]:
+    """Phase 1 (local moving) on an adjacency dict {node: {nbr: weight}} that may contain self-loops."""
+    # Self-loops count twice toward degree (both "ends" are on the node).
+    k = {u: sum(w for v, w in nbrs.items() if v != u) + 2 * nbrs.get(u, 0.0) for u, nbrs in adj.items()}
+    m = sum(k.values()) / 2
+    node2com = {u: u for u in adj}
+    sigma_tot = dict(k)  # total degree of each community
+    improved = False
+    nodes = list(adj)
+    rng.shuffle(nodes)  # visiting order changes the result; the seed makes it reproducible
+
+    moved = True
+    while moved:
+        moved = False
+        for u in nodes:
+            ku, current = k[u], node2com[u]
+            # Weight from u into each neighbouring community.
+            w2c: dict = defaultdict(float)
+            for v, w in adj[u].items():
+                if v != u:
+                    w2c[node2com[v]] += w
+            # Take u out of its community first...
+            sigma_tot[current] -= ku
+            # ...then the gain of inserting u into community C is
+            #   k_{u,in}(C) / m  -  gamma * sigma_tot(C) * k_u / (2 m^2)
+            best, best_gain = current, w2c[current] / m - resolution * sigma_tot[current] * ku / (2 * m * m)
+            for com, w in sorted(w2c.items(), key=lambda x: str(x[0])):
+                gain = w / m - resolution * sigma_tot[com] * ku / (2 * m * m)
+                if gain &gt; best_gain + 1e-12:
+                    best, best_gain = com, gain
+            sigma_tot[best] += ku
+            if best != current:
+                node2com[u] = best
+                moved = improved = True
+    return node2com, improved
+
+
+def _aggregate(adj: dict, node2com: dict) -&gt; dict:
+    """Phase 2: build the graph whose nodes are communities. Internal weight becomes a self-loop."""
+    new: dict = defaultdict(lambda: defaultdict(float))
+    for u, nbrs in adj.items():
+        cu = node2com[u]
+        new[cu]  # make sure isolated communities survive
+        for v, w in nbrs.items():
+            cv = node2com[v]
+            if u == v:
+                new[cu][cu] += w
+            elif cu == cv:
+                new[cu][cu] += w / 2  # each internal edge is seen from both ends
+            else:
+                new[cu][cv] += w
+    return {u: dict(nbrs) for u, nbrs in new.items()}
+
+
+def louvain_communities(G: nx.Graph, resolution: float = 1.0, seed: int = 42, weight: str = "weight") -&gt; list[set]:
+    """Partition G with the Louvain method. Returns a list of node sets, largest first."""
+    if G.number_of_edges() == 0:
+        return [{n} for n in G.nodes()]
+    rng = random.Random(seed)
+    adj = {u: {} for u in G.nodes()}
+    for u, v, d in G.edges(data=True):
+        w = float(d.get(weight, 1.0))
+        adj[u][v] = adj[u].get(v, 0.0) + w
+        if u != v:
+            adj[v][u] = adj[v].get(u, 0.0) + w
+    membership = {n: n for n in G.nodes()}  # original node -&gt; current super-node
+
+    while True:
+        node2com, improved = _one_level(adj, resolution, rng)
+        if not improved:
+            break
+        membership = {n: node2com[c] for n, c in membership.items()}
+        adj = _aggregate(adj, node2com)
+
+    groups: dict = defaultdict(set)
+    for n, c in membership.items():
+        groups[c].add(n)
+    return sorted(groups.values(), key=lambda s: (-len(s), sorted(map(str, s))))</code></pre>
+
+<p>Three details are easy to get wrong when you write this yourself. The self-loop weight counts twice toward a super-node's degree, because both ends of an internal edge are inside it. An internal edge between two different nodes of the same community is visited from both endpoints during aggregation, hence <code>w / 2</code>. And the candidate list is sorted before comparing gains, so that ties break the same way on every run, independent of dictionary insertion order.</p>
+
+<h3>Cost</h3>
+<p>Each pass of phase 1 touches every edge a constant number of times, so one pass is O(<em>m</em>). The number of passes per level is small in practice, and each aggregation shrinks the graph dramatically, so Louvain behaves close to linearly in the number of edges on real graphs. For GraphRAG, community detection is never the bottleneck: clustering a graph of 100,000 entities is a matter of seconds to minutes, while writing reports for its communities takes thousands of LLM calls.</p>
+
+<h2>Resolution and its limit</h2>
+<p>The resolution γ scales the “expected by chance” term. Larger γ penalizes big communities more, so partitions get finer; smaller γ favors fewer, larger communities. On the six-node example the two triangles score 6/7 − γ/2 and one big community scores 1 − γ, so merging wins exactly when γ &lt; 2/7 ≈ 0.286. On the Kestrel graph, running the reference implementation with three seeds per setting gives:</p>
+
+<table>
+  <thead><tr><th>γ</th><th>Communities (seeds 1, 7, 42)</th><th>Typical partition</th></tr></thead>
+  <tbody>
+    <tr><td>0.5</td><td>2, 2, 2</td><td>“Kestrel business” (9 nodes) and “reef and regulation” (8 nodes)</td></tr>
+    <tr><td>1.0</td><td>4, 3, 2</td><td>Seed 1: reef science, leadership and funding, supply chain, regulation (Q = 0.338)</td></tr>
+    <tr><td>1.5</td><td>5, 5, 5</td><td>Brightwater, Kestrel, Park, Vehl; supply chain; Sentinel, Halden, bleaching; regulation; Okafor, Ruiz, Tidewater</td></tr>
+    <tr><td>2.0</td><td>5, 6, 5</td><td>As above; seed 7 instead gives {Brightwater, Kestrel, Park}, {Deepcast, Tern, Vehl} and {Marlow, Nair}</td></tr>
+    <tr><td>3.0</td><td>8, 7, 8</td><td>Pairs and singletons; themes dissolve</td></tr>
+  </tbody>
+</table>
+
+<p>Two lessons. At γ = 1 the result depends on the seed, because this small graph has several partitions with nearly equal modularity (0.338, 0.335, 0.324, 0.320). And no single γ recovers the “expected communities” listed in the running example; their modularity is only 0.270. Modularity is one reasonable definition of a good partition, not a ground truth about themes.</p>
+
+<h3>The resolution limit</h3>
+<p>Fortunato and Barthélemy (2007) showed that modularity optimization cannot resolve communities below a scale that depends on the size of the whole graph. The null model's expected weight between two groups shrinks as the graph grows, so in a large graph even a single edge between two small, dense, otherwise separate groups can make merging them increase Q. Roughly, groups whose internal edge count is small compared with √(2<em>m</em>) are at risk. The classic demonstration is a ring of many small cliques joined by single edges: modularity prefers merging neighboring cliques in pairs.</p>
+<p>For GraphRAG this has a practical consequence. Index 10,000 documents and a small, tight cluster like {Brightwater Capital, Lena Park} can be swallowed into a bigger community, and its report never gets written. Two remedies: raise γ, or do what GraphRAG does and split large communities recursively, so every community is re-examined inside its own subgraph where the “whole graph” is small.</p>
+
+<h2>From Louvain to Leiden</h2>
+<p>Louvain has a defect that went largely unnoticed for a decade: it can produce communities that are badly connected, and even communities that are internally disconnected.</p>
+
+<h3>How a community falls apart</h3>
+<p>Suppose phase 1 builds {Kestrel Labs, Dr. Mira Okafor, Jonas Vehl, Brightwater Capital, Lena Park}. Kestrel Labs is the hub that holds it together: Okafor and Vehl connect to the others only through it. Later in the same pass, or after an aggregation that changes the neighborhood, Kestrel Labs gets a better gain from joining a different community and moves. What happens to the nodes it left behind? On a graph this small, Okafor and Vehl now have no edges inside the community and would drift away on the next sweep. The damaging case is the one Traag and colleagues describe: the hub bridged two groups that are each dense inside. Every member of each group still has most of its weight inside the old community, so no single-node move improves modularity, and Louvain only ever moves one node at a time. The community stays whole although nothing connects its two halves. Worse, if this happens after aggregation, the community is already a single super-node, and no later step can split it.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 260" role="img" aria-labelledby="leiden-title">
+      <title id="leiden-title">A hub leaves a Louvain community and leaves it disconnected; Leiden refines communities into connected sub-communities before aggregating</title>
+      <defs>
+        <marker id="c11arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <text class="d-text bold" x="20" y="24">Louvain: hub moves out</text>
+      <ellipse class="d-area" cx="140" cy="140" rx="118" ry="92"/>
+      <line class="d-line dash" x1="140" y1="170" x2="70" y2="85"/>
+      <line class="d-line dash" x1="140" y1="170" x2="70" y2="200"/>
+      <line class="d-line dash" x1="140" y1="170" x2="205" y2="70"/>
+      <line class="d-line dash" x1="140" y1="170" x2="205" y2="125"/>
+      <line class="d-line" x1="205" y1="70" x2="205" y2="125"/>
+      <line class="d-line hot" x1="154" y1="175" x2="300" y2="175" marker-end="url(#c11arrow2)"/>
+      <circle class="d-node warm" cx="140" cy="170" r="14"/>
+      <circle class="d-node" cx="70" cy="85" r="12"/>
+      <circle class="d-node" cx="70" cy="200" r="12"/>
+      <circle class="d-node" cx="205" cy="70" r="12"/>
+      <circle class="d-node" cx="205" cy="125" r="12"/>
+      <text class="d-text small" x="140" y="202" text-anchor="middle">Kestrel</text>
+      <text class="d-text small" x="70" y="66" text-anchor="middle">Okafor</text>
+      <text class="d-text small" x="70" y="230" text-anchor="middle">Vehl</text>
+      <text class="d-text small" x="250" y="66" text-anchor="middle">Brightwater</text>
+      <text class="d-text small" x="238" y="130" text-anchor="middle">Park</text>
+      <text class="d-text small" x="20" y="252">Left behind: Okafor | Vehl | Brightwater–Park</text>
+      <line class="d-line faint" x1="340" y1="20" x2="340" y2="240"/>
+      <text class="d-text bold" x="360" y="24">Leiden: three phases per level</text>
+      <rect class="d-box node" x="360" y="44" width="300" height="46" rx="6"/>
+      <text class="d-text bold" x="372" y="64">1. Fast local moving</text>
+      <text class="d-text small" x="372" y="80">revisit only nodes whose neighbors changed</text>
+      <rect class="d-box comm" x="360" y="104" width="300" height="62" rx="6"/>
+      <text class="d-text bold" x="372" y="124">2. Refinement</text>
+      <text class="d-text small" x="372" y="140">inside each community, merge singletons only into</text>
+      <text class="d-text small" x="372" y="156">well-connected sub-communities (randomized)</text>
+      <rect class="d-box edge" x="360" y="180" width="300" height="46" rx="6"/>
+      <text class="d-text bold" x="372" y="200">3. Aggregate the refined partition</text>
+      <text class="d-text small" x="372" y="216">disconnected pieces become separate super-nodes</text>
+    </svg>
+  </div>
+  <figcaption>Left: when a hub moves out, Louvain can keep the leftovers as one community even though they no longer connect, because it only tests single-node moves. Right: Leiden aggregates the refined partition, so a disconnected community can never be frozen into a single super-node.</figcaption>
+</figure>
+
+<div class="callout paper">
+  <span class="callout-title">Traag, Waltman and van Eck, From Louvain to Leiden: guaranteeing well-connected communities (2019)</span>
+  <p>Published in Scientific Reports, this paper shows that Louvain may yield arbitrarily badly connected communities, and in the worst case disconnected ones, especially when run iteratively. In the authors' experiments, up to 25% of communities were badly connected and up to 16% were disconnected. The Leiden algorithm they introduce is proven to yield connected communities, converges (when iterated) to partitions in which all subsets of all communities are locally optimally assigned, and in their benchmarks runs faster than Louvain while finding better partitions.</p>
+</div>
+
+<h3>The refinement phase</h3>
+<p>Leiden keeps Louvain's structure and changes two things.</p>
+<p><strong>Fast local moving.</strong> Instead of sweeping every node repeatedly, Leiden keeps a queue. When a node moves, only its neighbors that are not in the new community are added back to the queue. Most work concentrates where the partition is still changing, which is where the speedup comes from.</p>
+<p><strong>Refinement.</strong> After local moving produces a partition P, Leiden builds a refined partition P<sub>ref</sub> inside each community of P. Every node starts as its own sub-community. A node is considered for merging only if it is well connected to the rest of its community, and it may merge only into a sub-community that is itself well connected to the community. Among the candidate sub-communities with non-negative gain, one is chosen at random, with probability increasing in the gain (the <code>randomness</code> parameter controls how greedy this is). Because merges only happen along edges, every refined sub-community is connected.</p>
+<p><strong>Aggregation on the refined partition.</strong> The aggregated graph has one super-node per refined sub-community, not per community. But the initial partition of the aggregated graph is taken from P, so super-nodes that came from the same community start together. If a community of P was disconnected, its pieces are separate super-nodes and the next local-moving phase can separate them. That is the mechanism behind the connectivity guarantee.</p>
+
+<table>
+  <thead><tr><th></th><th>Louvain</th><th>Leiden</th></tr></thead>
+  <tbody>
+    <tr><td>Local moving</td><td>Full sweeps until no move</td><td>Queue of nodes whose neighborhood changed</td></tr>
+    <tr><td>Refinement</td><td>None</td><td>Randomized merging into well-connected sub-communities</td></tr>
+    <tr><td>Aggregation based on</td><td>Communities from local moving</td><td>Refined sub-communities (initialized with the unrefined partition)</td></tr>
+    <tr><td>Connectivity guarantee</td><td>None; communities can be disconnected</td><td>Communities are connected</td></tr>
+    <tr><td>Quality functions</td><td>Usually modularity</td><td>Modularity or the Constant Potts Model (which avoids the resolution limit)</td></tr>
+    <tr><td>Speed</td><td>Fast</td><td>Typically faster on large graphs</td></tr>
+  </tbody>
+</table>
+
+<p>GraphRAG cares because a disconnected community produces a report about entities that have nothing to do with each other. “Okafor, Vehl, Brightwater and Park” without Kestrel Labs is not a theme. Leiden's guarantee is cheap insurance for summary quality.</p>
+
+<h2>Hierarchical Leiden in GraphRAG</h2>
+<p>GraphRAG does not stop at one partition. It runs <strong>hierarchical Leiden</strong>: cluster the whole graph (level 0); for every community larger than <code>max_cluster_size</code>, run Leiden again on that community's subgraph to produce level 1; repeat until every community is small enough. Communities that are already small are final and do not appear at deeper levels. Microsoft GraphRAG's defaults are <code>max_cluster_size = 10</code>, <code>use_lcc = true</code> and a fixed seed (<code>0xDEADBEEF</code>), with the clustering done by graspologic's native Leiden implementation.</p>
+
+<pre data-file="examples/ch11_graspologic.py"><code class="language-python">from graspologic.partition import hierarchical_leiden
+
+clusters = hierarchical_leiden(G, max_cluster_size=10, random_seed=0xDEADBEEF)
+for c in clusters[:5]:
+    # HierarchicalCluster(node, cluster, parent_cluster, level, is_final_cluster)
+    print(c.node, c.cluster, c.parent_cluster, c.level, c.is_final_cluster)
+
+first = clusters.first_level_hierarchical_clustering()   # {node: cluster} at level 0
+final = clusters.final_level_hierarchical_clustering()   # {node: deepest cluster}</code></pre>
+
+<p>Two defaults deserve attention. <code>use_lcc</code> keeps only the largest connected component, so entities in small disconnected islands (an extracted person mentioned once alongside one company) get no community and never appear in any report. That is usually noise, but check what you drop. And <code>max_cluster_size</code> is the real knob for report granularity: it caps how many entities a leaf report must cover.</p>
+
+<h3>The minigraphrag version</h3>
+<p><code>hierarchical_communities</code> uses graspologic when it is installed and falls back to recursive Louvain otherwise. The recursion is the same idea: partition, then split any part above <code>max_cluster_size</code> inside its own subgraph.</p>
+
+<pre data-file="minigraphrag/communities.py"><code class="language-python">@dataclass
+class Community:
+    id: int
+    level: int
+    parent: int | None
+    nodes: list[str]
+    edges: list[tuple[str, str]]
+    children: list[int] = field(default_factory=list)
+
+
+def hierarchical_communities(
+    G: nx.Graph, max_cluster_size: int = 10, seed: int = 42, use_leiden: bool | None = None
+) -&gt; list[Community]:
+    """Recursive partition: any community larger than `max_cluster_size` is split again one level down.
+
+    Level 0 is the coarsest partition. Uses graspologic's hierarchical Leiden
+    if installed (or `use_leiden=True`), otherwise recursive Louvain.
+    """
+    if use_leiden is not False:
+        result = _leiden_hierarchy(G, max_cluster_size, seed)
+        if result is not None:
+            return result
+        if use_leiden:
+            raise ImportError("graspologic is not installed (pip install minigraphrag[leiden])")
+
+    communities: list[Community] = []
+
+    def recurse(nodes: set, level: int, parent: int | None) -&gt; None:
+        parts = louvain_communities(G.subgraph(nodes), seed=seed)
+        if parent is not None and len(parts) &lt;= 1:
+            return  # Louvain can't split it further; stop here
+        for part in parts:
+            c = Community(len(communities), level, parent, sorted(part),
+                          sorted(tuple(sorted(e)) for e in G.subgraph(part).edges()))
+            communities.append(c)
+            if parent is not None:
+                communities[parent].children.append(c.id)
+            if len(part) &gt; max_cluster_size:
+                recurse(set(part), level + 1, c.id)
+
+    recurse(set(G.nodes()), 0, None)
+    return communities</code></pre>
+
+<p>On the Kestrel graph with <code>max_cluster_size=5</code>, <code>seed=42</code> and the Louvain fallback, the hierarchy is:</p>
+<table>
+  <thead><tr><th>Level 0</th><th>Level 1 children</th></tr></thead>
+  <tbody>
+    <tr><td>C0: Kestrel business (9 nodes: Kestrel Labs, Okafor, Vehl, Nair, Brightwater, Park, Marlow, Deepcast, Tern)</td><td>C1: {Kestrel Labs, Okafor, Vehl, Brightwater, Park}<br>C2: {Deepcast, Marlow Dynamics, Priya Nair, Project Tern}</td></tr>
+    <tr><td>C3: reef and regulation (8 nodes)</td><td>C4: {Project Sentinel, Halden Reef, bleaching event}<br>C5: {Ocean Health Act, Port Avalon, City Council}<br>C6: {Tidewater Institute, Dr. Ana Ruiz}</td></tr>
+  </tbody>
+</table>
+<p>Seed 42 found the coarser two-community optimum (Q = 0.320) at level 0, and the recursion then recovered the finer structure inside each part. The level-1 partition has Q = 0.308 on the whole graph, slightly below the best flat partition (0.338), but it gives you two zoom levels. That trade is the point of a hierarchy: you give up a little modularity at any single level to get summaries at several granularities. C2 is the supply-chain community whose report you will write in <a href="12-community-reports.html">Chapter 12</a>.</p>
+
+<h2>Alternatives, determinism and evaluation</h2>
+
+<h3>Other community detection methods</h3>
+<table>
+  <thead><tr><th>Method</th><th>Idea</th><th>Strengths</th><th>Weaknesses for GraphRAG</th></tr></thead>
+  <tbody>
+    <tr><td>Louvain</td><td>Greedy modularity with aggregation</td><td>Fast, simple, widely available (NetworkX, igraph)</td><td>Disconnected communities; resolution limit; seed-dependent</td></tr>
+    <tr><td>Leiden</td><td>Louvain plus refinement</td><td>Connected communities; fast; supports CPM</td><td>Still a heuristic; still seed-dependent</td></tr>
+    <tr><td>Label propagation</td><td>Each node repeatedly adopts the most common label among neighbors</td><td>Near linear time, no objective to tune</td><td>Unstable across runs; can collapse into one giant community</td></tr>
+    <tr><td>Spectral clustering</td><td>k-means on eigenvectors of the graph Laplacian</td><td>Principled; good for well-separated clusters</td><td>Needs the number of clusters; eigen-decomposition is costly on large graphs</td></tr>
+    <tr><td>Infomap</td><td>Minimize the description length of a random walk (map equation)</td><td>Captures flow; strong on benchmarks; hierarchical variant</td><td>Different notion of community; less common in RAG tooling</td></tr>
+    <tr><td>Embedding + clustering</td><td>Cluster node or description embeddings (as RAPTOR does for chunks)</td><td>Groups semantically similar entities even without edges</td><td>Ignores graph structure; clusters may not be connected</td></tr>
+  </tbody>
+</table>
+
+<h3>Determinism and seeds</h3>
+<p>Louvain's visiting order and Leiden's randomized refinement both make results depend on a random seed. For GraphRAG this is not academic: community ids change, reports get regenerated, cached answers go stale, and your evaluation numbers wobble between index builds. On the Kestrel graph, ten seeds of the reference Louvain give Q values of 0.3384 (six seeds), 0.3345, 0.3237 (two seeds) and 0.3203, with three or four communities.</p>
+<p>Practical rules: always pass a fixed seed and record it with the index; sort node and edge lists before clustering so that input order does not act as a hidden second seed (GraphRAG sorts its edge list before clustering for the same reason); and if stability matters more than the last bit of modularity, run several seeds and keep the partition that agrees most with the others (a consensus choice) rather than the one with the highest Q.</p>
+
+<h3>Evaluating communities</h3>
+<p>There is rarely ground truth, so combine structural checks with a look at what the reports will be about.</p>
+<ul>
+  <li><strong>Modularity</strong> at each level, as a sanity check (well above 0), not as the goal.</li>
+  <li><strong>Connectivity</strong>: every community's induced subgraph should be connected. With Louvain, check and split; with Leiden it is guaranteed.</li>
+  <li><strong>Size distribution</strong>: a single giant community or hundreds of singletons both mean poor report units. Count communities above <code>max_cluster_size</code> at the leaf level (should be none) and below 3 nodes.</li>
+  <li><strong>Conductance</strong>: cut weight divided by the smaller of the community's volume and the rest's; low is good. It flags communities that are mostly boundary.</li>
+  <li><strong>Stability</strong>: adjusted Rand index or normalized mutual information between partitions from different seeds. Low agreement means the structure is weak and reports will churn.</li>
+  <li><strong>Semantic coherence</strong>: read the entity lists of a sample of communities, or have an LLM rate whether a short title fits them. For Kestrel, check that the canonical themes (reef science, supply chain, funding, regulation) each dominate at least one community.</li>
+</ul>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 11.1 <span class="level">Warm-up</span></h4>
+  <p>On the six-node example (edges K–B, K–P, B–P, K–S, S–H, S–E, H–E), compute Q by hand for the partition {K, B, P}, {S}, {H, E}. Explain in one sentence why it is lower than the two-triangle partition.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><em>m</em> = 7, 2<em>m</em> = 14.</p>
+    <ul>
+      <li>{K, B, P}: <em>L</em> = 3, <em>d</em> = 7: 3/7 − (7/14)² = 0.4286 − 0.25 = 0.1786.</li>
+      <li>{S}: <em>L</em> = 0, <em>d</em> = 3: 0 − (3/14)² = −0.0459.</li>
+      <li>{H, E}: <em>L</em> = 1, <em>d</em> = 4: 1/7 − (4/14)² = 0.1429 − 0.0816 = 0.0612.</li>
+    </ul>
+    <p>Q = 0.1786 − 0.0459 + 0.0612 = <strong>0.194</strong>. It is lower than 0.357 because Sentinel's two edges to Halden Reef and the bleaching event are no longer inside any community, while isolating Sentinel still costs its expected-by-chance term.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 11.2 <span class="level">Core</span></h4>
+  <p>Starting from the partition in Exercise 11.1, Louvain visits Sentinel. Compute ΔQ for moving Sentinel into {H, E} and into {K, B, P} using the gain formula. Which move does Louvain make, and what is the new Q?</p>
+  <details class="hint"><summary>Hint</summary><p>Sentinel is alone, so removing it from its own community gains 0. You only need the insertion gains: <em>k<sub>in</sub></em>/<em>m</em> − Σ<sub>tot</sub> · <em>k<sub>S</sub></em> / 2<em>m</em>².</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><em>k<sub>S</sub></em> = 3, <em>m</em> = 7, 2<em>m</em>² = 98.</p>
+    <ul>
+      <li>Into {H, E}: <em>k<sub>in</sub></em> = 2, Σ<sub>tot</sub> = 4. ΔQ = 2/7 − 4 × 3 / 98 = 0.2857 − 0.1224 = <strong>+0.1633</strong>.</li>
+      <li>Into {K, B, P}: <em>k<sub>in</sub></em> = 1, Σ<sub>tot</sub> = 7. ΔQ = 1/7 − 7 × 3 / 98 = 0.1429 − 0.2143 = <strong>−0.0714</strong>.</li>
+      <li>Staying alone: 0.</li>
+    </ul>
+    <p>Louvain moves Sentinel into {H, E}. New Q = 0.1939 + 0.1633 = <strong>0.357</strong>, the two-triangle partition, which matches the direct computation.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 11.3 <span class="level">Core</span></h4>
+  <p>(a) On the six-node example, find the resolution γ below which one big community has higher (resolution-scaled) modularity than the two triangles. (b) Build the 17-node Kestrel graph from the visualization's edge list and run <code>louvain_communities</code> for γ in {0.5, 1.0, 1.5, 3.0} with seeds 1 and 42. Report the number of communities, their sizes and Q at that γ. Which γ would you choose for GraphRAG reports, and why?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>(a)</strong> Two triangles: 2 × (3/7 − γ × 0.25) = 6/7 − γ/2. One community: 7/7 − γ × 1² = 1 − γ. They are equal when 6/7 − γ/2 = 1 − γ, so γ/2 = 1/7 and <strong>γ = 2/7 ≈ 0.286</strong>. Below that, one community wins.</p>
+    <p><strong>(b)</strong></p>
+    <pre><code class="language-python">import networkx as nx
+from minigraphrag.communities import louvain_communities, modularity
+
+EDGES = [("okafor", "kestrel", 2), ("vehl", "kestrel", 2), ("nair", "kestrel", 1), ("okafor", "twi", 1),
+         ("nair", "marlow", 1), ("ruiz", "twi", 1), ("kestrel", "sentinel", 1), ("twi", "sentinel", 1),
+         ("nair", "sentinel", 1), ("sentinel", "halden", 1), ("sentinel", "bleaching", 1),
+         ("bleaching", "halden", 1), ("ruiz", "halden", 1), ("brightwater", "kestrel", 2),
+         ("park", "brightwater", 1), ("park", "kestrel", 1), ("deepcast", "kestrel", 1),
+         ("marlow", "deepcast", 1), ("marlow", "kestrel", 1), ("kestrel", "tern", 1), ("vehl", "tern", 1),
+         ("nair", "tern", 1), ("tern", "deepcast", 1), ("oha", "sentinel", 1), ("council", "kestrel", 1),
+         ("kestrel", "portavalon", 1), ("twi", "portavalon", 1), ("council", "portavalon", 1),
+         ("oha", "council", 1)]
+G = nx.Graph()
+G.add_weighted_edges_from(EDGES)
+
+for gamma in (0.5, 1.0, 1.5, 3.0):
+    for seed in (1, 42):
+        parts = louvain_communities(G, resolution=gamma, seed=seed)
+        print(gamma, seed, len(parts), sorted(len(p) for p in parts),
+              round(modularity(G, parts, resolution=gamma), 3))</code></pre>
+    <table>
+      <thead><tr><th>γ</th><th>Seed 1</th><th>Seed 42</th></tr></thead>
+      <tbody>
+        <tr><td>0.5</td><td>2 communities [8, 9], Q<sub>γ</sub> = 0.582</td><td>same</td></tr>
+        <tr><td>1.0</td><td>4 communities [3, 4, 5, 5], Q<sub>γ</sub> = 0.338</td><td>2 communities [8, 9], Q<sub>γ</sub> = 0.320</td></tr>
+        <tr><td>1.5</td><td>5 communities [3, 3, 3, 4, 4], Q<sub>γ</sub> = 0.185</td><td>same</td></tr>
+        <tr><td>3.0</td><td>8 communities [1, 1, 2, 2, 2, 3, 3, 3], Q<sub>γ</sub> = −0.118</td><td>same</td></tr>
+      </tbody>
+    </table>
+    <p>Q<sub>γ</sub> is the resolution-scaled objective, so it shrinks as γ grows even for good partitions: compare it across seeds at one γ, never across γ. (Scored at γ = 1, the γ = 1.5 partition has Q = 0.300.) For reports on a graph this small, γ = 1 with seed 1 or γ = 1.5 both give theme-sized communities of 3 to 5 entities. γ = 1.5 is stable across seeds, which is a point in its favor. γ = 3 fragments the themes into pairs and singletons that are too thin to summarize, and γ = 0.5 produces two communities too broad to say anything specific about. On a real corpus you would rather keep γ = 1 and control granularity with <code>max_cluster_size</code> in a hierarchy.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 11.4 <span class="level">Core</span></h4>
+  <p>Write <code>split_disconnected(G, partition)</code> that replaces every community whose induced subgraph is disconnected with its connected components, and <code>badly_connected(G, partition, gamma=1.0)</code> that flags communities containing a node whose edge weight into the rest of its community is less than γ · <em>k<sub>i</sub></em> · (<em>d<sub>c</sub></em> − <em>k<sub>i</sub></em>) / 2<em>m</em> (it would be better off alone by the modularity gain formula). Test <code>split_disconnected</code> on the Kestrel graph with the artificial partition {Okafor, Vehl, Brightwater, Park} plus all other nodes in one community. Does splitting always increase modularity?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import networkx as nx
+from minigraphrag.communities import modularity
+
+def split_disconnected(G, partition):
+    out = []
+    for c in partition:
+        out.extend(set(cc) for cc in nx.connected_components(G.subgraph(c)))
+    return out
+
+def badly_connected(G, partition, gamma=1.0, weight="weight"):
+    two_m = 2 * G.size(weight=weight)
+    flagged = []
+    for c in partition:
+        d_c = sum(d for _, d in G.degree(c, weight=weight))
+        for i in c:
+            k_i = G.degree(i, weight=weight)
+            k_in = sum(G.edges[i, j].get(weight, 1.0) for j in G.neighbors(i) if j in c)
+            if len(c) &gt; 1 and k_in &lt; gamma * k_i * (d_c - k_i) / two_m:
+                flagged.append((sorted(c)[:3], i))
+    return flagged
+
+bad = [{"okafor", "vehl", "brightwater", "park"}, set(G) - {"okafor", "vehl", "brightwater", "park"}]
+print(round(modularity(G, bad), 3))                  # before
+fixed = split_disconnected(G, bad)
+print([sorted(c) for c in fixed][:3], round(modularity(G, fixed), 3))
+print(badly_connected(G, bad))</code></pre>
+    <p>The first community splits into {okafor}, {vehl} and {brightwater, park}; the second is connected and stays. Modularity rises from 0.003 to 0.022. It has to rise: modularity decomposes over communities, and when a community has no edges between two parts <em>X</em> and <em>Y</em>, splitting it leaves <em>L</em> unchanged while the penalty drops from (<em>d<sub>X</sub></em> + <em>d<sub>Y</sub></em>)² to <em>d<sub>X</sub></em>² + <em>d<sub>Y</sub></em>², a decrease of 2<em>d<sub>X</sub>d<sub>Y</sub></em> / (2<em>m</em>)² &gt; 0. So splitting a disconnected community <strong>always</strong> increases Q (for γ &gt; 0), which is why a disconnected community can never be modularity-optimal and why Leiden's guarantee costs nothing in quality. <code>badly_connected</code> flags Okafor and Vehl in the first community (zero internal edge weight) and, in the 13-node second community, Kestrel Labs, Project Tern and Tidewater Institute: most of their weight goes to the four nodes that were split off, so their ties inside a community with such a large total degree fall below what chance predicts. Being flagged does not mean a node is disconnected, only that modularity would prefer it elsewhere.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 11.5 <span class="level">Stretch</span></h4>
+  <p>Measure stability. Run <code>louvain_communities</code> on the Kestrel graph with seeds 0 to 19 at γ = 1. For every pair of runs compute the adjusted Rand index (<code>sklearn.metrics.adjusted_rand_score</code> over node labels). Report the mean ARI, and pick a consensus partition: the run with the highest mean ARI to all other runs. Is it the same as the run with the highest modularity? What would you store in the index to make report generation reproducible?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from itertools import combinations
+from sklearn.metrics import adjusted_rand_score
+from minigraphrag.communities import louvain_communities, modularity
+
+nodes = sorted(G)
+runs = []
+for seed in range(20):
+    parts = louvain_communities(G, seed=seed)
+    label = {n: i for i, p in enumerate(parts) for n in p}
+    runs.append((seed, parts, [label[n] for n in nodes]))
+
+ari = {(a[0], b[0]): adjusted_rand_score(a[2], b[2]) for a, b in combinations(runs, 2)}
+def mean_ari(seed):
+    vals = [v for (x, y), v in ari.items() if seed in (x, y)]
+    return sum(vals) / len(vals)
+
+print("mean pairwise ARI:", round(sum(ari.values()) / len(ari), 3))
+consensus = max(runs, key=lambda r: mean_ari(r[0]))
+best_q = max(runs, key=lambda r: modularity(G, r[1]))
+print("consensus seed", consensus[0], len(consensus[1]), round(modularity(G, consensus[1]), 4))
+print("best-Q seed", best_q[0], len(best_q[1]), round(modularity(G, best_q[1]), 4))</code></pre>
+    <p>What you should find: 14 of the 20 seeds land on the four-community partition with Q = 0.3384, and the other six on three-community partitions with Q of 0.3345, 0.3237 or 0.3203 (two seeds each). The mean pairwise ARI is about 0.81. Because the Q = 0.3384 partition is also the most common, it has the highest mean ARI (seed 0 is the first such run), so here consensus and best modularity agree. They don't have to: on graphs with many near-ties the most frequent partition can have slightly lower Q, and it is usually the better choice for reports because it is what you will get again next time.</p>
+    <p>For reproducibility, store the seed, the resolution, <code>max_cluster_size</code>, the library and version used, and the sorted edge list hash in the index config, and key cached reports on the community's member set rather than on its numeric id, so that a rebuild that renumbers communities can still reuse unchanged reports.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why does GraphRAG partition the entity graph into communities at all?</p>
+  <ol>
+    <li>To reduce the number of entities that need embeddings</li>
+    <li data-correct>To get coherent, prompt-sized units that can be summarized ahead of time for global questions</li>
+    <li>To speed up shortest-path queries</li>
+    <li>Because LLMs cannot read graphs with more than one component</li>
+  </ol>
+  <div class="explain">Global questions have no anchor node. Pre-computed community reports give global search something to map over, and communities are chosen so each report has a topic and fits a context window.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In Q = Σ<sub>c</sub> [ L<sub>c</sub>/m − γ (d<sub>c</sub>/2m)² ], what does the second term represent?</p>
+  <ol>
+    <li>The fraction of edges that cross between communities</li>
+    <li>The number of nodes in the community</li>
+    <li data-correct>The fraction of edge weight expected inside the community by chance, given its nodes' degrees</li>
+    <li>A penalty for communities larger than max_cluster_size</li>
+  </ol>
+  <div class="explain">It is the null model: under random rewiring that preserves degrees, the expected share of edge ends inside c is (d<sub>c</sub>/2m)². Modularity rewards communities that beat it.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Node i (degree 4) is alone. Community C has total degree 20 and i has 2 units of edge weight into C; m = 25, γ = 1. What is ΔQ for inserting i into C?</p>
+  <ol>
+    <li>+0.080</li>
+    <li data-correct>+0.016</li>
+    <li>−0.048</li>
+    <li>+0.064</li>
+  </ol>
+  <div class="explain">ΔQ = k<sub>in</sub>/m − Σ<sub>tot</sub> k<sub>i</sub> / 2m² = 2/25 − 20 × 4 / 1250 = 0.080 − 0.064 = 0.016.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the purpose of Louvain's aggregation phase?</p>
+  <ol>
+    <li>To remove low-degree nodes before the next pass</li>
+    <li>To guarantee that communities are connected</li>
+    <li>To compute modularity faster at the end</li>
+    <li data-correct>To let whole groups move together, finding merges that no single node move would improve</li>
+  </ol>
+  <div class="explain">After aggregation, a super-node moving is a whole community moving. The Kestrel pairs {Nair, Marlow} and {Tern, Deepcast} only merge into one supply-chain community at the second level. Aggregation does not guarantee connectivity; that is Leiden's refinement.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which statement about Leiden's refinement phase is correct?</p>
+  <ol>
+    <li data-correct>It builds connected sub-communities inside each community, and aggregation uses those sub-communities, so disconnected communities can be split later</li>
+    <li>It replaces modularity with an LLM judgment of coherence</li>
+    <li>It removes the need for a random seed</li>
+    <li>It merges small communities to avoid the resolution limit</li>
+  </ol>
+  <div class="explain">Refinement merges nodes only along edges within each community, and the aggregated graph has one super-node per refined sub-community. Leiden is still randomized, and with modularity it still has the resolution limit (CPM avoids it).</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You index a large corpus and the tight pair {Brightwater Capital, Lena Park} never gets its own community. Which explanation and fix fit best?</p>
+  <ol>
+    <li>Leiden cannot find communities of size 2; use label propagation</li>
+    <li>The seed was wrong; try other seeds until it appears</li>
+    <li data-correct>The resolution limit merges small groups in large graphs; raise the resolution or split large communities recursively with a max cluster size</li>
+    <li>Modularity ignores edge weights; add weights</li>
+  </ol>
+  <div class="explain">Modularity's null model depends on total graph size, so small dense groups get merged into neighbors in big graphs. Hierarchical splitting re-examines each community within its own subgraph, and a higher γ also helps.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should community detection use edge weights?</summary>
+  <div><p>Usually yes. Summed relationship strengths (Chapter 9) encode how often and how strongly a relation was stated, so weighted clustering keeps strongly related entities together. Watch for one hub whose edges are heavy simply because it appears in every document, like Kestrel Labs: it can pull everything into its community. Capping per-chunk contributions or log-scaling weights helps.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can an entity belong to more than one community?</summary>
+  <div><p>Not in Louvain or Leiden: they produce partitions. Priya Nair is plausibly part of both the supply-chain and the reef-monitoring story, but she lands in one. Overlapping methods exist (for example clique percolation, or soft clustering as in RAPTOR), and a practical middle ground is to include a community's strongest boundary relationships in its report context, so the report can mention neighbors that live elsewhere.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why not cluster entity embeddings instead of the graph?</summary>
+  <div><p>Embedding clusters group entities that are described similarly: all the venture firms together, all the reefs together. Graph communities group entities that interact: Brightwater with the company it funds. For “what is going on” summaries, interaction is what you want, since a report about all venture firms in the corpus is a list, not a story. Embedding clustering is a reasonable choice for chunks, which is what RAPTOR does (Chapter 12).</p></div>
+</details>
+
+<details class="qa">
+  <summary>How big should max_cluster_size be?</summary>
+  <div><p>Work backwards from the report prompt. A leaf community's entities, relationships and claims should fit the report's input budget (GraphRAG's default is 8,000 input tokens) with room to spare, and there should be enough entities for a report to say something. GraphRAG's default of 10 is a sensible start; raise it if leaf reports feel thin, lower it if reports are generic or their context is truncated.</p></div>
+</details>
+
+<details class="qa">
+  <summary>My communities change every time I add a few documents. Is that normal?</summary>
+  <div><p>Yes. Modularity has many near-optimal partitions, and a small change to the graph can tip the optimizer from one to another, renumbering everything. Fix the seed, sort inputs, and match new communities to old ones by member overlap so unchanged reports can be reused. <a href="27-incremental-temporal.html">Chapter 27</a> covers incremental strategies that avoid re-clustering the whole graph.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a community detection lab</h3>
+  <p>Turn this chapter into a small tool that makes clustering choices visible before you spend money on reports.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A script that builds the resolved Kestrel graph from your index and runs <code>hierarchical_communities</code> for <code>max_cluster_size</code> in {4, 5, 10}, printing the tree with member names</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A table of modularity, community count, size histogram and connectivity check for each level</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A seed-stability report (mean ARI over 20 seeds) for flat Louvain at γ in {0.5, 1, 1.5}</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>If graspologic is available, the same report for hierarchical Leiden, and a comparison with the Louvain fallback</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A one-paragraph recommendation of settings for your corpus, justified by the numbers</span></li>
+  </ul>
+  <p><strong>Done when</strong> your chosen settings produce connected communities, no leaf larger than <code>max_cluster_size</code>, and a supply-chain community containing Marlow Dynamics, Deepcast and Project Tern.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Communities are GraphRAG's summarization units: coherent, prompt-sized, and arranged in a hierarchy of zoom levels for global questions.</li>
+    <li>Modularity compares edge weight inside communities with what degree-preserving chance predicts; Q = Σ [L<sub>c</sub>/m − γ(d<sub>c</sub>/2m)²].</li>
+    <li>Louvain greedily moves nodes by the local gain ΔQ = k<sub>in</sub>/m − γ Σ<sub>tot</sub> k<sub>i</sub>/2m², then aggregates communities into super-nodes and repeats.</li>
+    <li>Resolution γ sets granularity, and the resolution limit hides small communities in large graphs; recursive splitting counters it.</li>
+    <li>Louvain can leave communities badly connected or disconnected; Leiden's refinement phase guarantees connected communities at no cost in quality.</li>
+    <li>GraphRAG uses hierarchical Leiden with a max cluster size, largest connected component and a fixed seed; record and control all three.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Newman and Girvan. <a href="https://arxiv.org/abs/cond-mat/0308217">Finding and evaluating community structure in networks</a>. <span class="venue">Physical Review E, 2004; arXiv cond-mat/0308217</span></li>
+  <li>Blondel, Guillaume, Lambiotte and Lefebvre. <a href="https://arxiv.org/abs/0803.0476">Fast unfolding of communities in large networks</a>. <span class="venue">Journal of Statistical Mechanics, 2008; arXiv 0803.0476</span></li>
+  <li>Traag, Waltman and van Eck. <a href="https://arxiv.org/abs/1810.08473">From Louvain to Leiden: guaranteeing well-connected communities</a>. <span class="venue">Scientific Reports 9, 5233, 2019; arXiv 1810.08473</span></li>
+  <li>Fortunato and Barthélemy. <a href="https://arxiv.org/abs/physics/0607100">Resolution limit in community detection</a>. <span class="venue">PNAS, 2007; arXiv physics/0607100</span></li>
+  <li>Raghavan, Albert and Kumara. <a href="https://arxiv.org/abs/0709.2938">Near linear time algorithm to detect community structures in large-scale networks</a>. <span class="venue">Physical Review E, 2007; arXiv 0709.2938</span></li>
+  <li>Rosvall and Bergstrom. <a href="https://arxiv.org/abs/0707.0609">Maps of random walks on complex networks reveal community structure</a>. <span class="venue">PNAS, 2008; arXiv 0707.0609</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>graspologic. <a href="https://github.com/graspologic-org/graspologic">graspologic</a>: <code>hierarchical_leiden</code> and <code>HierarchicalCluster</code>. <span class="venue">GitHub</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: <code>cluster_graph</code> configuration and defaults. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch11-modularity", function (el, cfg, api) {
+  const W = 720, H = cfg.height || 300;
+  const { stage } = api.frame(el, cfg);
+  const svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Modularity calculator" }, stage);
+  const comm = {};
+  cfg.nodes.forEach(function (n) { comm[n.id] = n.c || 0; });
+  const names = ["A", "B", "C"];
+  const G = api.drawGraph(svg, {
+    nodes: cfg.nodes.map(function (n) { return { id: n.id, label: n.label, x: n.x, y: n.y, group: 1 }; }),
+    edges: cfg.edges, focusable: true,
+    onNodeClick: function (n) { comm[n.id] = (comm[n.id] + 1) % 3; render(); }
+  }, W, H);
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const bar = api.controls(el);
+  const gL = api.h("label", {}, bar, "Resolution γ ");
+  const g = api.h("input", { type: "range", min: 0, max: 2, step: 0.05, value: 1 }, gL);
+  const gV = api.h("b", {}, gL);
+  const reset = api.button(bar, "Two triangles");
+  api.h("span", { class: "grow" }, bar);
+  api.h("span", { class: "stepno" }, bar, "Click or press Enter on a node");
+  function render() {
+    const gamma = +g.value;
+    gV.textContent = gamma.toFixed(2);
+    const m = cfg.edges.length;
+    const deg = {};
+    cfg.nodes.forEach(function (n) { deg[n.id] = 0; });
+    cfg.edges.forEach(function (e) { deg[e.source]++; deg[e.target]++; });
+    let q = 0;
+    const parts = [];
+    [0, 1, 2].forEach(function (c) {
+      const members = cfg.nodes.filter(function (n) { return comm[n.id] === c; });
+      if (!members.length) return;
+      const L = cfg.edges.filter(function (e) { return comm[e.source] === c && comm[e.target] === c; }).length;
+      const d = members.reduce(function (s, n) { return s + deg[n.id]; }, 0);
+      const term = L / m - gamma * Math.pow(d / (2 * m), 2);
+      q += term;
+      parts.push('<span class="viz-chip ' + ["node", "edge", "comm"][c] + '">' + names[c] + ": L=" + L + ", d=" + d + " → " + L + "/" + m + " − " + gamma.toFixed(2) + "·(" + d + "/" + (2 * m) + ")² = " + api.fmt(term, 3) + "</span>");
+    });
+    G.nodes.forEach(function (n) {
+      const col = ["var(--c1)", "var(--c2)", "var(--c3)"][comm[n.id]];
+      n._c.style.fill = "color-mix(in srgb, " + col + " 45%, var(--panel))";
+      n._c.style.stroke = col;
+    });
+    G.edges.forEach(function (e) {
+      const inside = comm[e.source] === comm[e.target];
+      e._el.style.stroke = inside ? ["var(--c1)", "var(--c2)", "var(--c3)"][comm[e.source]] : "";
+      e._el.style.strokeDasharray = inside ? "" : "4 4";
+    });
+    cap.innerHTML = parts.join(" ") + "<br>Modularity Q = <strong>" + api.fmt(q, 3) + "</strong> (dashed edges cross communities and add nothing).";
+  }
+  g.addEventListener("input", render);
+  reset.addEventListener("click", function () { cfg.nodes.forEach(function (n) { comm[n.id] = n.c || 0; }); g.value = 1; render(); });
+  render();
+});
+</script>
+</body>
+</html>

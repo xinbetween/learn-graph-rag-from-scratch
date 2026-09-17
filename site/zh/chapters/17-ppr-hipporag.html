@@ -1,0 +1,839 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personalized PageRank retrieval (HippoRAG) | Graph RAG from Scratch</title>
+<meta name="description" content="Rank graph nodes and passages with Personalized PageRank seeded from the question's entities, and build HippoRAG and HippoRAG 2 style retrieval from scratch.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/17-ppr-hipporag.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="17-ppr-hipporag" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Personalized PageRank retrieval (HippoRAG)</h1>
+  <p class="lede">Local search expands a fixed number of hops around the question's entities. Personalized PageRank does something smarter: it spreads relevance from those entities through the whole graph and lets nodes that sit between several of them light up. In this chapter you compute it by hand, implement it, and use it to rank passages the way HippoRAG does.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain Personalized PageRank as a random walk with restart, and state its equation with an explicit convention for α</li>
+      <li>Run power iteration by hand on a small Kestrel subgraph and reason about convergence speed</li>
+      <li>Implement <code>personalized_pagerank</code> from scratch and check it against <code>networkx.pagerank</code></li>
+      <li>Describe HippoRAG's offline index (OpenIE triples, synonym edges) and online steps (query NER, linking, node specificity, PPR, passage scores)</li>
+      <li>Explain what HippoRAG 2 changes and why one PPR run can answer multi-hop questions</li>
+      <li>Diagnose the failure modes: hub domination, bad entity linking and passage-length bias</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Spreading activation from the question</h2>
+<p>Take canonical question 3: <em>“What connects Priya Nair to Deepcast?”</em> In <a href="14-local-search.html">Chapter 14</a> you would find the two seed entities, pull their 1-hop neighborhoods, and hope the connection shows up in the tables. It does, but so does everything else the two entities touch: Priya's project Sentinel, her CTO role, Deepcast's supply contract. A 2-hop expansion would include most of the Kestrel graph, because every path through the hub Kestrel Labs reaches almost everything.</p>
+<p>What you actually want is a score for every node that answers: <em>how strongly is this node connected to the question's entities, taking all paths into account, with short paths counting more than long ones and paths through hubs counting less?</em> Nodes that sit between both seeds, such as Marlow Dynamics (where Priya used to work and which acquired Deepcast) and Project Tern (which Priya co-leads and which replaces Deepcast's sonar), should score high. A node that touches only one seed through a hub should score low.</p>
+<p>That score has a name: <strong>Personalized PageRank</strong> (PPR). The personalization vector was already in the 1998 PageRank paper, and Haveliwala's topic-sensitive PageRank (2002) made it a ranking tool in its own right. In 2024 HippoRAG showed it makes a strong multi-hop retriever. The HippoRAG paper frames it with a neuroscience analogy, the hippocampal memory indexing theory: the LLM plays the neocortex that processes language, and the knowledge graph plays the hippocampus, an index of associations. A cue (the question) activates a few index entries, and activation spreads to associated memories. PPR is the spreading.</p>
+
+<div class="callout note">
+  <span class="callout-title">Where this sits in the retrieval toolbox</span>
+  <p>Local search (Chapter 14) and LightRAG (<a href="16-lightrag.html">Chapter 16</a>) pick entities and read their neighborhoods. PPR ranks <em>all</em> nodes by proximity to the seeds and then ranks passages from node scores. Path retrieval (<a href="18-paths-and-agents.html">Chapter 18</a>) returns explicit chains instead of scores. The three are complementary, and <a href="21-hybrid-design-patterns.html">Chapter 21</a> fuses them.</p>
+</div>
+
+<h2>Random walk with restart</h2>
+
+<h3>The walker</h3>
+<p>Put a walker on one of the question's entities. At every step it flips a biased coin:</p>
+<ul>
+  <li>With probability <em>α</em> it <strong>follows an edge</strong>: it moves to a neighbor chosen in proportion to edge weight (uniformly if the graph is unweighted).</li>
+  <li>With probability <em>1 − α</em> it <strong>restarts</strong>: it jumps back to a seed entity, chosen according to a <strong>personalization vector</strong> <em>p</em> (also called the reset, restart or teleport distribution).</li>
+</ul>
+<p>Run the walk forever and count the fraction of time spent at each node. That long-run distribution is the PPR vector <em>r</em>. Nodes close to the seeds get visited often, because the walker keeps coming back to the seeds and rarely wanders far before the next restart. Nodes reachable by many short paths from the seeds get visited more than nodes reachable by one. That is the whole idea; everything else is linear algebra to compute it without simulating a walker.</p>
+<p>Classic PageRank is the special case where <em>p</em> is uniform over all nodes: the walker teleports anywhere, and the score measures global importance. Personalizing <em>p</em> turns “important” into “important <em>to this question</em>”.</p>
+
+<h3>The equation, and the convention this course uses</h3>
+<p>Let <em>n</em> be the number of nodes. Build the <strong>transition matrix</strong> <em>M</em> so that column <em>j</em> holds the probabilities of stepping from node <em>j</em> to each node <em>i</em>:</p>
+<p style="text-align:center"><em>M<sub>ij</sub> = w<sub>ji</sub> / ∑<sub>k</sub> w<sub>jk</sub></em> &nbsp;&nbsp;(for an unweighted graph, <em>M<sub>ij</sub> = 1 / deg(j)</em> if <em>i</em> and <em>j</em> are adjacent, else 0)</p>
+<p>Each column sums to 1 (the matrix is <strong>column-stochastic</strong>). If <em>r</em> is a probability distribution over nodes, <em>M r</em> is the distribution after one edge-following step. The PPR vector is the fixed point of “restart with probability 1 − α, otherwise step”:</p>
+<p style="text-align:center"><em>r = (1 − α) p + α · M r</em></p>
+<p>In this course, <strong>α is the probability of following an edge</strong> (the <strong>damping factor</strong>), and <strong>1 − α is the restart probability</strong>. That matches NetworkX, the pagerank visualizations on this site, Chapter 4 and the <code>minigraphrag</code> code.</p>
+
+<div class="callout warn">
+  <span class="callout-title">The damping and teleport naming trap</span>
+  <p>Papers and libraries disagree about which probability gets the Greek letter. NetworkX's <code>alpha</code> and igraph's <code>damping</code> are the follow-an-edge probability (default 0.85). Much of the random-walk-with-restart literature writes <em>c</em> or <em>α</em> for the <em>restart</em> probability (often 0.15). Some papers call the restart probability the “damping factor”. Before copying a hyperparameter, find the equation, not the name. HippoRAG sets its damping factor to 0.5, which happens to mean the same thing under both readings, but most values do not survive a convention swap: 0.85 in one is 0.15 in the other, and those produce very different rankings.</p>
+</div>
+
+<h3>What α controls</h3>
+<p>Unroll the equation by substituting it into itself:</p>
+<p style="text-align:center"><em>r = (1 − α) ∑<sub>k≥0</sub> α<sup>k</sup> M<sup>k</sup> p = (1 − α)(I − αM)<sup>−1</sup> p</em></p>
+<p>Read the sum as a mixture of walks. <em>M<sup>k</sup> p</em> is where a walker ends up after exactly <em>k</em> steps from the seeds, and <em>(1 − α)α<sup>k</sup></em> is the probability that a walk lasts exactly <em>k</em> steps before restarting. Walk lengths are geometrically distributed with mean <em>α / (1 − α)</em>:</p>
+<table>
+  <thead><tr><th>α (follow edge)</th><th>Restart probability</th><th>Mean steps before restart</th><th>Relative weight of 1-hop vs 3-hop walks (α vs α<sup>3</sup>)</th><th>Behavior</th></tr></thead>
+  <tbody>
+    <tr><td>0.3</td><td>0.7</td><td>0.43</td><td>0.30 vs 0.027</td><td>Almost only seeds and direct neighbors</td></tr>
+    <tr><td>0.5</td><td>0.5</td><td>1</td><td>0.50 vs 0.125</td><td>Local: 1–2 hops dominate (HippoRAG's choice)</td></tr>
+    <tr><td>0.85</td><td>0.15</td><td>5.7</td><td>0.85 vs 0.61</td><td>Global: hubs and graph structure take over</td></tr>
+  </tbody>
+</table>
+<p>For retrieval you usually want small α. A question's answer is rarely more than two or three hops from its entities, and long walks drift toward whatever the whole corpus talks about most. On the Kestrel graph below, with seeds Marlow Dynamics and Project Tern, α = 0.5 ranks the seeds first and then Kestrel Labs (0.131), Priya Nair (0.093) and Deepcast (0.091). At α = 0.85, Kestrel Labs (0.198) overtakes both seeds: the hub wins because long walks keep passing through it.</p>
+
+<div class="viz" data-viz="pagerank">
+<script type="application/json">
+{
+  "title": "Personalized PageRank on the Kestrel graph",
+  "subtitle": "Seeds: Marlow Dynamics and Project Tern. Click nodes to change seeds; drag α and the iteration slider",
+  "height": 400,
+  "alpha": 0.5,
+  "directed": false,
+  "seeds": ["marlow", "tern"],
+  "nodes": [
+    {"id": "okafor", "label": "Mira Okafor", "group": 2, "x": 34, "y": 10},
+    {"id": "port", "label": "Port Avalon", "group": 4, "x": 12, "y": 20},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 62, "y": 10},
+    {"id": "bright", "label": "Brightwater", "group": 1, "x": 86, "y": 10},
+    {"id": "twi", "label": "Tidewater", "group": 1, "x": 12, "y": 46},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 40},
+    {"id": "vehl", "label": "Jonas Vehl", "group": 2, "x": 86, "y": 38},
+    {"id": "sentinel", "label": "Sentinel", "group": 3, "x": 30, "y": 60},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 42, "y": 74},
+    {"id": "ruiz", "label": "Ana Ruiz", "group": 2, "x": 6, "y": 70},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 16, "y": 88},
+    {"id": "bleach", "label": "2024 bleaching", "group": 5, "x": 32, "y": 90},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 86, "y": 64},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 62, "y": 88},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 88, "y": 88}
+  ],
+  "edges": [
+    {"source": "okafor", "target": "kestrel"}, {"source": "vehl", "target": "kestrel"},
+    {"source": "priya", "target": "kestrel"}, {"source": "okafor", "target": "twi"},
+    {"source": "priya", "target": "marlow"}, {"source": "ruiz", "target": "twi"},
+    {"source": "kestrel", "target": "sentinel"}, {"source": "twi", "target": "sentinel"},
+    {"source": "priya", "target": "sentinel"}, {"source": "sentinel", "target": "halden"},
+    {"source": "sentinel", "target": "bleach"}, {"source": "bleach", "target": "halden"},
+    {"source": "ruiz", "target": "halden"}, {"source": "bright", "target": "kestrel"},
+    {"source": "lena", "target": "bright"}, {"source": "lena", "target": "kestrel"},
+    {"source": "deepcast", "target": "kestrel"}, {"source": "marlow", "target": "deepcast"},
+    {"source": "marlow", "target": "kestrel"}, {"source": "kestrel", "target": "tern"},
+    {"source": "vehl", "target": "tern"}, {"source": "priya", "target": "tern"},
+    {"source": "tern", "target": "deepcast"}, {"source": "kestrel", "target": "port"},
+    {"source": "twi", "target": "port"}
+  ]
+}
+</script>
+</div>
+
+<p>Things to try: slide α up to 0.85 and watch Kestrel Labs grow; click Marlow and Tern off and click the 2024 bleaching event on (the question “who detected the bleaching?”) and see Sentinel and Halden Reef light up while the supply-chain corner goes dark; set the iteration slider to 1, 2 and 3 to watch mass flow outward one hop per iteration.</p>
+
+<h2>Power iteration by hand</h2>
+<p>The fixed-point equation suggests an algorithm: start anywhere, apply the right-hand side, repeat. This is <strong>power iteration</strong>:</p>
+<p style="text-align:center"><em>r<sup>(0)</sup> = p, &nbsp;&nbsp; r<sup>(t+1)</sup> = (1 − α) p + α · M r<sup>(t)</sup></em></p>
+<p>One pass by hand on a small graph makes everything that follows concrete.</p>
+
+<h3>A five-node Kestrel subgraph</h3>
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 270" role="img" aria-labelledby="five-title">
+      <title id="five-title">Five-node subgraph: Marlow Dynamics, Deepcast, Kestrel Labs, Priya Nair and Project Tern, with six undirected edges</title>
+      <line class="d-line" x1="150" y1="60" x2="420" y2="60"/>
+      <line class="d-line" x1="150" y1="60" x2="90" y2="200"/>
+      <line class="d-line" x1="150" y1="60" x2="290" y2="170"/>
+      <line class="d-line" x1="90" y1="200" x2="290" y2="170"/>
+      <line class="d-line" x1="290" y1="170" x2="560" y2="170"/>
+      <line class="d-line" x1="420" y1="60" x2="560" y2="170"/>
+      <text class="d-text small" x="245" y="52">formerly worked at</text>
+      <text class="d-text small" x="42" y="130">acquired</text>
+      <text class="d-text small" x="222" y="104">competes</text>
+      <text class="d-text small" x="150" y="206">supplied</text>
+      <text class="d-text small" x="400" y="162">runs</text>
+      <text class="d-text small" x="500" y="104">co-leads</text>
+      <circle class="d-node hot" cx="150" cy="60" r="20"/>
+      <text class="d-text bold on-hot" x="150" y="65" text-anchor="middle">M</text>
+      <text class="d-text" x="150" y="28" text-anchor="middle">Marlow Dynamics (deg 3, seed)</text>
+      <circle class="d-node" cx="90" cy="200" r="20"/>
+      <text class="d-text bold" x="90" y="205" text-anchor="middle">D</text>
+      <text class="d-text" x="90" y="244" text-anchor="middle">Deepcast (deg 2)</text>
+      <circle class="d-node" cx="290" cy="170" r="20"/>
+      <text class="d-text bold" x="290" y="175" text-anchor="middle">K</text>
+      <text class="d-text" x="290" y="214" text-anchor="middle">Kestrel Labs (deg 3)</text>
+      <circle class="d-node" cx="420" cy="60" r="20"/>
+      <text class="d-text bold" x="420" y="65" text-anchor="middle">P</text>
+      <text class="d-text" x="420" y="28" text-anchor="middle">Priya Nair (deg 2)</text>
+      <circle class="d-node hot" cx="560" cy="170" r="20"/>
+      <text class="d-text bold on-hot" x="560" y="175" text-anchor="middle">T</text>
+      <text class="d-text" x="560" y="214" text-anchor="middle">Project Tern (deg 2, seed)</text>
+    </svg>
+  </div>
+  <figcaption>The worked example. Edges are undirected and unweighted. The seeds are the entities of the question “How is Marlow Dynamics related to Project Tern?”</figcaption>
+</figure>
+
+<p>Seeds M and T get equal weight, so <em>p = (M 0.5, D 0, K 0, P 0, T 0.5)</em>. Use α = 0.5. Each node sends its mass equally to its neighbors: M sends a third of its mass to each of D, K and P; D sends half to M and half to K; K sends a third each to M, D and T; P sends half each to M and T; T sends half each to K and P.</p>
+
+<h3>Iteration 1</h3>
+<p>Start with <em>r<sup>(0)</sup> = p</em>. Only M and T hold mass.</p>
+<ul>
+  <li>M's 0.5 splits three ways: 0.1667 each to D, K, P.</li>
+  <li>T's 0.5 splits two ways: 0.25 each to K and P.</li>
+</ul>
+<p>So <em>M r<sup>(0)</sup> = (M 0, D 0.1667, K 0.4167, P 0.4167, T 0)</em>. Now mix: <em>r<sup>(1)</sup> = 0.5 · p + 0.5 · M r<sup>(0)</sup></em>.</p>
+<table>
+  <thead><tr><th>Node</th><th>0.5 · p</th><th>0.5 · M r<sup>(0)</sup></th><th>r<sup>(1)</sup></th></tr></thead>
+  <tbody>
+    <tr><td>M Marlow Dynamics</td><td>0.250</td><td>0.000</td><td>0.250</td></tr>
+    <tr><td>D Deepcast</td><td>0</td><td>0.083</td><td>0.083</td></tr>
+    <tr><td>K Kestrel Labs</td><td>0</td><td>0.208</td><td>0.208</td></tr>
+    <tr><td>P Priya Nair</td><td>0</td><td>0.208</td><td>0.208</td></tr>
+    <tr><td>T Project Tern</td><td>0.250</td><td>0.000</td><td>0.250</td></tr>
+  </tbody>
+</table>
+<p>The total is still 1. K and P, each adjacent to <em>both</em> seeds, already outrank D, which touches only one.</p>
+
+<h3>Iteration 2</h3>
+<p>Now every node holds mass, so every node sends. Collect what each node receives from <em>r<sup>(1)</sup></em>:</p>
+<ul>
+  <li>M receives D/2 + K/3 + P/2 = 0.0417 + 0.0694 + 0.1042 = 0.2153</li>
+  <li>D receives M/3 + K/3 = 0.0833 + 0.0694 = 0.1528</li>
+  <li>K receives M/3 + D/2 + T/2 = 0.0833 + 0.0417 + 0.125 = 0.2500</li>
+  <li>P receives M/3 + T/2 = 0.0833 + 0.125 = 0.2083</li>
+  <li>T receives K/3 + P/2 = 0.0694 + 0.1042 = 0.1736</li>
+</ul>
+<p>Mix with the restart term: <em>r<sup>(2)</sup> = 0.5 p + 0.5 M r<sup>(1)</sup> = (M 0.358, D 0.076, K 0.125, P 0.104, T 0.337)</em>. The seeds get their mass back through restarts plus what flows home along edges.</p>
+
+<h3>Iteration 3 and convergence</h3>
+<p>One more round gives <em>M r<sup>(2)</sup> = (M 0.132, D 0.161, K 0.326, P 0.288, T 0.094)</em> and <em>r<sup>(3)</sup> = (M 0.316, D 0.080, K 0.163, P 0.144, T 0.297)</em>. The values oscillate slightly and settle. After about 20 iterations:</p>
+<table>
+  <thead><tr><th>Node</th><th>r<sup>(1)</sup></th><th>r<sup>(2)</sup></th><th>r<sup>(3)</sup></th><th>Converged</th></tr></thead>
+  <tbody>
+    <tr><td>M Marlow Dynamics (seed)</td><td>0.250</td><td>0.358</td><td>0.316</td><td>0.328</td></tr>
+    <tr><td>T Project Tern (seed)</td><td>0.250</td><td>0.337</td><td>0.297</td><td>0.308</td></tr>
+    <tr><td>K Kestrel Labs</td><td>0.208</td><td>0.125</td><td>0.163</td><td>0.152</td></tr>
+    <tr><td>P Priya Nair</td><td>0.208</td><td>0.104</td><td>0.144</td><td>0.132</td></tr>
+    <tr><td>D Deepcast</td><td>0.083</td><td>0.076</td><td>0.080</td><td>0.080</td></tr>
+  </tbody>
+</table>
+<p>The two bridges between the seeds, Kestrel Labs and Priya Nair, rank right after the seeds. Deepcast, reachable from Tern only through Kestrel or Marlow, comes last. That ordering is the retrieval signal: the entities that <em>connect</em> the question's entities matter most.</p>
+
+<h3>Why it converges, and how fast</h3>
+<p>Subtract the fixed point from the iteration: <em>r<sup>(t+1)</sup> − r = α M (r<sup>(t)</sup> − r)</em>. A column-stochastic matrix never increases the L1 norm of a vector, so the error shrinks by at least a factor α per iteration:</p>
+<p style="text-align:center"><em>‖r<sup>(t)</sup> − r‖<sub>1</sub> ≤ α<sup>t</sup> ‖p − r‖<sub>1</sub> ≤ 2α<sup>t</sup></em></p>
+<p>To reach an L1 error of ε you need at most <em>t = log(ε/2) / log(α)</em> iterations: 21 for α = 0.5 and ε = 10<sup>−6</sup>, 90 for α = 0.85. That is a worst-case bound; real graphs usually mix faster (Exercise 17.3 measures it). Each iteration is one sparse matrix-vector product, <em>O(|E|)</em> work, so PPR on a graph with a million edges and α = 0.5 costs a few tens of millions of floating-point operations per query: milliseconds to tens of milliseconds, far cheaper than an LLM call.</p>
+<p>Two practical details:</p>
+<ul>
+  <li><strong>Dangling nodes.</strong> A node with no outgoing edges (an isolated entity in an undirected graph, or a sink in a directed one) has an all-zero column, and the mass that reaches it would leak out of the distribution. The standard fix is to send that mass back to the seeds, which keeps <em>r</em> a probability distribution. NetworkX does the same by default.</li>
+  <li><strong>Direction.</strong> Extracted knowledge graphs have directed relations (“Marlow acquired Deepcast”), but for retrieval the association matters in both directions. HippoRAG and <code>minigraphrag</code> run PPR on the undirected graph. Directed PPR would make sinks like “Halden Reef” unreachable from anything they point to.</li>
+</ul>
+
+<h3>From scratch in NumPy</h3>
+<p>This is the implementation in <code>minigraphrag</code>. It builds the dense transition matrix for readability; for large graphs swap in <code>scipy.sparse</code> with the same arithmetic.</p>
+
+<pre data-file="minigraphrag/search/ppr.py"><code class="language-python">import networkx as nx
+import numpy as np
+
+def personalized_pagerank(G: nx.Graph, seeds: dict[str, float], alpha: float = 0.85, iters: int = 50,
+                          tol: float = 1e-10, weight: str = "weight") -&gt; dict[str, float]:
+    """Power iteration: p &lt;- (1 - alpha) * s + alpha * (M p + dangling mass * s)."""
+    nodes = list(G.nodes())
+    if not nodes:
+        return {}
+    idx = {n: i for i, n in enumerate(nodes)}
+    n = len(nodes)
+    s = np.zeros(n)
+    for node, w in seeds.items():
+        if node in idx:
+            s[idx[node]] += max(w, 0.0)
+    s = s / s.sum() if s.sum() &gt; 0 else np.full(n, 1.0 / n)  # no valid seeds: plain PageRank
+
+    # Column-stochastic transition matrix: M[i, j] = P(step j -&gt; i).
+    W = np.zeros((n, n))
+    for u, v, d in G.edges(data=True):
+        w = float(d.get(weight, 1.0))
+        W[idx[v], idx[u]] += w
+        if u != v:
+            W[idx[u], idx[v]] += w
+    out = W.sum(axis=0)
+    dangling = out == 0  # nodes with no edges: their walker teleports back to the seeds
+    M = W / np.where(dangling, 1.0, out)
+
+    p = s.copy()
+    for _ in range(iters):
+        new = (1 - alpha) * s + alpha * (M @ p + p[dangling].sum() * s)
+        if np.abs(new - p).sum() &lt; tol:
+            p = new
+            break
+        p = new
+    return {node: float(p[i]) for node, i in idx.items()}</code></pre>
+
+<p>Three choices matter. Seed weights are normalized, so you can pass raw scores such as <code>{"MARLOW DYNAMICS": 0.5, "PROJECT TERN": 1.0}</code>. Edge weights are used if present; in <code>minigraphrag</code> the weight is the summed relationship strength from extraction (Chapter 9), so relations stated often and strongly carry more walkers. And if no seed is found in the graph, the function falls back to global PageRank rather than returning zeros; a caller that prefers “no result” should check the seeds first.</p>
+
+<h3>Checking against NetworkX</h3>
+<p>Always test a from-scratch numerical routine against a reference. NetworkX's <code>alpha</code> uses the same convention as ours (probability of following an edge). In NetworkX 3, <code>pagerank</code> uses SciPy under the hood, so install <code>scipy</code> first.</p>
+
+<pre data-file="tests/test_ppr.py"><code class="language-python">import networkx as nx
+import pytest
+from minigraphrag.search.ppr import personalized_pagerank
+
+def five_node_graph():
+    G = nx.Graph()
+    G.add_edges_from([("M", "D"), ("M", "K"), ("M", "P"), ("D", "K"), ("K", "T"), ("P", "T")])
+    return G
+
+def test_matches_hand_computation():
+    r = personalized_pagerank(five_node_graph(), {"M": 1, "T": 1}, alpha=0.5, iters=200)
+    expected = {"M": 0.328, "D": 0.080, "K": 0.152, "P": 0.132, "T": 0.308}
+    assert all(abs(r[k] - v) &lt; 1e-3 for k, v in expected.items())
+
+def test_matches_networkx():
+    pytest.importorskip("scipy")
+    G = five_node_graph()
+    ours = personalized_pagerank(G, {"M": 1, "T": 1}, alpha=0.5, iters=200)
+    ref = nx.pagerank(G, alpha=0.5, personalization={"M": 1, "T": 1}, tol=1e-12)
+    assert all(abs(ours[k] - ref[k]) &lt; 1e-6 for k in G)</code></pre>
+
+<div class="callout tip">
+  <span class="callout-title">When NetworkX is enough</span>
+  <p>For production you rarely need your own PPR: <code>nx.pagerank(G, alpha=0.5, personalization=seeds)</code> is fine up to hundreds of thousands of edges, and graph databases ship PPR procedures (for example, Neo4j's Graph Data Science library has a Personalized PageRank mode through its source-nodes option). Write your own when you need to control dangling mass, reuse one sparse matrix across many queries, or run batched PPR for many questions at once as a matrix of seed vectors.</p>
+</div>
+
+<h2>HippoRAG: a knowledge graph as an associative index</h2>
+<p>HippoRAG (Gutiérrez et al., NeurIPS 2024) turns PPR into a passage retriever. It has an offline indexing phase that builds a schemaless knowledge graph, and an online phase that runs one PPR per question.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="hippo-title">
+      <title id="hippo-title">HippoRAG pipeline: offline indexing builds a knowledge graph and a passage matrix; online retrieval links query entities to nodes, runs PPR and scores passages</title>
+      <defs><marker id="h17a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <text class="d-text bold" x="10" y="22">Offline indexing</text>
+      <rect class="d-box" x="10" y="36" width="140" height="72" rx="6"/>
+      <text class="d-text bold" x="22" y="60">Passages</text>
+      <text class="d-text small" x="22" y="80">the Kestrel corpus,</text>
+      <text class="d-text small" x="22" y="96">chunked</text>
+      <rect class="d-box edge" x="182" y="36" width="140" height="72" rx="6"/>
+      <text class="d-text bold" x="194" y="60">LLM OpenIE</text>
+      <text class="d-text small" x="194" y="80">1. named entities</text>
+      <text class="d-text small" x="194" y="96">2. triples using them</text>
+      <rect class="d-box node" x="354" y="36" width="150" height="72" rx="6"/>
+      <text class="d-text bold" x="366" y="60">Knowledge graph</text>
+      <text class="d-text small" x="366" y="80">phrase nodes, relation</text>
+      <text class="d-text small" x="366" y="96">edges, synonym edges</text>
+      <rect class="d-box node" x="536" y="36" width="134" height="72" rx="6"/>
+      <text class="d-text bold" x="548" y="60">Matrix P</text>
+      <text class="d-text small" x="548" y="80">nodes × passages</text>
+      <text class="d-text small" x="548" y="96">(mention counts)</text>
+      <line class="d-line" x1="150" y1="72" x2="180" y2="72" marker-end="url(#h17a)"/>
+      <line class="d-line" x1="322" y1="72" x2="352" y2="72" marker-end="url(#h17a)"/>
+      <line class="d-line" x1="504" y1="72" x2="534" y2="72" marker-end="url(#h17a)"/>
+      <text class="d-text small" x="182" y="128">synonym edges: encoder cosine ≥ 0.8</text>
+      <text class="d-text bold" x="10" y="170">Online retrieval</text>
+      <rect class="d-box" x="10" y="184" width="118" height="80" rx="6"/>
+      <text class="d-text bold" x="20" y="208">Query</text>
+      <text class="d-text small" x="20" y="228">“How is Marlow</text>
+      <text class="d-text small" x="20" y="244">related to Tern?”</text>
+      <rect class="d-box edge" x="146" y="184" width="118" height="80" rx="6"/>
+      <text class="d-text bold" x="156" y="208">LLM NER</text>
+      <text class="d-text small" x="156" y="228">query named</text>
+      <text class="d-text small" x="156" y="244">entities</text>
+      <rect class="d-box node" x="282" y="184" width="118" height="80" rx="6"/>
+      <text class="d-text bold" x="292" y="208">Link</text>
+      <text class="d-text small" x="292" y="228">nearest node by</text>
+      <text class="d-text small" x="292" y="244">encoder cosine</text>
+      <rect class="d-box node" x="418" y="184" width="118" height="80" rx="6"/>
+      <text class="d-text bold" x="428" y="208">PPR</text>
+      <text class="d-text small" x="428" y="228">reset ∝ specificity</text>
+      <text class="d-text small" x="428" y="244">damping 0.5</text>
+      <rect class="d-box good" x="554" y="184" width="116" height="80" rx="6"/>
+      <text class="d-text bold" x="564" y="208">Passage scores</text>
+      <text class="d-text small" x="564" y="228">Pᵀ r, then top-k</text>
+      <text class="d-text small" x="564" y="244">go to the reader</text>
+      <line class="d-line" x1="128" y1="224" x2="144" y2="224" marker-end="url(#h17a)"/>
+      <line class="d-line" x1="264" y1="224" x2="280" y2="224" marker-end="url(#h17a)"/>
+      <line class="d-line" x1="400" y1="224" x2="416" y2="224" marker-end="url(#h17a)"/>
+      <line class="d-line" x1="536" y1="224" x2="552" y2="224" marker-end="url(#h17a)"/>
+      <line class="d-line dash" x1="429" y1="108" x2="470" y2="182" marker-end="url(#h17a)"/>
+      <line class="d-line dash" x1="603" y1="108" x2="612" y2="182" marker-end="url(#h17a)"/>
+      <text class="d-text small" x="10" y="290">One LLM call per query for NER, one PPR run, then generation. No iterative retrieve-reason loop.</text>
+    </svg>
+  </div>
+  <figcaption>HippoRAG's two phases. The expensive LLM work (OpenIE over every passage) happens once, offline. Online, the only extra LLM call is query NER.</figcaption>
+</figure>
+
+<h3>Offline: OpenIE triples and synonym edges</h3>
+<p>HippoRAG does not fix a schema. For each passage it prompts an LLM in two steps: first extract the named entities, then extract <strong>OpenIE triples</strong> (subject, relation, object) whose subjects and objects should be those entities or other noun phrases. From the Kestrel press release about the acquisition you get triples like <em>(Marlow Dynamics, acquired, Deepcast)</em> and <em>(Deepcast, ended outside contracts with, Kestrel Labs)</em>.</p>
+<ul>
+  <li>Every distinct noun phrase becomes a <strong>phrase node</strong>. Every triple becomes a <strong>relation edge</strong>.</li>
+  <li>A retrieval encoder (the paper uses Contriever or ColBERTv2) embeds every node. Pairs whose cosine similarity exceeds a threshold (τ = 0.8 in the paper) get a <strong>synonym edge</strong>. This is a soft form of entity resolution: “Sentinel drones” and “Project Sentinel” end up adjacent even if no merge step collapsed them, so walkers can cross between them.</li>
+  <li>A <strong>passage matrix</strong> <em>P</em> with one row per node and one column per passage records how often each node's phrase appears in each passage. This is provenance, the same idea as <code>source_ids</code> in Chapter 8.</li>
+</ul>
+<p>Compare this with the GraphRAG-style index you built in Part 2: there are no entity types, no descriptions, no summaries and no communities. The graph exists only to be walked, so HippoRAG's indexing is cheaper per passage than a full GraphRAG index while still paying one or two LLM calls per passage.</p>
+
+<h3>Online: from query to passage scores</h3>
+<ol>
+  <li><strong>Query NER.</strong> An LLM extracts the query's named entities: for “How is Marlow Dynamics related to Project Tern?”, <em>Marlow Dynamics</em> and <em>Project Tern</em>.</li>
+  <li><strong>Linking.</strong> Each query entity is embedded with the same retrieval encoder and linked to the graph node with the highest cosine similarity. These are the <strong>query nodes</strong>.</li>
+  <li><strong>Node specificity.</strong> Not all query nodes are equally informative. HippoRAG defines the specificity of node <em>i</em> as <em>s<sub>i</sub> = 1 / |P<sub>i</sub>|</em>, where <em>P<sub>i</sub></em> is the set of passages the node was extracted from. It multiplies each query node's reset probability by <em>s<sub>i</sub></em>. The paper motivates this as a cheap, local version of inverse document frequency: a node mentioned in every document tells you little about which document you want.</li>
+  <li><strong>PPR.</strong> Run Personalized PageRank with the specificity-weighted query nodes as the personalization vector and damping 0.5.</li>
+  <li><strong>Passage scores.</strong> Multiply the PPR vector by the passage matrix: <em>score = Pᵀ r</em>. Each passage gets the sum, over the nodes it mentions, of mention count times node probability. Take the top-k passages as context for the reader LLM.</li>
+</ol>
+<p>Here is the whole online phase on the five-node example, with four passages from the Kestrel corpus. For simplicity each passage mentions each node at most once.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "From seed entities to passage scores",
+  "subtitle": "HippoRAG online phase on the five-node subgraph, α = 0.5",
+  "height": 360,
+  "scoreDigits": 3,
+  "nodes": [
+    {"id": "M", "label": "Marlow Dynamics", "group": 1, "x": 10, "y": 18},
+    {"id": "D", "label": "Deepcast", "group": 1, "x": 30, "y": 18},
+    {"id": "K", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 18},
+    {"id": "P", "label": "Priya Nair", "group": 2, "x": 70, "y": 18},
+    {"id": "T", "label": "Project Tern", "group": 3, "x": 90, "y": 18},
+    {"id": "p1", "label": "p1 Marlow buys Deepcast", "group": 8, "x": 13, "y": 80},
+    {"id": "p2", "label": "p2 Tern eng blog", "group": 8, "x": 38, "y": 80},
+    {"id": "p3", "label": "p3 Priya Nair profile", "group": 8, "x": 63, "y": 80},
+    {"id": "p4", "label": "p4 Series A news", "group": 8, "x": 88, "y": 80}
+  ],
+  "edges": [
+    {"source": "p1", "target": "M"}, {"source": "p1", "target": "D"}, {"source": "p1", "target": "K"},
+    {"source": "p2", "target": "T"}, {"source": "p2", "target": "K"}, {"source": "p2", "target": "D"}, {"source": "p2", "target": "P"},
+    {"source": "p3", "target": "P"}, {"source": "p3", "target": "M"}, {"source": "p3", "target": "K"},
+    {"source": "p4", "target": "K"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project", "8": "Passage"},
+  "steps": [
+    {"caption": "The index: five entity nodes (entity-to-entity edges omitted here) and four passages. An edge means the passage mentions the entity; this is the passage matrix <em>P</em> drawn as a graph.", "dim": false},
+    {"caption": "Query NER finds <span class=\"viz-chip node\">Marlow Dynamics</span> and <span class=\"viz-chip node\">Project Tern</span>. Linking maps both to graph nodes by encoder similarity.", "active": ["M", "T"]},
+    {"caption": "Node specificity s = 1 / (passages mentioning the node). Marlow appears in p1 and p3, so s = 1/2. Tern appears only in p2, so s = 1. Normalized reset vector: Marlow 0.333, Tern 0.667.", "active": ["M", "T"], "visited": ["p1", "p2", "p3"], "visitedEdges": ["p1>M", "p3>M", "p2>T"], "scores": {"M": "s=1/2", "T": "s=1"}},
+    {"caption": "PPR with α = 0.5 over the entity graph (M–D, M–K, M–P, D–K, K–T, P–T). Converged scores: Tern 0.394, Marlow 0.244, Kestrel 0.156, Priya 0.139, Deepcast 0.067.", "active": ["M", "T"], "visited": ["K", "P", "D"], "scores": {"M": 0.244, "D": 0.067, "K": 0.156, "P": 0.139, "T": 0.394}},
+    {"caption": "Passage score = sum of the PPR scores of the nodes it mentions. p1 = M + D + K = 0.467. p2 = T + K + D + P = 0.756. p3 = P + M + K = 0.539. p4 = K = 0.156.", "active": ["p1", "p2", "p3", "p4"], "visited": ["M", "D", "K", "P", "T"], "edges": ["p1>M", "p1>D", "p1>K", "p2>T", "p2>K", "p2>D", "p2>P", "p3>P", "p3>M", "p3>K", "p4>K"], "scores": {"M": 0.244, "D": 0.067, "K": 0.156, "P": 0.139, "T": 0.394, "p1": 0.467, "p2": 0.756, "p3": 0.539, "p4": 0.156}},
+    {"caption": "Ranking: p2 (Tern blog) &gt; p3 (Priya profile) &gt; p1 (acquisition) &gt; p4. The top two passages together state the connection: Priya Nair used to work at Marlow Dynamics and co-leads Tern. Neither passage mentions both query entities.", "active": ["p2", "p3"], "visited": ["P", "M", "T"], "edges": ["p2>T", "p2>P", "p3>P", "p3>M"], "scores": {"p1": 0.467, "p2": 0.756, "p3": 0.539, "p4": 0.156}}
+  ]
+}
+</script>
+</div>
+
+<p>Look at the last step again. Passage p3 (Priya's profile) never mentions Project Tern, and p2 (the Tern blog) never mentions Marlow Dynamics. A dense retriever scores each passage against the query independently, so neither looks like a strong match. PPR ranks both highly because Priya Nair, whom both mention, sits between the two seeds.</p>
+
+<h3>Why one PPR run handles multi-hop questions</h3>
+<p>Iterative retrievers such as IRCoT answer multi-hop questions by alternating: retrieve, reason, write a follow-up query, retrieve again. Each hop costs an LLM call and a retrieval, and an early mistake derails the chain. PPR explores <em>all</em> hops at once, because the walk mixture <em>∑ α<sup>k</sup> M<sup>k</sup> p</em> already contains 1-hop, 2-hop and 3-hop contributions from every seed. A node that is two hops from one seed and one hop from another collects mass from both. Bridge entities come out of the linear algebra, not out of a reasoning chain.</p>
+<p>The price is that PPR returns scores, not reasons. It tells you Priya Nair matters to this question, not <em>why</em>. The reader LLM still has to work out the chain from the retrieved passages, and if the bridge fact lives in a passage that did not make the top-k cut, the answer fails. Chapter 18's path retrieval makes the chain explicit.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Gutiérrez et al., HippoRAG (2024)</span>
+  <p>On multi-hop QA benchmarks (MuSiQue, 2WikiMultiHopQA and HotpotQA), HippoRAG's single-step retrieval outperformed strong dense retrievers by up to 20%, with the largest gains on 2WikiMultiHopQA, whose questions hinge on entities. The authors report that single-step HippoRAG is comparable to or better than iterative retrieval such as IRCoT while being 10–30 times cheaper and 6–13 times faster, and that the two approaches combine well. The LLM was GPT-3.5-turbo and the retrieval encoder Contriever or ColBERTv2.</p>
+</div>
+
+<h2>Implementing HippoRAG search</h2>
+<p><code>minigraphrag</code> implements the online phase on top of the index you built in Part 2. It deviates from the paper in three small, deliberate ways, noted in the comments: it adds literal name and alias matches to embedding linking, it reuses the LightRAG keyword prompt as query NER (so the offline <code>MockLLM</code> can run it), and it uses <code>source_ids</code> as a binary passage matrix.</p>
+
+<pre data-file="minigraphrag/search/ppr.py"><code class="language-python">import re
+from ..context import format_table
+from ..llm import LLM, parse_json_response
+from .. import prompts as P
+from ..tokens import count_tokens
+from .common import DEFAULT_RESPONSE_TYPE, SearchResult, doc_ids_for_units, generate_answer
+
+def link_query_to_nodes(index, query: str, llm: LLM | None = None, top_k: int = 5) -&gt; dict[str, float]:
+    """Seed weights for PPR: query entities linked to graph nodes, weighted by node specificity."""
+    G = index.graph
+    scores: dict[str, float] = {}
+    q = query.upper()
+    for n, d in G.nodes(data=True):                        # literal name or alias in the query
+        if any(re.search(rf"(?&lt;!\w){re.escape(s)}(?!\w)", q) for s in [n, *d.get("aliases", [])]):
+            scores[n] = 1.0
+    phrases = []
+    if llm is not None:                                    # query NER via the keyword prompt
+        data = parse_json_response(llm.complete(P.KEYWORD_EXTRACTION_PROMPT.format(query=query), json=True))
+        phrases = [str(k) for k in data.get("low_level_keywords", [])]
+    for phrase in phrases or [query]:                      # link each phrase to its nearest entity
+        for name, sim, _ in index.entity_store.search(index.embedder.embed([phrase])[0], k=1 if phrases else top_k):
+            scores[name] = max(scores.get(name, 0.0), sim)
+    top = dict(sorted(scores.items(), key=lambda x: -x[1])[:top_k])
+    # Node specificity: divide by the number of text units the entity was extracted from.
+    return {n: w / max(1, len(G.nodes[n].get("source_ids", []))) for n, w in top.items() if w &gt; 0}
+
+def rank_passages(index, node_scores: dict[str, float]) -&gt; list[tuple[str, float]]:
+    """Score each text unit by the summed PPR score of the entities extracted from it (P^T r)."""
+    totals: dict[str, float] = {}
+    for n, score in node_scores.items():
+        for uid in index.graph.nodes[n].get("source_ids", []):
+            totals[uid] = totals.get(uid, 0.0) + score
+    return sorted(totals.items(), key=lambda x: (-x[1], x[0]))
+
+def hipporag_search(index, query: str, llm: LLM, top_k_passages: int = 5, alpha: float = 0.85,
+                    max_context_tokens: int = 4000, response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; SearchResult:
+    seeds = link_query_to_nodes(index, query, llm)
+    ppr = personalized_pagerank(index.graph, seeds, alpha=alpha)
+    rows, used = [], 0
+    for uid, score in rank_passages(index, ppr)[:top_k_passages]:
+        text = index.text_units[uid].text
+        if used + count_tokens(text) &gt; max_context_tokens:
+            break
+        rows.append([uid, text])
+        used += count_tokens(text)
+    top_nodes = sorted(ppr.items(), key=lambda x: -x[1])[:10]
+    context = format_table("Sources", ["id", "text"], rows)
+    answer = generate_answer(llm, query, context, response_type)
+    return SearchResult(answer, "ppr", context,
+                        {"seeds": seeds, "top_nodes": top_nodes, "sources": [{"id": r[0], "text": r[1]} for r in rows]},
+                        doc_ids_for_units(index, [r[0] for r in rows]), llm_calls=2)</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">Default α is 0.85 here, 0.5 in the paper</span>
+  <p><code>hipporag_search</code> defaults to <code>alpha=0.85</code>, the classic PageRank value, while HippoRAG uses 0.5. On the small, dense Kestrel graph the difference changes rankings noticeably (you saw Kestrel Labs overtake the seeds at 0.85). Pass <code>alpha=0.5</code> to reproduce the paper's behavior, and tune it on your evaluation set (Chapter 25) rather than trusting either default.</p>
+</div>
+
+<p>Using it looks like every other search method in the package:</p>
+<pre data-file="examples/ppr_query.py"><code class="language-python">from minigraphrag.indexer import load_index
+from minigraphrag.llm import get_llm
+from minigraphrag.search.ppr import hipporag_search
+
+index = load_index("out/kestrel")
+llm = get_llm("mock")
+result = hipporag_search(index, "What connects Priya Nair to Deepcast?", llm, alpha=0.5)
+
+print(result.context_data["seeds"])          # specificity-weighted seed entities
+for name, score in result.context_data["top_nodes"][:6]:
+    print(f"{score:.3f}  {name}")
+print(result.sources)                        # document ids whose chunks reached the context
+print(result.answer)</code></pre>
+
+<p>Print the seeds before anything else when debugging. Almost every bad PPR result traces back to linking: a query entity linked to the wrong node, or not linked at all. PPR faithfully spreads mass from wrong seeds.</p>
+
+<h3>Node specificity in numbers</h3>
+<p>Specificity matters most when a question names a hub. Take <em>“Why did Kestrel Labs start Project Tern?”</em> on the same five nodes and four passages. Kestrel Labs is mentioned in all four passages (s = 1/4); Project Tern in one (s = 1).</p>
+<table>
+  <thead><tr><th>Passage</th><th>Seeds K, T equal</th><th>With specificity (K 0.2, T 0.8)</th></tr></thead>
+  <tbody>
+    <tr><td>p2 Tern eng blog</td><td>0.892</td><td>0.911</td></tr>
+    <tr><td>p3 Priya Nair profile</td><td>0.582</td><td>0.469</td></tr>
+    <tr><td>p1 Marlow buys Deepcast</td><td>0.560</td><td>0.392</td></tr>
+    <tr><td>p4 Series A news</td><td>0.372</td><td>0.247</td></tr>
+  </tbody>
+</table>
+<p>The Series A article, which mentions only Kestrel Labs and has nothing to do with Tern, drops by a third. The ranking order is unchanged in this tiny example, but the gap between relevant and irrelevant passages widens; in a real corpus with hundreds of passages mentioning Kestrel Labs, that gap decides what fits in the context window. Notice also that p1, the passage that actually explains <em>why</em> (Marlow bought Deepcast), ranks below the Priya profile. PPR ranks by connectivity to the named entities, and the causal passage names neither of them. Hybrid retrieval in Chapter 21 is how you recover passages like that.</p>
+
+<h2>HippoRAG 2: from retrieval to memory</h2>
+<p>HippoRAG 2 (Gutiérrez et al., ICML 2025, “From RAG to Memory: Non-Parametric Continual Learning for Large Language Models”) keeps the PPR core but addresses weaknesses the authors found in the original: it relied too heavily on entities, so questions whose meaning lives in context rather than names suffered, and simple factual questions sometimes did worse than plain dense retrieval. It adds three changes.</p>
+
+<h3>1. Passage nodes in the graph (dense-sparse integration)</h3>
+<p>Every passage becomes a node, connected by <strong>context edges</strong> to the phrase nodes extracted from it. The graph now holds both sparse concepts (phrases) and dense contexts (passages). The passage matrix disappears as a separate step: passages are ranked directly by their own PPR scores, and PPR mass can flow <em>through</em> a passage from one of its phrases to another.</p>
+
+<h3>2. Query-to-triple matching</h3>
+<p>Instead of running NER on the query and linking single entities, HippoRAG 2 embeds the whole query and matches it against embeddings of the indexed <strong>triples</strong>, keeping the top 5. A triple like <em>(Priya Nair, formerly worked at, Marlow Dynamics)</em> carries the relation, so a query about “the engineer who came from the competitor” can match it even though it names neither entity.</p>
+
+<h3>3. Recognition memory: LLM filtering of triples</h3>
+<p>The retrieved triples go to an LLM that filters out the ones irrelevant to the query, a step the paper calls <strong>recognition memory</strong> by analogy to how people recognize whether a cue matters. The phrase nodes of the surviving triples (at most five triples, so at most ten phrase nodes) become seeds, weighted by their triple scores. All passage nodes are also seeded, each with its dense similarity to the query multiplied by a small weight factor (0.05 by default), so passage similarity guides the walk without swamping the entity seeds. If the filter keeps no triples and no phrase node is available, the system falls back to plain dense passage retrieval. PPR then runs with damping 0.5, and passages are ranked by their PPR scores.</p>
+
+<table>
+  <thead><tr><th>Step</th><th>HippoRAG</th><th>HippoRAG 2</th></tr></thead>
+  <tbody>
+    <tr><td>Graph nodes</td><td>Phrases</td><td>Phrases and passages</td></tr>
+    <tr><td>Edges</td><td>Relation, synonym</td><td>Relation, synonym, context (passage to phrase)</td></tr>
+    <tr><td>Query to graph</td><td>LLM NER, link entities to nodes</td><td>Embed query, match against triples</td></tr>
+    <tr><td>Noise control</td><td>Node specificity</td><td>LLM filters triples (recognition memory)</td></tr>
+    <tr><td>Reset vector</td><td>Query nodes × specificity</td><td>Filtered phrase nodes + all passages × 0.05 × similarity</td></tr>
+    <tr><td>Passage ranking</td><td>Pᵀ r</td><td>PPR score of the passage node</td></tr>
+    <tr><td>Extra LLM calls per query</td><td>1 (NER)</td><td>1 (triple filter)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout paper">
+  <span class="callout-title">Gutiérrez et al., From RAG to Memory (2025)</span>
+  <p>The paper evaluates retrieval as memory along three axes: factual memory (simple QA), sense-making (long, discourse-level understanding) and associativity (multi-hop). It reports that earlier structure-augmented RAG methods, including the original HippoRAG, often underperform a strong embedding retriever on factual and sense-making tasks, while HippoRAG 2 improves associative memory tasks by 7% over a leading embedding model, as the abstract puts it, without giving up factual performance. The ablations credit both the passage nodes and query-to-triple matching.</p>
+</div>
+
+<h2>Trade-offs and failure modes</h2>
+<table>
+  <thead><tr><th>Symptom</th><th>Cause</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Top nodes are always the same hubs (Kestrel Labs)</td><td>α too high; hub seeds; dense co-occurrence edges</td><td>Lower α to 0.5; node specificity; divide final scores by global PageRank or degree; prune weak edges</td></tr>
+    <tr><td>Answer passage never retrieved though its entity scores high</td><td>Passage mentions many low-score entities and gets outscored by entity-dense passages</td><td>Normalize passage scores by entity count, or use passage nodes (HippoRAG 2)</td></tr>
+    <tr><td>Great results for “What connects X to Y?”, poor for “Why did X happen?”</td><td>The cause lives in passages that name neither query entity</td><td>Fuse with dense and BM25 retrieval (Chapter 21); query-to-triple matching</td></tr>
+    <tr><td>Wildly wrong results for some queries</td><td>Entity linking picked the wrong node, or none</td><td>Log seeds; add alias matching; require a similarity threshold and fall back to dense retrieval</td></tr>
+    <tr><td>Two aliases of one entity split the mass</td><td>Missing resolution</td><td>Synonym edges (τ ≈ 0.8) or proper resolution (Chapter 9)</td></tr>
+    <tr><td>Relation meaning ignored (“competes with” counts like “acquired”)</td><td>PPR only sees topology and weights</td><td>Weight edges by relation relevance to the query, or switch to path retrieval (Chapter 18)</td></tr>
+  </tbody>
+</table>
+<p>The cost profile is attractive. Indexing costs one or two LLM calls per passage, similar to extraction in any GraphRAG pipeline and with no summarization or community reports. Querying costs one small LLM call (NER or triple filtering), one sparse PPR and one generation call. There is no per-hop LLM loop, so latency stays flat as questions get more hops. The weaknesses are that PPR has no notion of relation semantics or time (<em>“Who is the CTO?”</em> scores Jonas Vehl and Priya Nair alike) and that it produces rankings, not explanations.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 17.1 <span class="level">Warm-up</span></h4>
+  <p>On the five-node graph (edges M–D, M–K, M–P, D–K, K–T, P–T), compute one iteration of PPR by hand with seeds Kestrel Labs and Project Tern (0.5 each) and α = 0.5. Which non-seed node gets the most mass after one iteration, and why?</p>
+  <details class="hint"><summary>Hint</summary><p>K has degree 3, so it sends one third of its 0.5 to each of M, D and T. T has degree 2.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><em>p = (M 0, D 0, K 0.5, P 0, T 0.5)</em>. Edge-following from <em>r<sup>(0)</sup> = p</em>:</p>
+    <ul>
+      <li>K sends 0.5/3 = 0.1667 to each of M, D and T.</li>
+      <li>T sends 0.5/2 = 0.25 to each of K and P.</li>
+    </ul>
+    <p><em>M r<sup>(0)</sup> = (M 0.1667, D 0.1667, K 0.25, P 0.25, T 0.1667)</em>.</p>
+    <p><em>r<sup>(1)</sup> = 0.5 p + 0.5 M r<sup>(0)</sup> = (M 0.083, D 0.083, K 0.375, P 0.125, T 0.333)</em>. The sum is 1.000.</p>
+    <p>Priya Nair (0.125) leads the non-seeds: she receives half of T's mass because T has only two neighbors, while M and D each get a third of K's mass. At convergence the scores are M 0.108, D 0.080, K 0.372, P 0.102, T 0.338, so Marlow edges past Priya: Marlow is adjacent to both K and P, and collects mass flowing back from both.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 17.2 <span class="level">Core</span></h4>
+  <p>Write a function <code>specificity_seeds(G, linked)</code> that takes the linked query nodes and returns HippoRAG's specificity-weighted reset weights using each node's <code>source_ids</code>. Then, for the four-passage example (p1 mentions M, D, K; p2 mentions T, K, D, P; p3 mentions P, M, K; p4 mentions K), compute the seed weights for the query entities Kestrel Labs and Project Tern and verify the table in the “Node specificity in numbers” section with <code>personalized_pagerank</code>.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import networkx as nx
+from minigraphrag.search.ppr import personalized_pagerank
+
+def specificity_seeds(G, linked: dict[str, float]) -&gt; dict[str, float]:
+    """linked: {node: link similarity}. Returns normalized reset weights."""
+    raw = {n: sim / max(1, len(G.nodes[n].get("source_ids", []))) for n, sim in linked.items() if n in G}
+    total = sum(raw.values())
+    return {n: w / total for n, w in raw.items()} if total else {}
+
+G = nx.Graph([("M", "D"), ("M", "K"), ("M", "P"), ("D", "K"), ("K", "T"), ("P", "T")])
+passages = {"p1": ["M", "D", "K"], "p2": ["T", "K", "D", "P"], "p3": ["P", "M", "K"], "p4": ["K"]}
+for n in G:
+    G.nodes[n]["source_ids"] = [p for p, ns in passages.items() if n in ns]
+
+seeds = specificity_seeds(G, {"K": 1.0, "T": 1.0})
+print(seeds)                                  # {'K': 0.2, 'T': 0.8}
+r = personalized_pagerank(G, seeds, alpha=0.5, iters=200)
+scores = {p: sum(r[n] for n in ns) for p, ns in passages.items()}
+print({k: round(v, 3) for k, v in r.items()})
+print({k: round(v, 3) for k, v in scores.items()})</code></pre>
+    <p>K is in 4 passages (weight 1/4) and T in 1 (weight 1); normalized, K = 0.25 / 1.25 = 0.2 and T = 0.8. The PPR vector is M 0.089, D 0.056, K 0.247, P 0.133, T 0.475, and passage scores are p1 0.392, p2 0.911, p3 0.469, p4 0.247, matching the table. Without specificity (K 0.5, T 0.5) the scores are 0.560, 0.892, 0.582 and 0.372. The irrelevant Series A passage p4 loses a third of its score, and the relevant p2 gains.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 17.3 <span class="level">Core</span></h4>
+  <p>On the 15-node Kestrel graph used in the pagerank visualization, with seeds Marlow Dynamics and Project Tern, count how many power iterations are needed until the L1 change between iterations drops below 10<sup>−6</sup>, for α = 0.5, 0.85 and 0.95. Compare with the bound <em>log(ε/2)/log(α)</em>. What does this imply for query latency and for your choice of <code>iters</code>?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import math
+import networkx as nx
+import numpy as np
+
+edges = ("okafor-kestrel vehl-kestrel priya-kestrel okafor-twi priya-marlow ruiz-twi kestrel-sentinel "
+         "twi-sentinel priya-sentinel sentinel-halden sentinel-bleach bleach-halden ruiz-halden bright-kestrel "
+         "lena-bright lena-kestrel deepcast-kestrel marlow-deepcast marlow-kestrel kestrel-tern vehl-tern "
+         "priya-tern tern-deepcast kestrel-port twi-port").split()
+G = nx.Graph([e.split("-") for e in edges])
+nodes = list(G); idx = {n: i for i, n in enumerate(nodes)}
+A = nx.to_numpy_array(G, nodelist=nodes)
+M = A / A.sum(axis=0)
+p = np.zeros(len(nodes)); p[idx["marlow"]] = p[idx["tern"]] = 0.5
+
+for alpha in (0.5, 0.85, 0.95):
+    r, t = p.copy(), 0
+    while True:
+        new = (1 - alpha) * p + alpha * M @ r
+        t += 1
+        if np.abs(new - r).sum() &lt; 1e-6:
+            break
+        r = new
+    print(alpha, t, math.ceil(math.log(1e-6 / 2) / math.log(alpha)))</code></pre>
+    <p>Output: α = 0.5 stops after 15 iterations (bound 21); α = 0.85 after 35 (bound 90); α = 0.95 after 50 (bound 283). The observed counts are well under the bound because the graph mixes quickly, but they still grow sharply with α. Two implications: at α = 0.5 a fixed <code>iters=30</code> is plenty, and at high α a fixed small iteration count silently returns an unconverged vector, which biases scores toward the seeds. Use a tolerance check like <code>minigraphrag</code> does, and log the iteration count. (Note the stopping rule measures change between iterations, not distance to the true fixed point; the true error is at most <em>α/(1−α)</em> times the last change.)</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 17.4 <span class="level">Core</span></h4>
+  <p>Hub nodes collect PPR mass for almost every query. One common fix divides each node's PPR score by its global PageRank (a “lift” score), so nodes rank by how much <em>more</em> relevant they are to this query than in general. Implement <code>lift_scores(G, seeds, alpha)</code> and run it on the 15-node graph with seeds Marlow Dynamics and Project Tern at α = 0.85. How does Kestrel Labs move? What is the risk of this fix?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.search.ppr import personalized_pagerank
+
+def lift_scores(G, seeds, alpha=0.85):
+    ppr = personalized_pagerank(G, seeds, alpha=alpha, iters=200)
+    glob = personalized_pagerank(G, {}, alpha=alpha, iters=200)   # empty seeds: uniform teleport
+    return {n: ppr[n] / glob[n] for n in G}
+
+lift = lift_scores(G, {"marlow": 1, "tern": 1})
+for n, s in sorted(lift.items(), key=lambda x: -x[1])[:6]:
+    print(f"{s:5.2f}  {n}")</code></pre>
+    <p>At α = 0.85, raw PPR ranks Kestrel Labs first (0.198) because its global PageRank is also the highest (0.183). Its lift is only about 1.08: it is barely more relevant to this query than to any query. Marlow Dynamics (2.40) and Project Tern (2.13) lead, and Deepcast (1.56), Priya Nair (1.35) and Jonas Vehl (1.22) all rise above Kestrel Labs, while the reef-side nodes drop to lifts well below 1. The risk: lift over-rewards obscure nodes. A leaf adjacent to a seed has tiny global PageRank, so even modest PPR gives it a huge ratio. In practice people use a softened version such as <em>ppr / global<sup>β</sup></em> with β around 0.5, or simply lower α, which is what HippoRAG does.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 17.5 <span class="level">Stretch</span></h4>
+  <p>Implement a HippoRAG 2 style variant, <code>hipporag2_rank(index, query, passage_weight=0.05)</code>, on the <code>minigraphrag</code> index: add one node per text unit connected to the entities in its <code>source_ids</code>, seed entity nodes from the top relationships matched by embedding (use <code>index.relationship_store</code> as a stand-in for triples, skipping the LLM filter), seed every passage node with <code>passage_weight</code> times its similarity to the query, run PPR with α = 0.5 and rank passage nodes by score. Compare its top-5 documents with <code>hipporag_search</code> on canonical questions 1–3.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import networkx as nx
+from minigraphrag.search.ppr import personalized_pagerank
+
+def hipporag2_rank(index, query: str, passage_weight: float = 0.05, top_triples: int = 5, alpha: float = 0.5):
+    G = nx.Graph(index.graph)                         # copy: do not mutate the index
+    for uid, unit in index.text_units.items():
+        G.add_node(("P", uid), kind="passage")
+    for n, d in index.graph.nodes(data=True):
+        for uid in d.get("source_ids", []):
+            G.add_edge(n, ("P", uid), weight=1.0)      # context edges
+
+    qvec = index.embedder.embed([query])[0]
+    seeds: dict = {}
+    # Query-to-triple matching: relationship embeddings stand in for triples.
+    for _, sim, meta in index.relationship_store.search(qvec, k=top_triples):
+        for n in (meta["source"], meta["target"]):
+            seeds[n] = max(seeds.get(n, 0.0), float(sim))
+    # Dense passage seeds, down-weighted so entities still steer the walk.
+    for uid, sim, _ in index.text_unit_store.search(qvec, k=len(index.text_units)):
+        seeds[("P", uid)] = passage_weight * max(float(sim), 0.0)
+
+    ppr = personalized_pagerank(G, seeds, alpha=alpha, iters=100)
+    ranked = sorted(((n[1], s) for n, s in ppr.items() if isinstance(n, tuple)), key=lambda x: -x[1])
+    return ranked
+
+for q in ["Why did Kestrel Labs start Project Tern?",
+          "Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?",
+          "What connects Priya Nair to Deepcast?"]:
+    top = hipporag2_rank(index, q)[:5]
+    print(q, [index.text_units[u].doc_id for u, _ in top])</code></pre>
+    <p>Things to check in your comparison, using <code>data/questions.jsonl</code>'s <code>supporting_docs</code> as ground truth: recall@5 of supporting documents for each method. The interesting case is question 1: the causal documents (the Marlow acquisition and the board memo) name neither query entity, so only the dense passage seeds can pull them in. Check whether they enter the top 5, and whether question 3, which is entity-driven, changes at all. With the offline <code>MockLLM</code> index the variant does not obviously win; that is a finding, not a bug, and it is why you measure. Two implementation traps: keep passage node ids distinct from entity names (the tuple keys above), and remember that passage nodes create new 2-hop paths between every pair of entities in the same chunk, so the walk spreads further at the same α. With the offline <code>HashingEmbedder</code> the similarities are lexical, so treat the numbers as a pipeline test and rerun with a real embedder for conclusions.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In the equation r = (1 − α) p + α · M r as used in this course, what does α = 0.85 mean?</p>
+  <ol>
+    <li>The walker restarts at a seed with probability 0.85</li>
+    <li data-correct>The walker follows an edge with probability 0.85 and restarts with probability 0.15</li>
+    <li>85% of the mass stays on the seed nodes</li>
+    <li>The walk is truncated after 85 steps</li>
+  </ol>
+  <div class="explain">α multiplies the edge-following term, so it is the damping (follow) probability. This matches NetworkX's <code>alpha</code>. Many random-walk-with-restart papers use the letter for the restart probability instead, so always check the equation.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does HippoRAG use damping 0.5 rather than the classic 0.85?</p>
+  <ol>
+    <li>0.5 converges to the exact answer while 0.85 only approximates it</li>
+    <li>0.85 is only valid for directed graphs</li>
+    <li data-correct>Shorter walks keep mass near the query entities, so hubs and far-away structure dominate less</li>
+    <li>It halves the number of LLM calls</li>
+  </ol>
+  <div class="explain">Walk lengths are geometric with mean α/(1−α): one step at 0.5 versus about 5.7 at 0.85. Retrieval answers are usually within a few hops, and long walks drift toward globally central nodes. Both values converge; 0.5 also converges faster.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Kestrel Labs appears in 40 of 50 passages; Project Tern in 2. A query names both. How does node specificity change the reset vector?</p>
+  <ol>
+    <li>It removes Kestrel Labs from the seeds</li>
+    <li>It gives both seeds 0.5, because both were named in the query</li>
+    <li>It boosts Kestrel Labs because it is better connected</li>
+    <li data-correct>Kestrel Labs gets weight proportional to 1/40 and Project Tern 1/2, so Tern carries about 95% of the reset mass</li>
+  </ol>
+  <div class="explain">Specificity is 1/|P<sub>i</sub>|. Normalizing 0.025 and 0.5 gives about 0.048 and 0.952. The hub still seeds the walk, but weakly, like an IDF weight.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What lets a single PPR run retrieve evidence for a two-hop question that iterative retrievers need two rounds for?</p>
+  <ol>
+    <li data-correct>The PPR vector sums walks of every length from the seeds, so bridge nodes collect mass from several seeds at once</li>
+    <li>PPR calls the LLM once per hop internally</li>
+    <li>HippoRAG precomputes all two-hop paths offline</li>
+    <li>The passage matrix contains multi-hop edges</li>
+  </ol>
+  <div class="explain">r = (1−α) ∑ α<sup>k</sup> M<sup>k</sup> p mixes 1-hop, 2-hop and longer contributions in one linear-algebra computation. No reasoning step is needed to discover the bridge entity, though the reader LLM still has to explain the chain.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which change is part of HippoRAG 2 rather than the original HippoRAG?</p>
+  <ol>
+    <li>Synonym edges between similar phrase nodes</li>
+    <li>Query named entity recognition with an LLM</li>
+    <li data-correct>Passage nodes in the graph and an LLM filter over query-matched triples</li>
+    <li>Community reports used as seeds</li>
+  </ol>
+  <div class="explain">Synonym edges and query NER are in the original. HippoRAG 2 adds passage nodes with context edges, matches the query against triples, filters them with an LLM (recognition memory) and ranks passage nodes by PPR directly.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Your PPR retriever returns great passages for “What connects Priya Nair to Deepcast?” but misses the key passage for “Why did Kestrel Labs start Project Tern?”. What is the most likely reason?</p>
+  <ol>
+    <li>PPR did not converge</li>
+    <li>The graph is undirected</li>
+    <li>α is too low</li>
+    <li data-correct>The passage that explains the cause mentions Marlow and Deepcast, not the query's entities, so it gets little mass relative to passages that name the seeds</li>
+  </ol>
+  <div class="explain">PPR ranks by connectivity to named entities. A “why” question's evidence often sits one hop away in a passage that names neither seed. Fusing with dense or BM25 retrieval, or HippoRAG 2's passage seeds, helps.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Is PPR just a fancy k-hop neighborhood?</summary>
+  <div><p>No. A k-hop neighborhood is a binary set with a hard cut-off: every node within k hops is in, equally. PPR is a continuous score with a soft, geometric decay, and it rewards multiplicity: a node reachable by three short paths scores higher than one reachable by one. It also penalizes hubs automatically, because a hub splits its outgoing mass among many neighbors. You can threshold PPR scores to get a set, but it will be shaped by the question's seeds rather than a radius.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should edge weights be used, and which weights?</summary>
+  <div><p>Use them if they mean “strength of association”. <code>minigraphrag</code>'s summed extraction strengths do: relations stated often and strongly carry more walkers. Do not use weights that mean distance or cost (higher = farther), which would invert the semantics. A useful query-time variant multiplies each edge weight by the similarity between the relation description and the query, which makes the walk prefer relevant relation types. That costs one embedding lookup per edge in the explored region.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I run PPR on a graph with millions of nodes per query?</summary>
+  <div><p>Use a sparse matrix (CSR) built once at load time, and run power iteration with <code>scipy.sparse</code>; at α = 0.5 you need 15–30 iterations. For lower latency there are local push algorithms (approximate PPR such as the Andersen–Chung–Lang push method) that touch only nodes near the seeds and skip the rest of the graph, and graph databases offer PPR as a built-in procedure. Cache nothing per query, but do cache the matrix and the node index.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I use HippoRAG on the GraphRAG index I already built, or do I need OpenIE triples?</summary>
+  <div><p>You can use the GraphRAG-style entity graph, which is what <code>minigraphrag</code> does. The differences are in coverage and granularity. OpenIE produces many more, finer-grained phrase nodes (including non-named concepts like “sonar module”), which helps associative questions. A typed entity graph is cleaner and smaller, with fewer noisy edges, which helps precision. If your questions mostly name entities, the existing graph works well; if they describe concepts, add phrase nodes or use HippoRAG 2's passage nodes.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why rank passages at all? Why not give the LLM the top PPR entities?</summary>
+  <div><p>Entity names and short descriptions lose the evidence. “Priya Nair” scoring 0.13 does not tell the reader that she previously worked at Marlow. Passages carry the actual sentences, dates and qualifiers, and they are what you cite. A good hybrid is to put the top passages in context and add a short table of top PPR entities with their descriptions, which Chapter 22 covers.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a PPR retriever with diagnostics</h3>
+  <p>Build a PPR retrieval command for the Kestrel index that exposes every intermediate step, and use it to tune α and seeding on the canonical questions.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>ppr --query "..." --alpha 0.5</code> prints linked seeds with link similarity and specificity, the top 10 nodes, the top 5 passages with scores, and the iteration count to convergence</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A unit test that checks <code>personalized_pagerank</code> against the hand-computed five-node example and against <code>networkx.pagerank</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An α sweep (0.3, 0.5, 0.7, 0.85) reporting recall@5 of supporting documents for questions 1–3 from <code>data/questions.jsonl</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An ablation with and without node specificity, and with and without passage-score normalization by entity count</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A short write-up of one query where PPR beat vector search and one where it lost, with the seeds that explain why</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can justify your chosen α and seeding scheme with a recall table, and explain your worst query from its seeds.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Personalized PageRank is a random walk that restarts at the question's entities: r = (1 − α) p + α · M r, with α the probability of following an edge in this course.</li>
+    <li>Check the convention before copying hyperparameters: “damping”, “teleport” and “restart” names are used inconsistently.</li>
+    <li>Power iteration converges geometrically at rate α; α = 0.5 keeps retrieval local and converges in a couple of dozen iterations.</li>
+    <li>HippoRAG indexes OpenIE triples with synonym edges, seeds PPR with linked query entities weighted by specificity, and scores passages by the mass of the entities they mention.</li>
+    <li>HippoRAG 2 adds passage nodes, query-to-triple matching and LLM triple filtering, improving associative retrieval without losing factual accuracy.</li>
+    <li>One PPR run finds bridge entities for multi-hop questions without an LLM loop, but it ranks rather than explains, and it misses evidence that names none of the seeds.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Gutiérrez, Shu, Gu, Yasunaga, Sun. <a href="https://arxiv.org/abs/2405.14831">HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models</a>. <span class="venue">NeurIPS 2024, arXiv 2405.14831</span></li>
+  <li>Gutiérrez, Shu, Qi, Zhou, Sun. <a href="https://arxiv.org/abs/2502.14802">From RAG to Memory: Non-Parametric Continual Learning for Large Language Models</a> (HippoRAG 2). <span class="venue">ICML 2025, arXiv 2502.14802</span></li>
+  <li>Brin, Page. <a href="https://doi.org/10.1016/S0169-7552(98)00110-X">The Anatomy of a Large-Scale Hypertextual Web Search Engine</a>. <span class="venue">Computer Networks, 1998</span></li>
+  <li>Haveliwala. <a href="https://doi.org/10.1145/511446.511513">Topic-Sensitive PageRank</a>. <span class="venue">WWW 2002</span></li>
+  <li>Tong, Faloutsos, Pan. <a href="https://doi.org/10.1109/ICDM.2006.70">Fast Random Walk with Restart and Its Applications</a>. <span class="venue">ICDM 2006</span></li>
+  <li>NetworkX. <a href="https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.link_analysis.pagerank_alg.pagerank.html">pagerank</a>: alpha, personalization and dangling parameters. <span class="venue">Documentation</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

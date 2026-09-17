@@ -1,0 +1,823 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graph shapes for retrieval | Graph RAG from Scratch</title>
+<meta name="description" content="The design space before you build: lexical graphs, entity graphs, linked hybrids, RAPTOR trees, community hierarchies, passage graphs, hypergraphs and curated knowledge graphs, and how to choose between them.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/06-graph-shapes.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/06-graph-shapes.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/06-graph-shapes.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="06-graph-shapes" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Graph shapes for retrieval</h1>
+  <p class="lede">“Build a graph” is not a design. Before spending a single LLM call, decide what the nodes are, what the edges mean, and which questions the shape must answer. This chapter maps the design space, from free lexical graphs to LLM-built community hierarchies, with the build cost and retrieval patterns of each.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Describe eight graph shapes used for retrieval and draw each one for the Kestrel Labs corpus</li>
+      <li>Estimate the indexing cost of each shape in LLM calls and embeddings as a function of corpus size</li>
+      <li>Name the retrieval patterns each shape enables, such as window expansion, entity hops, Personalized PageRank, map-reduce over summaries and collapsed-tree search</li>
+      <li>Choose a shape, or a combination, from the question types your users actually ask</li>
+      <li>Build a lexical graph with PART_OF, NEXT and SIMILAR_TO edges in NetworkX from <code>minigraphrag</code> text units</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why shape comes before building</h2>
+<p><a href="03-where-rag-breaks.html">Chapter 3</a> showed three ways vector RAG fails on Kestrel Labs: multi-hop questions (“Why did Kestrel start Project Tern?”), global questions (“What are the main themes?”), and relationships that live between chunks rather than inside one. Chapters <a href="04-graph-fundamentals.html">4</a> and <a href="05-knowledge-graphs.html">5</a> gave you the tools: graph algorithms and knowledge-graph modeling. It is tempting to jump straight to “extract entities with an LLM”, because that is what Microsoft GraphRAG does. But that is one point in a larger design space, and not always the right one.</p>
+<p>Every graph for retrieval answers three design questions:</p>
+<ol>
+  <li><strong>What is a node?</strong> A piece of the source text (document, section, chunk, sentence), a piece of extracted knowledge (entity, fact, event), or a piece of generated abstraction (summary, community report).</li>
+  <li><strong>What is an edge, and who creates it?</strong> Document structure (free and exact), embedding similarity (cheap and fuzzy), string matching or NER (cheap and shallow), or an LLM (expensive and descriptive).</li>
+  <li><strong>How will retrieval move?</strong> Expand a window, hop between entities, spread scores with PageRank, or read summaries top-down. A shape that does not support your retrieval pattern is dead weight.</li>
+</ol>
+<p>The cost differences are large. For the Kestrel corpus (12 documents, about 5,400 words), a lexical graph takes zero LLM calls. An entity graph with one gleaning round takes about two extraction calls per chunk plus summarization. A GraphRAG-style community hierarchy adds one report call per community. At 12 documents none of this matters; at 100,000 documents it decides whether the project ships.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 360" role="img" aria-labelledby="space-title">
+      <title id="space-title">The design space of graph shapes, placed by indexing cost on the horizontal axis and level of abstraction on the vertical axis</title>
+      <defs>
+        <marker id="ch6-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <line class="d-line" x1="60" y1="320" x2="660" y2="320" marker-end="url(#ch6-arr)"/>
+      <line class="d-line" x1="60" y1="320" x2="60" y2="20" marker-end="url(#ch6-arr)"/>
+      <text class="d-text small" x="660" y="342" text-anchor="end">indexing cost (LLM calls per chunk)</text>
+      <text class="d-text small" x="70" y="30">abstraction</text>
+      <text class="d-text small" x="70" y="310">raw text</text>
+
+      <rect class="d-box node" x="80" y="250" width="150" height="44" rx="8"/>
+      <text class="d-text bold" x="155" y="270" text-anchor="middle">(a) Lexical graph</text>
+      <text class="d-text small" x="155" y="286" text-anchor="middle">no LLM</text>
+
+      <rect class="d-box node" x="80" y="180" width="150" height="44" rx="8"/>
+      <text class="d-text bold" x="155" y="200" text-anchor="middle">(f) Passage graph</text>
+      <text class="d-text small" x="155" y="216" text-anchor="middle">NER, or LLM triples</text>
+
+      <rect class="d-box ghost" x="250" y="250" width="150" height="44" rx="8"/>
+      <text class="d-text bold" x="325" y="270" text-anchor="middle">(h) Curated KG</text>
+      <text class="d-text small" x="325" y="286" text-anchor="middle">already built; link to it</text>
+
+      <rect class="d-box edge" x="300" y="170" width="150" height="44" rx="8"/>
+      <text class="d-text bold" x="375" y="190" text-anchor="middle">(b) Entity graph</text>
+      <text class="d-text small" x="375" y="206" text-anchor="middle">1–3 calls per chunk</text>
+
+      <rect class="d-box edge" x="470" y="200" width="180" height="44" rx="8"/>
+      <text class="d-text bold" x="560" y="220" text-anchor="middle">(c) Lexical + entity</text>
+      <text class="d-text small" x="560" y="236" text-anchor="middle">same calls, more links</text>
+
+      <rect class="d-box edge" x="440" y="120" width="150" height="44" rx="8"/>
+      <text class="d-text bold" x="515" y="140" text-anchor="middle">(g) Hypergraph</text>
+      <text class="d-text small" x="515" y="156" text-anchor="middle">n-ary fact extraction</text>
+
+      <rect class="d-box comm" x="170" y="80" width="170" height="44" rx="8"/>
+      <text class="d-text bold" x="255" y="100" text-anchor="middle">(d) Tree index</text>
+      <text class="d-text small" x="255" y="116" text-anchor="middle">summaries per cluster</text>
+
+      <rect class="d-box comm" x="420" y="40" width="220" height="44" rx="8"/>
+      <text class="d-text bold" x="530" y="60" text-anchor="middle">(e) Community hierarchy</text>
+      <text class="d-text small" x="530" y="76" text-anchor="middle">entity graph + reports</text>
+    </svg>
+  </div>
+  <figcaption>A rough map, not a scale drawing. Moving right buys richer structure with LLM calls; moving up buys answers to broad questions with summaries. Real systems combine several shapes, and letters match the sections below.</figcaption>
+</figure>
+
+<h2>Shapes built from the text itself</h2>
+
+<h3>(a) The lexical graph</h3>
+<p>A <strong>lexical graph</strong> represents the documents, not the world they describe. Nodes are documents, sections and chunks; edges record where text sits:</p>
+<ul>
+  <li><strong>PART_OF</strong>: chunk → section → document. Sometimes called a <em>parent-child</em> structure.</li>
+  <li><strong>NEXT</strong>: chunk → following chunk in reading order.</li>
+  <li><strong>SIMILAR_TO</strong> (optional): chunk ↔ chunk when their embeddings are close, typically keeping the top k neighbors above a threshold.</li>
+</ul>
+<p>The graphrag.com pattern catalog calls these <em>Lexical Graph</em>, <em>Parent-Child Lexical Graph</em> and <em>Lexical Graph with Sibling Structure</em>, and adds variants with a section hierarchy or with LLM-generated hypothetical questions attached to chunks.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 280" role="img" aria-labelledby="lex-title">
+      <title id="lex-title">A lexical graph for two Kestrel documents: document nodes, section nodes, chunk nodes with NEXT edges, and a SIMILAR_TO edge across documents</title>
+      <defs>
+        <marker id="ch6-arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box ghost" x="14" y="14" width="316" height="232" rx="10"/>
+      <rect class="d-box ghost" x="350" y="14" width="316" height="232" rx="10"/>
+      <rect class="d-box" x="92" y="28" width="160" height="34" rx="6"/>
+      <text class="d-text bold" x="172" y="50" text-anchor="middle">Doc 07: Marlow buys</text>
+      <rect class="d-box" x="428" y="28" width="160" height="34" rx="6"/>
+      <text class="d-text bold" x="508" y="50" text-anchor="middle">Doc 09: Project Tern</text>
+      <rect class="d-box" x="58" y="96" width="110" height="30" rx="6"/>
+      <text class="d-text small" x="113" y="116" text-anchor="middle">§ (intro)</text>
+      <rect class="d-box" x="190" y="96" width="120" height="30" rx="6"/>
+      <text class="d-text small" x="250" y="116" text-anchor="middle">§ Outside customers</text>
+      <rect class="d-box" x="378" y="96" width="120" height="30" rx="6"/>
+      <text class="d-text small" x="438" y="116" text-anchor="middle">§ Why the name?</text>
+      <rect class="d-box" x="520" y="96" width="130" height="30" rx="6"/>
+      <text class="d-text small" x="585" y="116" text-anchor="middle">§ What Tern replaces</text>
+      <line class="d-line" x1="113" y1="96" x2="150" y2="62" marker-end="url(#ch6-arr2)"/>
+      <line class="d-line" x1="250" y1="96" x2="200" y2="62" marker-end="url(#ch6-arr2)"/>
+      <line class="d-line" x1="438" y1="96" x2="480" y2="62" marker-end="url(#ch6-arr2)"/>
+      <line class="d-line" x1="585" y1="96" x2="540" y2="62" marker-end="url(#ch6-arr2)"/>
+      <text class="d-text small mono" x="26" y="84">PART_OF</text>
+
+      <circle class="d-node" cx="70" cy="190" r="18"/>
+      <text class="d-text small" x="70" y="224" text-anchor="middle">07-000</text>
+      <circle class="d-node" cx="160" cy="190" r="18"/>
+      <text class="d-text small" x="160" y="224" text-anchor="middle">07-001</text>
+      <circle class="d-node" cx="250" cy="190" r="18"/>
+      <text class="d-text small" x="250" y="224" text-anchor="middle">07-002</text>
+      <line class="d-line" x1="88" y1="190" x2="140" y2="190" marker-end="url(#ch6-arr2)"/>
+      <line class="d-line" x1="178" y1="190" x2="230" y2="190" marker-end="url(#ch6-arr2)"/>
+      <text class="d-text small mono" x="92" y="180">NEXT</text>
+      <line class="d-line faint" x1="75" y1="172" x2="105" y2="126"/>
+      <line class="d-line faint" x1="160" y1="172" x2="125" y2="126"/>
+      <line class="d-line faint" x1="250" y1="172" x2="250" y2="126"/>
+
+      <circle class="d-node" cx="430" cy="190" r="18"/>
+      <text class="d-text small" x="430" y="224" text-anchor="middle">09-001</text>
+      <circle class="d-node" cx="560" cy="190" r="18"/>
+      <text class="d-text small" x="560" y="224" text-anchor="middle">09-002</text>
+      <line class="d-line" x1="448" y1="190" x2="540" y2="190" marker-end="url(#ch6-arr2)"/>
+      <line class="d-line faint" x1="430" y1="172" x2="438" y2="126"/>
+      <line class="d-line faint" x1="560" y1="172" x2="580" y2="126"/>
+
+      <path class="d-line hot dash" d="M 250 208 Q 340 262 560 208"/>
+      <text class="d-text small mono" x="340" y="268" text-anchor="middle">SIMILAR_TO 0.41</text>
+    </svg>
+  </div>
+  <figcaption>A lexical graph over two documents. Structure edges are exact and free; SIMILAR_TO edges come from embeddings and connect chunks across documents that talk about the same thing, here Deepcast ending its outside contracts. Chunk ids and the score are illustrative.</figcaption>
+</figure>
+
+<p><strong>What it is good at.</strong> Fixing the “chunk boundary” problem: a vector hit on the middle of an explanation can be widened to the previous and next chunks, or to its whole section. Navigating long, structured documents (manuals, contracts, filings) by section. Finding related passages in other documents through SIMILAR_TO without any LLM.</p>
+<p><strong>Build cost.</strong> Zero LLM calls. One embedding per chunk, which you already paid for in vector RAG, plus <em>O(N·k)</em> similarity edges if you add them. Computing exact top-k neighbors for every chunk is <em>O(N²)</em> dot products, which is fine for tens of thousands of chunks and needs an approximate nearest-neighbor index beyond that.</p>
+<p><strong>Retrieval patterns.</strong> <em>Window expansion</em> (hit ± n NEXT hops), <em>parent-child retrieval</em> (match small chunks for precision, return their larger parent for context), <em>similarity hops</em> (one SIMILAR_TO hop from each hit), and <em>metadata filters</em> by document date or source.</p>
+<p><strong>What it cannot do.</strong> It knows nothing about entities. Doc 07 never mentions Kestrel Labs, so no lexical edge connects the acquisition to Kestrel's decision, unless the embeddings happen to be close. Multi-hop questions over named things still fail.</p>
+
+<h3>(b) The entity graph extracted from text</h3>
+<p>This is the shape most people mean by GraphRAG. An LLM reads each chunk and emits entities and relationships (<a href="08-entity-relation-extraction.html">Chapter 8</a>); duplicates are merged (<a href="09-entity-resolution.html">Chapter 9</a>); descriptions are summarized. The graphrag.com catalog calls a graph of real-world things a <em>Domain Graph</em>. Microsoft GraphRAG and LightRAG both build one, and each entity and relationship keeps the ids of the chunks it came from.</p>
+<p><strong>What it is good at.</strong> Multi-hop questions over named things: the Marlow → Deepcast → Kestrel → Tern chain becomes four edges. Aggregating everything said about one entity across documents into a single description. Community detection, which needs entity-level structure.</p>
+<p><strong>Build cost.</strong> <em>N × (1 + g)</em> extraction calls for <em>N</em> chunks and <em>g</em> gleaning rounds, plus summarization calls for entities and relationships with many descriptions. Output tokens are the expensive part: extraction writes long structured records. Quality depends on the extraction model, and errors (missed entities, invented relations, unmerged aliases) are baked into the index until you rebuild.</p>
+<p><strong>Retrieval patterns.</strong> <em>Entity-anchored neighborhood expansion</em> (local search, <a href="14-local-search.html">Chapter 14</a>), <em>relation matching</em> by keywords (LightRAG, <a href="16-lightrag.html">Chapter 16</a>), <em>path finding</em> between query entities (<a href="18-paths-and-agents.html">Chapter 18</a>).</p>
+
+<h3>(c) Lexical graph linked to entities</h3>
+<p>Put shapes (a) and (b) in one graph and connect them with <strong>MENTIONS</strong> edges from each chunk to the entities extracted from it. The graphrag.com catalog calls this <em>Lexical Graph with Extracted Entities</em>. It is what you get for free if you keep provenance ids from extraction: each extracted mention carries a <code>source_id</code>, <code>build_graph</code> collects them into a <code>source_ids</code> list on the node, and that list <em>is</em> the node's MENTIONS edges, stored inside out.</p>
+<p>The step-through below shows the same Kestrel facts in all three shapes, then a retrieval walk that only the hybrid supports.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Same facts, three shapes",
+  "subtitle": "Lexical, entity, and the linked hybrid",
+  "height": 440,
+  "directed": true,
+  "nodes": [
+    {"id": "doc07", "label": "Doc 07", "group": 7, "x": 8, "y": 26},
+    {"id": "c07a", "label": "07-000", "group": 6, "x": 28, "y": 12},
+    {"id": "c07b", "label": "07-001", "group": 6, "x": 28, "y": 40},
+    {"id": "doc09", "label": "Doc 09", "group": 7, "x": 8, "y": 74},
+    {"id": "c09a", "label": "09-000", "group": 6, "x": 28, "y": 60},
+    {"id": "c09b", "label": "09-001", "group": 6, "x": 28, "y": 88},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 64, "y": 12},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 86, "y": 36},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 62, "y": 58},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 88, "y": 84}
+  ],
+  "edges": [
+    {"source": "c07a", "target": "doc07", "label": "PART_OF"},
+    {"source": "c07b", "target": "doc07", "label": "PART_OF"},
+    {"source": "c07a", "target": "c07b", "label": "NEXT"},
+    {"source": "c09a", "target": "doc09", "label": "PART_OF"},
+    {"source": "c09b", "target": "doc09", "label": "PART_OF"},
+    {"source": "c09a", "target": "c09b", "label": "NEXT"},
+    {"source": "c07b", "target": "c09b", "label": "SIMILAR_TO"},
+    {"source": "marlow", "target": "deepcast", "label": "ACQUIRED"},
+    {"source": "deepcast", "target": "kestrel", "label": "SUPPLIED"},
+    {"source": "kestrel", "target": "tern", "label": "RUNS"},
+    {"source": "tern", "target": "deepcast", "label": "REPLACES"},
+    {"source": "c07a", "target": "marlow"},
+    {"source": "c07a", "target": "deepcast"},
+    {"source": "c07b", "target": "deepcast"},
+    {"source": "c09a", "target": "kestrel"},
+    {"source": "c09a", "target": "tern"},
+    {"source": "c09b", "target": "deepcast"},
+    {"source": "c09b", "target": "tern"}
+  ],
+  "legend": {"7": "Document", "6": "Chunk", "1": "Organization", "3": "Project"},
+  "steps": [
+    {"caption": "Two documents: the April 2025 Maritime Industry Journal article (Doc 07) and the June 2025 Kestrel engineering blog post announcing Project Tern (Doc 09), each split into chunks, and the entities they describe.", "dim": false},
+    {"caption": "<strong>(a) Lexical shape.</strong> Only documents and chunks. PART_OF and NEXT come from the file structure; SIMILAR_TO from embeddings (both chunks discuss Deepcast ending supply). No LLM calls, but no notion of Deepcast as a thing.", "active": ["doc07", "c07a", "c07b", "doc09", "c09a", "c09b"], "edges": ["c07a>doc07", "c07b>doc07", "c07a>c07b", "c09a>doc09", "c09b>doc09", "c09a>c09b", "c07b>c09b"]},
+    {"caption": "<strong>(b) Entity shape.</strong> Only extracted knowledge. The causal chain is explicit, but the graph has forgotten which sentence said what, so answers cannot cite sources.", "active": ["marlow", "deepcast", "kestrel", "tern"], "edges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>tern", "tern>deepcast"]},
+    {"caption": "<strong>(c) Hybrid shape.</strong> MENTIONS edges link each chunk to the entities extracted from it. Now every entity has evidence, and every chunk has meaning.", "active": ["c07a", "c07b", "c09a", "c09b", "marlow", "deepcast", "kestrel", "tern"], "edges": ["c07a>marlow", "c07a>deepcast", "c07b>deepcast", "c09a>kestrel", "c09a>tern", "c09b>deepcast", "c09b>tern"], "visitedEdges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>tern", "tern>deepcast"]},
+    {"caption": "<strong>Retrieval walk for “Why did Kestrel start Project Tern?”</strong> Vector search hits chunk 09-000 (it names Tern). MENTIONS leads to Project Tern; REPLACES leads to Deepcast; ACQUIRED leads back to Marlow Dynamics; MENTIONS leads to chunk 07-000, the article about the acquisition. Two chunks from two documents, joined through entities, with text to cite.", "active": ["c07a"], "visited": ["c09a", "tern", "deepcast", "marlow"], "edges": ["c07a>marlow"], "visitedEdges": ["c09a>tern", "tern>deepcast", "marlow>deepcast"]}
+  ]
+}
+</script>
+</div>
+
+<p><strong>What it is good at.</strong> Everything (b) does, plus grounding: every fact can be traced to text, every retrieved entity can bring its best supporting chunks into the prompt, and vector hits on chunks can be expanded through entities. This is the shape <code>minigraphrag</code> builds, and local search's context (entities, relationships <em>and</em> source text units) depends on it.</p>
+<p><strong>Build cost.</strong> The same LLM calls as (b). The extra edges are bookkeeping.</p>
+<p><strong>Retrieval patterns.</strong> <em>Chunk → entity → chunk</em> expansion, <em>entity-to-evidence</em> ranking (which chunks mention the most retrieved entities), and <em>graph-enhanced vector search</em>: start from vector hits, then add chunks that share entities with them.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Default choice</span>
+  <p>If you are unsure, build (c). It degrades gracefully: with extraction turned off it is still a lexical graph, and with it on you can always drop the chunk layer from a query. Shapes that throw away the link to source text are hard to debug and cannot cite.</p>
+</div>
+
+<h2>Shapes that add summaries</h2>
+<p>Global questions such as “What are the main themes in this corpus?” have no single answer passage. Neither chunks nor entities answer them; <em>summaries</em> do. Two families of shapes add summary nodes on top of the text, and they differ in what gets clustered.</p>
+
+<h3>(d) Tree indexes: RAPTOR and HiRAG</h3>
+<p><strong>RAPTOR</strong> (Recursive Abstractive Processing for Tree-Organized Retrieval) builds a tree bottom-up directly from chunks, with no entity extraction at all:</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "RAPTOR tree construction",
+  "perRow": 3,
+  "stages": [
+    {"label": "Chunk", "detail": "Split the corpus into short contiguous chunks; the paper uses about 100 tokens. These are the leaves of the tree."},
+    {"label": "Embed", "detail": "Embed every leaf with a sentence encoder (the paper uses SBERT)."},
+    {"label": "Reduce dimensions", "detail": "Project embeddings to a low dimension with UMAP, so the clustering step works well."},
+    {"label": "Soft cluster", "detail": "Fit a Gaussian mixture model; choose the number of clusters with the Bayesian information criterion. A chunk may belong to several clusters."},
+    {"label": "Summarize clusters", "detail": "An LLM writes one summary per cluster. Each summary becomes a new node, the parent of its cluster's members."},
+    {"label": "Recurse", "detail": "Embed the summaries and cluster them again, layer by layer, until the layer is too small to cluster. The top layer is a handful of corpus-level summaries."}
+  ]
+}
+</script>
+</div>
+
+<p>At query time RAPTOR supports two modes. <em>Tree traversal</em> starts at the root layer, picks the most similar nodes, descends into their children, and repeats. <em>Collapsed tree</em> ignores the hierarchy and puts every node, leaves and summaries alike, into one pool, then takes the most similar nodes until the token budget is full. The paper found collapsed tree consistently performed better, because it lets each question pick its own mix of detail and abstraction.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 280" role="img" aria-labelledby="tree-title">
+      <title id="tree-title">Left: a RAPTOR tree where chunks are clustered and summarized upward. Right: a GraphRAG community hierarchy where entities are grouped into nested communities, each with a report</title>
+      <text class="d-text bold" x="16" y="22">(d) RAPTOR: cluster chunks</text>
+      <rect class="d-box comm" x="120" y="36" width="110" height="30" rx="6"/>
+      <text class="d-text small" x="175" y="56" text-anchor="middle">Root summary</text>
+      <rect class="d-box comm" x="30" y="104" width="120" height="30" rx="6"/>
+      <text class="d-text small" x="90" y="124" text-anchor="middle">Supply shock</text>
+      <rect class="d-box comm" x="200" y="104" width="120" height="30" rx="6"/>
+      <text class="d-text small" x="260" y="124" text-anchor="middle">Reef science</text>
+      <line class="d-line" x1="175" y1="66" x2="90" y2="104"/>
+      <line class="d-line" x1="175" y1="66" x2="260" y2="104"/>
+      <rect class="d-box node" x="16" y="190" width="54" height="26" rx="4"/>
+      <text class="d-text small" x="43" y="207" text-anchor="middle">03-000</text>
+      <rect class="d-box node" x="78" y="190" width="54" height="26" rx="4"/>
+      <text class="d-text small" x="105" y="207" text-anchor="middle">07-001</text>
+      <rect class="d-box node" x="140" y="190" width="54" height="26" rx="4"/>
+      <text class="d-text small" x="167" y="207" text-anchor="middle">08-000</text>
+      <rect class="d-box node" x="202" y="190" width="54" height="26" rx="4"/>
+      <text class="d-text small" x="229" y="207" text-anchor="middle">04-000</text>
+      <rect class="d-box node" x="264" y="190" width="54" height="26" rx="4"/>
+      <text class="d-text small" x="291" y="207" text-anchor="middle">06-001</text>
+      <line class="d-line" x1="90" y1="134" x2="43" y2="190"/>
+      <line class="d-line" x1="90" y1="134" x2="105" y2="190"/>
+      <line class="d-line" x1="90" y1="134" x2="167" y2="190"/>
+      <line class="d-line" x1="260" y1="134" x2="229" y2="190"/>
+      <line class="d-line" x1="260" y1="134" x2="291" y2="190"/>
+      <line class="d-line dash" x1="260" y1="134" x2="167" y2="190"/>
+      <text class="d-text small" x="16" y="244">Leaves are chunks. The dashed edge is a soft</text>
+      <text class="d-text small" x="16" y="260">assignment: 08-000 sits in two clusters.</text>
+
+      <line class="d-line faint" x1="340" y1="12" x2="340" y2="268"/>
+
+      <text class="d-text bold" x="356" y="22">(e) GraphRAG: cluster entities</text>
+      <rect class="d-area" x="360" y="40" width="306" height="150" rx="14"/>
+      <text class="d-text small" x="372" y="58">Level 0 community + report</text>
+      <rect class="d-area" x="374" y="70" width="136" height="108" rx="12"/>
+      <text class="d-text small" x="384" y="88">Level 1 + report</text>
+      <rect class="d-area" x="522" y="70" width="132" height="108" rx="12"/>
+      <text class="d-text small" x="532" y="88">Level 1 + report</text>
+      <circle class="d-node" cx="410" cy="120" r="12"/>
+      <circle class="d-node" cx="470" cy="112" r="12"/>
+      <circle class="d-node" cx="440" cy="156" r="12"/>
+      <line class="d-line" x1="410" y1="120" x2="470" y2="112"/>
+      <line class="d-line" x1="410" y1="120" x2="440" y2="156"/>
+      <line class="d-line" x1="470" y1="112" x2="440" y2="156"/>
+      <circle class="d-node" cx="560" cy="118" r="12"/>
+      <circle class="d-node" cx="620" cy="126" r="12"/>
+      <circle class="d-node" cx="590" cy="160" r="12"/>
+      <line class="d-line" x1="560" y1="118" x2="620" y2="126"/>
+      <line class="d-line" x1="560" y1="118" x2="590" y2="160"/>
+      <line class="d-line" x1="482" y1="112" x2="548" y2="118"/>
+      <text class="d-text small" x="378" y="176">Marlow</text>
+      <text class="d-text small" x="600" y="104">Kestrel</text>
+      <text class="d-text small" x="356" y="222">Leaves are entities from an extracted graph.</text>
+      <text class="d-text small" x="356" y="238">Communities come from graph structure (Leiden),</text>
+      <text class="d-text small" x="356" y="254">not embeddings; reports summarize each one.</text>
+    </svg>
+  </div>
+  <figcaption>Both shapes add a hierarchy of summaries. RAPTOR clusters chunk embeddings, so it needs no extraction. GraphRAG clusters an entity graph by its edges, so communities reflect stated relationships rather than topical similarity.</figcaption>
+</figure>
+
+<p><strong>What trees are good at.</strong> Questions that need to integrate information spread across a long document or many related passages, at a chosen level of detail: “How did Kestrel's supply situation evolve from 2022 to 2025?”. Corpora where entities are not the natural unit, like narrative text, meeting transcripts or opinion pieces.</p>
+<p><strong>Build cost.</strong> Embeddings for every chunk and summary, plus one LLM summary per cluster. If clusters average <em>c</em> members, layer sizes shrink roughly geometrically (<em>N, N/c, N/c², …</em>), so the total number of summaries is about <em>N/(c − 1)</em>. Soft clustering adds some duplication. That is usually far fewer calls than per-chunk extraction, but each summary call has a long input. Updates are awkward: adding documents can change the clusters above them.</p>
+<p><strong>Retrieval patterns.</strong> <em>Collapsed-tree search</em> (top-k over all levels), <em>tree traversal</em>, and <em>zoom</em>: retrieve a summary, then pull its children for evidence.</p>
+
+<p><strong>HiRAG</strong> (Retrieval-Augmented Generation with Hierarchical Knowledge) brings the tree idea to entity graphs. Starting from an LLM-extracted knowledge graph, it clusters entity embeddings with Gaussian mixture models, asks an LLM to write <em>summary entities</em> for each cluster, and repeats on the new layer, stopping when the clusters stop getting sparser (the paper uses a 5% threshold on the change in cluster sparsity). Retrieval then assembles three levels of context: <em>local</em> (descriptions of the entities matched to the query), <em>global</em> (reports for the communities those entities belong to) and <em>bridge</em> (the triples on paths that connect the local entities to their communities). It combines shapes (b), (d) and (e).</p>
+
+<div class="callout paper">
+  <span class="callout-title">Sarthi et al., RAPTOR (2024)</span>
+  <p>RAPTOR recursively embeds, clusters and summarizes chunks into a tree, and retrieves across its levels. The paper reports substantial gains over retrieving only contiguous chunks on question answering that needs information integrated across a long document; with GPT-4 as the reader, it improves the best QuALITY accuracy by 20 points absolute. It also compares tree traversal with the collapsed tree and finds the collapsed tree better. <a href="12-community-reports.html">Chapter 12</a> implements a RAPTOR-style tree next to GraphRAG's community reports so you can compare them on Kestrel.</p>
+</div>
+
+<h3>(e) The community hierarchy</h3>
+<p>Microsoft GraphRAG's distinctive shape starts from the linked entity graph (c), runs hierarchical Leiden community detection over it, and asks an LLM to write a <strong>community report</strong> for every community at every level: a title, a summary, a rating of importance and a list of findings. The result is a hierarchy with entities at the bottom and reports above them. The graphrag.com catalog calls it <em>Lexical Graph with Extracted Entities and Community Summaries</em>.</p>
+<p>For Kestrel Labs you would expect communities close to the running example's themes: leadership and Project Tern; reef science around Tidewater and Halden Reef; Marlow and Deepcast; Brightwater and Lena Park; the council and the Ocean Health Act. Their reports are exactly the raw material for “What are the main themes?”.</p>
+<p><strong>What it is good at.</strong> Global sensemaking over a whole corpus: themes, risks, “what is going on here”. Local questions too, because community reports can be added to entity-anchored context.</p>
+<p><strong>Build cost.</strong> Everything in (b), plus one report call per community across all levels. Reports have long inputs (entity and relationship tables) and long outputs. This is the most expensive shape in this chapter; LazyGraphRAG and other cost-cutting variants (<a href="26-cost-scaling.html">Chapter 26</a>) exist largely to avoid paying for it upfront.</p>
+<p><strong>Retrieval patterns.</strong> <em>Map-reduce global search</em> over reports at a chosen level (<a href="15-global-search.html">Chapter 15</a>), <em>dynamic community selection</em> that walks the hierarchy top-down and prunes irrelevant branches, and <em>DRIFT</em>-style search that starts from community reports and follows up with local search.</p>
+
+<table>
+  <thead><tr><th></th><th>RAPTOR tree</th><th>GraphRAG community hierarchy</th></tr></thead>
+  <tbody>
+    <tr><td>Clusters what</td><td>Chunk and summary embeddings</td><td>Entity graph structure</td></tr>
+    <tr><td>Requires extraction</td><td>No</td><td>Yes</td></tr>
+    <tr><td>Grouping reflects</td><td>Topical similarity of text</td><td>Stated relationships between entities</td></tr>
+    <tr><td>Membership</td><td>Soft (a chunk can be in several clusters)</td><td>Hard per level (each entity in one community)</td></tr>
+    <tr><td>Main retrieval</td><td>Collapsed-tree top-k</td><td>Map-reduce over reports, plus local search</td></tr>
+    <tr><td>Weak spot</td><td>No entity-level multi-hop</td><td>Cost, and quality depends on extraction</td></tr>
+  </tbody>
+</table>
+
+<h2>Passage graphs, hypergraphs and curated graphs</h2>
+
+<h3>(f) Passage graphs and knowledge-indexing graphs</h3>
+<p>A different family keeps <strong>passages as first-class nodes</strong> and uses entities mainly as <em>connectors</em> between them. The goal is a better index for finding passages; the graph is a means, never the product. Three examples show the range.</p>
+<ul>
+  <li><strong>HippoRAG and HippoRAG 2.</strong> HippoRAG extracts open information-extraction triples into a phrase graph and ranks passages by running Personalized PageRank from the entities in the question (<a href="17-ppr-hipporag.html">Chapter 17</a>). HippoRAG 2 adds passage nodes to the graph, connected to the phrases extracted from them, keeps the synonym edges between phrases with similar embeddings, and seeds PageRank from both query-related phrases and passages.</li>
+  <li><strong>LinearRAG.</strong> LinearRAG builds a relation-free “Tri-Graph” with three node types: entities, sentences and passages. Entities are found with a lightweight named-entity recognizer such as spaCy, not an LLM, and edges record which sentences mention and which passages contain each entity. There are no entity-to-entity relations at all. Retrieval first activates relevant entities by propagating query similarity through sentences (a semantic bridge from one entity to others that co-occur with it), then ranks passages with Personalized PageRank over the entity–passage graph. Its authors argue this avoids the noise of LLM relation extraction and makes indexing scale linearly with corpus size without LLM token cost.</li>
+  <li><strong>KAG.</strong> KAG (Knowledge Augmented Generation) targets professional domains. Among its components is <em>mutual indexing</em> between a knowledge graph and the original chunks: graph elements point to the chunks they came from, and chunks point to the graph elements they contain, so reasoning can move between symbolic structure and text in both directions. It pairs this with a logical-form-guided hybrid reasoning engine.</li>
+</ul>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 280" role="img" aria-labelledby="tri-title">
+      <title id="tri-title">A LinearRAG-style Tri-Graph: passage nodes on top, sentence nodes in the middle, entity nodes at the bottom, with contain and mention edges and no entity-to-entity edges</title>
+      <text class="d-text small" x="16" y="48">passages</text>
+      <text class="d-text small" x="16" y="128">sentences</text>
+      <text class="d-text small" x="16" y="210">entities</text>
+      <rect class="d-box" x="130" y="28" width="150" height="32" rx="6"/>
+      <text class="d-text small" x="205" y="49" text-anchor="middle">Passage 07-000</text>
+      <rect class="d-box" x="420" y="28" width="150" height="32" rx="6"/>
+      <text class="d-text small" x="495" y="49" text-anchor="middle">Passage 09-001</text>
+      <rect class="d-box node" x="96" y="110" width="110" height="28" rx="4"/>
+      <text class="d-text small" x="151" y="129" text-anchor="middle">“Marlow … acquired”</text>
+      <rect class="d-box node" x="226" y="110" width="110" height="28" rx="4"/>
+      <text class="d-text small" x="281" y="129" text-anchor="middle">“… not renew …”</text>
+      <rect class="d-box node" x="410" y="110" width="170" height="28" rx="4"/>
+      <text class="d-text small" x="495" y="129" text-anchor="middle">“Tern will replace …”</text>
+      <line class="d-line" x1="180" y1="60" x2="151" y2="110"/>
+      <line class="d-line" x1="230" y1="60" x2="281" y2="110"/>
+      <line class="d-line" x1="495" y1="60" x2="495" y2="110"/>
+      <circle class="d-node warm" cx="150" cy="206" r="16"/>
+      <text class="d-text small" x="150" y="238" text-anchor="middle">Marlow Dynamics</text>
+      <circle class="d-node warm" cx="330" cy="206" r="16"/>
+      <text class="d-text small" x="330" y="238" text-anchor="middle">Deepcast</text>
+      <circle class="d-node warm" cx="530" cy="206" r="16"/>
+      <text class="d-text small" x="530" y="238" text-anchor="middle">Project Tern</text>
+      <line class="d-line" x1="151" y1="138" x2="150" y2="190"/>
+      <line class="d-line" x1="160" y1="138" x2="318" y2="196"/>
+      <line class="d-line" x1="281" y1="138" x2="326" y2="190"/>
+      <line class="d-line" x1="470" y1="138" x2="342" y2="196"/>
+      <line class="d-line" x1="520" y1="138" x2="530" y2="190"/>
+      <text class="d-text small" x="16" y="270">Lines between sentences and entities are mention edges. Passage–entity contain edges are omitted for clarity.</text>
+    </svg>
+  </div>
+  <figcaption>A relation-free passage graph in the style of LinearRAG. Deepcast connects the two passages through the sentences that mention it, without any LLM-extracted relation. Sentence texts are abbreviated.</figcaption>
+</figure>
+
+<p><strong>What passage graphs are good at.</strong> Multi-hop passage retrieval at low indexing cost: the question's entities activate passages that share entities with them, several hops away. They produce ranked passages, which slot straight into an existing RAG prompt.</p>
+<p><strong>Build cost.</strong> Ranges from no LLM calls (NER plus embeddings, as in LinearRAG) to per-chunk LLM triple extraction (HippoRAG). No summaries.</p>
+<p><strong>Retrieval patterns.</strong> <em>Personalized PageRank</em> from query entities, <em>score propagation</em> along mention edges, <em>entity-overlap reranking</em> of vector hits. They are weak on global questions, since nothing summarizes the corpus.</p>
+
+<h3>(g) Hypergraphs</h3>
+<p>A binary edge connects two nodes. A <strong>hyperedge</strong> connects any number. Recall the Series B from <a href="05-knowledge-graphs.html">Chapter 5</a>: Kestrel Labs, Brightwater Capital, two new funds, $40 million, 23 September 2025. As binary edges it shatters into pairs that lose the fact that they are one event; as a hyperedge it stays whole. HyperGraphRAG, for example, extracts n-ary facts as hyperedges over the entities they involve and retrieves by matching both entities and hyperedges to the question.</p>
+<p><strong>Good at</strong> domains dense with multi-party facts: medicine (drug, dose, condition, outcome), law, finance. <strong>Build cost</strong> is similar to (b), with harder extraction. <strong>Retrieval</strong> matches hyperedges as units, and many graph algorithms need hypergraph-specific versions. <a href="31-multimodal-hypergraph.html">Chapter 31</a> covers them properly; until then, the event-node pattern from Chapter 5 is the practical approximation in an ordinary graph.</p>
+
+<h3>(h) Existing curated knowledge graphs</h3>
+<p>Sometimes the graph already exists: Wikidata, a biomedical ontology, a product catalog, or an enterprise graph of customers, contracts and tickets. The shape is whatever its schema says, usually a typed, directed multigraph like Chapter 5's. <strong>Good at</strong> precise, structured and temporal questions (“Who is the CTO?”, “Which contracts renew in Q3?”). <strong>Build cost</strong> is zero for the graph, but you must <em>link</em> your documents to it: recognize mentions and resolve them to the graph's ids. <strong>Retrieval patterns</strong> are structured queries, often generated by an LLM (Text2Cypher, <a href="20-text2cypher.html">Chapter 20</a>), and path reasoning over typed edges (Think-on-Graph, <a href="18-paths-and-agents.html">Chapter 18</a>). Combined with a lexical graph via MENTIONS edges, a curated KG becomes shape (c) with an authoritative entity layer.</p>
+
+<h2>Choosing a shape</h2>
+
+<h3>Cost at a glance</h3>
+<p>For <em>N</em> chunks, <em>g</em> gleaning rounds, <em>C</em> communities across all levels, and average RAPTOR cluster size <em>c</em>. The Kestrel column assumes 24 chunks (<code>chunk_documents(docs, size=300, overlap=50)</code>, sizes in words) for everything except RAPTOR, which uses its roughly 100-token leaves.</p>
+<table>
+  <thead><tr><th>Shape</th><th>LLM calls to build</th><th>Other work</th><th>Kestrel, roughly</th></tr></thead>
+  <tbody>
+    <tr><td>(a) Lexical</td><td>0</td><td>N embeddings, top-k similarity</td><td>0 calls, 24 embeddings</td></tr>
+    <tr><td>(b) Entity</td><td>N(1 + g) + summaries</td><td>Resolution</td><td>48 extraction calls with g = 1, plus a few dozen summaries</td></tr>
+    <tr><td>(c) Lexical + entity</td><td>Same as (b)</td><td>Store provenance edges</td><td>Same as (b)</td></tr>
+    <tr><td>(d) RAPTOR tree</td><td>≈ N/(c − 1) summaries</td><td>Embeddings of all nodes, UMAP + GMM per layer</td><td>About 70 leaves; with c ≈ 5, fewer than 20 summaries</td></tr>
+    <tr><td>(e) Community hierarchy</td><td>(b) + C reports</td><td>Hierarchical Leiden</td><td>(b) plus 5 to 10 reports</td></tr>
+    <tr><td>(f) Passage graph (NER-based)</td><td>0</td><td>NER, sentence and passage embeddings</td><td>0 calls</td></tr>
+    <tr><td>(f) Passage graph (triple-based)</td><td>About N</td><td>Synonym edges from embeddings</td><td>About 24 calls</td></tr>
+    <tr><td>(g) Hypergraph</td><td>About N(1 + g)</td><td>Hyperedge storage and matching</td><td>Similar to (b)</td></tr>
+    <tr><td>(h) Curated KG</td><td>0 for the graph; optional for linking</td><td>Entity linking to existing ids</td><td>Not available for fictional Kestrel</td></tr>
+  </tbody>
+</table>
+<p>Calls are only part of the bill. Extraction and report calls produce long outputs, which are slower and pricier than input tokens, while summary calls have long inputs. <a href="07-chunking-text-units.html">Chapter 7</a> turns this into a cost formula, and Chapter 26 measures it.</p>
+
+<h3>From question types to shapes</h3>
+<table>
+  <thead><tr><th>Question type</th><th>Kestrel example</th><th>Shapes that fit</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Single-passage fact lookup</td><td>“How many Sentinel drones does Kestrel operate?”</td><td>(a) lexical, or plain vector RAG</td><td>The answer sits in one chunk; NEXT edges fix boundary cuts</td></tr>
+    <tr><td>Multi-hop over named entities</td><td>Q1 “Why did Kestrel start Project Tern?”, Q3 “What connects Priya Nair to Deepcast?”</td><td>(c) lexical + entity; (f) passage graph</td><td>Entities join facts from different documents; chunks supply citable evidence</td></tr>
+    <tr><td>Bridge question through a chain of roles</td><td>Q2 “Which investor's board member oversees the company whose drones detected the bleaching?”</td><td>(c), or (h) with typed relations</td><td>Needs precise relation types along a 3–4 hop path</td></tr>
+    <tr><td>Global sensemaking</td><td>Q4 “What are the main themes?”, Q5 “What risks does Kestrel face?”</td><td>(e) community hierarchy; (d) tree</td><td>No passage contains the answer; summaries do</td></tr>
+    <tr><td>Long-document synthesis</td><td>“Summarize the board memo's options and the decision”</td><td>(d) tree; (a) with section hierarchy</td><td>Integrates many chunks of one document at the right granularity</td></tr>
+    <tr><td>Temporal and precise structured</td><td>Q6 “Who is the CTO?”, Q7 “Who supplied Kestrel's sonar in 2024?”</td><td>(h) or a typed KG with validity intervals; (b) with claims and dates (Chapter 10)</td><td>Needs time-scoped facts, not the most similar sentence</td></tr>
+    <tr><td>Multi-party facts</td><td>“Who took part in the Series B and on what terms?”</td><td>(g) hypergraph, or event nodes in (b)/(h)</td><td>Binary edges scatter one fact into pieces</td></tr>
+    <tr><td>Large, fast-changing corpus on a budget</td><td>A news feed about ocean-tech companies</td><td>(a) + (f) NER-based; defer (e)</td><td>No per-chunk LLM cost; incremental updates are cheap</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">The shape you choose limits the answers you can get</span>
+  <p>No retriever can recover structure the index never stored. A lexical graph cannot answer Q2 reliably however clever the traversal; an entity graph without dates cannot answer Q6 without guessing. Write down your top question types first, and check each one against the table above before you build.</p>
+</div>
+
+<p>Most production systems combine shapes, and there is research on choosing per question. StructRAG, for instance, routes each task to the structure type best suited to it and converts documents into that structure at inference time. Benchmark studies of graph-based RAG, such as the unified comparison in DIGIMON, find that no single graph method wins on every dataset and question type. Treat shape as a per-workload decision and evaluate it (<a href="25-evaluation.html">Chapter 25</a>).</p>
+<p>The rest of Part 2 builds shape (c) and then (e), because together they support local, global and path retrieval, and they are what Microsoft GraphRAG and <code>minigraphrag</code> implement. Part 3 adds retrieval patterns from (d) and (f).</p>
+
+<h2>Building a lexical graph in NetworkX</h2>
+<p>Here is shape (a) over the Kestrel corpus, built from <code>minigraphrag</code>'s real chunking and embedding modules. A <code>MultiDiGraph</code> allows a NEXT edge and a SIMILAR_TO edge between the same two chunks, and keys each edge by type.</p>
+
+<pre data-file="examples/ch06_lexical_graph.py"><code class="language-python">import networkx as nx
+
+from minigraphrag.chunking import TextUnit, chunk_documents, load_documents
+from minigraphrag.embeddings import HashingEmbedder, cosine_top_k
+
+
+def doc_title(text: str, doc_id: str) -&gt; str:
+    first = text.lstrip().splitlines()[0] if text.strip() else ""
+    return first.lstrip("# ").strip() or doc_id
+
+
+def build_lexical_graph(docs: dict[str, str], units: list[TextUnit], embedder=None,
+                        k: int = 3, min_similarity: float = 0.3) -&gt; nx.MultiDiGraph:
+    """Documents and chunks as nodes; PART_OF, NEXT and SIMILAR_TO as edges."""
+    G = nx.MultiDiGraph()
+    for doc_id, text in docs.items():
+        G.add_node(doc_id, kind="document", title=doc_title(text, doc_id))
+
+    by_doc: dict[str, list[TextUnit]] = {}
+    for u in units:
+        G.add_node(u.id, kind="chunk", doc_id=u.doc_id, text=u.text,
+                   n_tokens=u.n_tokens, start=u.start, end=u.end)
+        G.add_edge(u.id, u.doc_id, key="PART_OF", type="PART_OF")
+        by_doc.setdefault(u.doc_id, []).append(u)
+
+    for doc_units in by_doc.values():
+        doc_units.sort(key=lambda u: u.start)             # reading order
+        for a, b in zip(doc_units, doc_units[1:]):
+            G.add_edge(a.id, b.id, key="NEXT", type="NEXT")
+
+    if embedder is not None and units:
+        vectors = embedder.embed([u.text for u in units])
+        for i, u in enumerate(units):
+            for j, score in cosine_top_k(vectors[i], vectors, k=k + 1):  # +1: the chunk itself
+                v = units[j]
+                if j == i or v.doc_id == u.doc_id or score &lt; min_similarity:
+                    continue                               # skip self, same-document pairs and weak links
+                G.add_edge(u.id, v.id, key="SIMILAR_TO", type="SIMILAR_TO", score=round(score, 3))
+    return G
+
+
+if __name__ == "__main__":
+    docs = load_documents("data/corpus")
+    units = chunk_documents(docs, size=300, overlap=50)
+    G = build_lexical_graph(docs, units, HashingEmbedder(), k=3, min_similarity=0.3)
+
+    kinds = nx.get_node_attributes(G, "kind")
+    print(sum(1 for k in kinds.values() if k == "document"), "documents,",
+          sum(1 for k in kinds.values() if k == "chunk"), "chunks")
+    for t in ("PART_OF", "NEXT", "SIMILAR_TO"):
+        print(t, sum(1 for *_, d in G.edges(data=True) if d["type"] == t))
+
+    # Retrieval pattern: expand a hit to its neighbors in reading order
+    hit = "07_marlow_acquires_deepcast-001"
+    window = [u for u, _, d in G.in_edges(hit, data=True) if d["type"] == "NEXT"] + [hit] + \
+             [v for _, v, d in G.out_edges(hit, data=True) if d["type"] == "NEXT"]
+    print("window:", window)
+    print("similar:", [(v, d["score"]) for _, v, d in G.out_edges(hit, data=True) if d["type"] == "SIMILAR_TO"])</code></pre>
+
+<p>Run from the <code>code/</code> directory, it prints:</p>
+<pre><code>12 documents, 24 chunks
+PART_OF 24
+NEXT 12
+SIMILAR_TO 46
+window: ['07_marlow_acquires_deepcast-000', '07_marlow_acquires_deepcast-001']
+similar: [('03_deepcast_supply_agreement-000', 0.315)]</code></pre>
+<p>Read the numbers. Each document is short enough to become two 300-word chunks, so there are 24 chunks, 24 PART_OF edges and one NEXT edge per document. The 46 directed SIMILAR_TO edges come from 39 distinct chunk pairs; some pairs chose each other. The strongest pairs are what you would hope for: the Tidewater launch post and the bleaching research note, the Series A and Series B press releases. The chunk about Marlow's acquisition links to the 2022 Deepcast supply agreement, the start of the story it ends.</p>
+
+<div class="callout note">
+  <span class="callout-title">These similarities are lexical, not semantic</span>
+  <p><code>HashingEmbedder</code> hashes words into buckets, so it measures word overlap. It is deterministic and offline, which makes it good for tests. Swap in <code>SentenceTransformerEmbedder</code> or <code>OpenAIEmbedder</code> and the scores, the right threshold and some of the links will change; always re-tune <code>min_similarity</code> for the embedder you use, for example by looking at the score distribution and keeping the top few percent of pairs.</p>
+</div>
+
+<h3>Design decisions in that code</h3>
+<ul>
+  <li><strong>Skipping same-document similarity.</strong> Chunks of one document are already connected by NEXT and PART_OF, and they would otherwise dominate every chunk's top-k. Cross-document links are the ones structure cannot give you.</li>
+  <li><strong>Top-k plus a threshold.</strong> Top-k alone links every chunk to something, even when nothing is related. A threshold alone gives hub chunks (boilerplate, “About Kestrel Labs” paragraphs) hundreds of edges. Use both.</li>
+  <li><strong>Edges keyed by type.</strong> Retrieval code filters by type constantly (“follow NEXT only”). Keying makes that explicit and prevents a SIMILAR_TO edge from overwriting a NEXT edge.</li>
+  <li><strong>Text stored on nodes.</strong> Fine for 24 chunks. At scale, store text in a document store or Parquet and keep only ids and offsets in the graph (<a href="13-storage-indexing.html">Chapter 13</a>).</li>
+</ul>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 6.1 <span class="level">Warm-up</span></h4>
+  <p>For each canonical question below, name the cheapest shape from this chapter that can answer it reliably, and one shape that cannot, with a one-sentence reason each: (a) Q7 “Who supplied Kestrel's sonar in 2024?”; (b) Q4 “What are the main themes in this corpus?”; (c) Q3 “What connects Priya Nair to Deepcast?”.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ul>
+      <li>(a) Cheapest reliable: a typed graph with time on SUPPLIED edges, (h) or (b) with claims and dates. Honest caveat: plain vector RAG over a lexical graph often gets this one, because the 2022 supply agreement and the 2025 acquisition articles both mention Deepcast supplying Kestrel. It becomes unreliable when the corpus also contains a later supplier, because nothing filters by time. Cannot: (d) a RAPTOR tree, whose summaries blur dates, and which has no notion of a time range.</li>
+      <li>(b) Cheapest reliable: (d) a RAPTOR tree, which needs no extraction and whose top layers summarize clusters of the corpus. (e) is the stronger choice when themes are defined by entity relationships, at higher cost. Cannot: (f) a passage graph, which ranks passages but never summarizes, so the LLM would see only a few top passages.</li>
+      <li>(c) Cheapest reliable: (f) a passage graph or (c) lexical + entity. The three connecting facts (Priya formerly at Marlow; Marlow acquired Deepcast; Tern replaces Deepcast sonar) sit in different documents and are joined by the entities Marlow Dynamics and Project Tern. Cannot: (a) a lexical graph alone, because no document mentions both Priya Nair and Deepcast, and similarity edges do not follow named entities.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 6.2 <span class="level">Core</span></h4>
+  <p>Estimate indexing LLM calls for a corpus of 20,000 documents averaging 1,500 words, chunked with <code>chunk_documents(docs, size=300, overlap=50)</code>, for shapes (a), (c) with one gleaning round, (e) assuming one community per 8 entities across all levels and 3 distinct entities per chunk after resolution, and (d) with average cluster size 6. For (d) assume leaves of 100 words with no overlap. Ignore description summarization. Which shape costs the most, and by what factor over (c)?</p>
+  <details class="hint"><summary>Hint</summary><p><code>chunk_fixed</code> yields <em>ceil((W − overlap) / (size − overlap))</em> chunks for a document of W words.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Chunks per document: <em>ceil((1500 − 50) / 250) = ceil(5.8) = 6</em>. Total <em>N = 120,000</em> chunks.</p>
+    <ul>
+      <li>(a) Lexical: <strong>0</strong> LLM calls (120,000 embeddings).</li>
+      <li>(c) Lexical + entity, g = 1: <em>N(1 + g) = 240,000</em> calls. (With <code>max_gleanings=1</code> in the Chapter 8 extractor, there is no loop-check call on the last round.)</li>
+      <li>(e) Community hierarchy: (c) plus reports. Distinct entities ≈ 3 per chunk × 120,000 = 360,000 (a generous count; real corpora repeat entities heavily, which lowers it). Communities ≈ 360,000 / 8 = 45,000 reports. Total <strong>≈ 285,000</strong> calls.</li>
+      <li>(d) RAPTOR: leaves = 20,000 × 1,500 / 100 = 300,000. Summaries ≈ <em>N/(c − 1)</em> = 300,000 / 5 = <strong>60,000</strong> calls (300,000/6 + 300,000/36 + … ≈ 50,000 + 8,333 + 1,389 + … ≈ 60,000).</li>
+    </ul>
+    <p>(e) costs the most, about 1.19× (c) in calls. But calls understate the difference: report calls have much longer inputs and outputs than extraction calls, so in tokens the report stage is a larger share than 19%. RAPTOR needs about a quarter of the calls of (c), though each summary call reads a whole cluster. The analysis also shows where to cut: gleaning doubles (c)'s calls, so measure whether that second call pays for itself (Exercise 8.3).</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 6.3 <span class="level">Core</span></h4>
+  <p>Extend <code>build_lexical_graph</code> into shape (c): given extraction results as a mapping <code>{unit_id: [entity names]}</code>, add entity nodes and MENTIONS edges. Then write <code>expand_via_entities(G, hit_unit_ids, max_units=5)</code> that returns chunks sharing entities with the hits, ranked by the number of shared entities. Show what it returns for the hit <code>09_kestrel_eng_blog_project_tern-000</code> on this toy mentions table:</p>
+  <pre><code>mentions = {
+  "07_marlow_acquires_deepcast-000": ["MARLOW DYNAMICS", "DEEPCAST"],
+  "03_deepcast_supply_agreement-000": ["DEEPCAST", "KESTREL LABS"],
+  "09_kestrel_eng_blog_project_tern-000": ["PROJECT TERN", "KESTREL LABS", "DEEPCAST", "JONAS VEHL", "PRIYA NAIR"],
+  "05_kestrel_blog_priya_nair-000": ["PRIYA NAIR", "KESTREL LABS", "MARLOW DYNAMICS"],
+  "02_brightwater_series_a-000": ["BRIGHTWATER CAPITAL", "KESTREL LABS", "LENA PARK"],
+}</code></pre>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from collections import Counter
+
+def add_mentions(G, mentions: dict[str, list[str]]):
+    for unit_id, names in mentions.items():
+        for name in names:
+            if name not in G:
+                G.add_node(name, kind="entity")
+            G.add_edge(unit_id, name, key="MENTIONS", type="MENTIONS")
+    return G
+
+def expand_via_entities(G, hit_unit_ids, max_units=5):
+    hits = set(hit_unit_ids)
+    shared = Counter()
+    for hit in hits:
+        entities = [e for _, e, d in G.out_edges(hit, data=True) if d["type"] == "MENTIONS"]
+        for e in entities:
+            for unit, _, d in G.in_edges(e, data=True):
+                if d["type"] == "MENTIONS" and unit not in hits:
+                    shared[unit] += 1
+    return shared.most_common(max_units)</code></pre>
+    <p>The hit mentions PROJECT TERN, KESTREL LABS, DEEPCAST, JONAS VEHL and PRIYA NAIR. Counting shared entities per other chunk:</p>
+    <ul>
+      <li><code>03_deepcast_supply_agreement-000</code>: DEEPCAST, KESTREL LABS → 2</li>
+      <li><code>05_kestrel_blog_priya_nair-000</code>: PRIYA NAIR, KESTREL LABS → 2</li>
+      <li><code>07_marlow_acquires_deepcast-000</code>: DEEPCAST → 1</li>
+      <li><code>02_brightwater_series_a-000</code>: KESTREL LABS → 1</li>
+    </ul>
+    <p>Result: <code>[("03_…-000", 2), ("05_…-000", 2), ("02_…-000", 1), ("07_…-000", 1)]</code>. Ties keep first-counted order in <code>Counter.most_common</code>, so the order among ties depends on the order of MENTIONS edges, not on relevance. Notice the problem the hub creates: the Series A chunk scores the same as the acquisition article only because it mentions Kestrel Labs, which appears nearly everywhere. A better score divides each shared entity by how many chunks mention it (an IDF weight): KESTREL LABS would count <em>1/5</em>, DEEPCAST <em>1/3</em>, and the acquisition article (1/3) would outrank the Series A release (1/5). This is the hub problem from Chapter 4 showing up in retrieval.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 6.4 <span class="level">Stretch</span></h4>
+  <p>Implement a two-layer RAPTOR-style tree over the Kestrel chunks without an LLM: embed with <code>HashingEmbedder</code>, cluster with scikit-learn's <code>GaussianMixture</code> (<code>pip install scikit-learn</code>; it is not a <code>minigraphrag</code> dependency) choosing the number of components by BIC, and use the concatenated first sentences of each cluster's members as a stand-in “summary”. Then implement collapsed-tree retrieval that fills a 1,000-token budget with <code>count_tokens</code>. For the question “What are the main themes?”, how many of the selected nodes are summaries versus leaves, and why?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import numpy as np
+from sklearn.mixture import GaussianMixture
+
+from minigraphrag.chunking import chunk_documents, load_documents
+from minigraphrag.embeddings import HashingEmbedder, cosine_top_k
+from minigraphrag.tokens import count_tokens
+
+def fit_gmm(X, max_k=8, seed=0):
+    best, best_bic = None, np.inf
+    for k in range(2, min(max_k, len(X) - 1) + 1):
+        gm = GaussianMixture(n_components=k, covariance_type="diag", random_state=seed).fit(X)
+        bic = gm.bic(X)
+        if bic &lt; best_bic:
+            best, best_bic = gm, bic
+    return best
+
+def build_tree(texts, embedder, threshold=0.2, max_k=8):
+    nodes = [{"text": t, "level": 0, "children": []} for t in texts]
+    layer = list(range(len(nodes)))
+    level = 0
+    while len(layer) &gt; 3:
+        X = embedder.embed([nodes[i]["text"] for i in layer])
+        gm = fit_gmm(X, max_k)
+        probs = gm.predict_proba(X)
+        level += 1
+        new_layer = []
+        for c in range(gm.n_components):
+            members = [layer[i] for i in range(len(layer)) if probs[i, c] &gt;= threshold]  # soft membership
+            if not members:
+                continue
+            summary = " ".join(nodes[m]["text"].split(". ")[0] + "." for m in members)
+            nodes.append({"text": summary, "level": level, "children": members})
+            new_layer.append(len(nodes) - 1)
+        if len(new_layer) &gt;= len(layer):
+            break                                    # not shrinking: stop
+        layer = new_layer
+    return nodes
+
+def collapsed_tree_search(query, nodes, embedder, budget=1000):
+    M = embedder.embed([n["text"] for n in nodes])
+    q = embedder.embed([query])[0]
+    picked, used = [], 0
+    for i, _ in cosine_top_k(q, M, k=len(nodes)):
+        t = count_tokens(nodes[i]["text"])
+        if used + t &gt; budget:
+            continue
+        picked.append(i)
+        used += t
+    return picked
+
+docs = load_documents("data/corpus")
+units = chunk_documents(docs, size=100, overlap=0)
+emb = HashingEmbedder()
+tree = build_tree([u.text for u in units], emb)
+picked = collapsed_tree_search("What are the main themes?", tree, emb)
+print(sum(tree[i]["level"] &gt; 0 for i in picked), "summaries,", sum(tree[i]["level"] == 0 for i in picked), "leaves")</code></pre>
+    <p>With a hashing embedder, expect the selection to be dominated by leaves, and the result to vary with the seed. Two reasons. First, “What are the main themes?” shares almost no words with any node, so lexical similarity is close to noise; the ranking reflects accidents of word overlap. Second, the fake summaries are long concatenations, so each consumes a large part of the budget. With a real embedder and real LLM summaries, abstract questions tend to match higher-level summaries, which is the behavior the RAPTOR paper relies on. The exercise's point is to see both mechanics (BIC model selection, soft membership, budgeted collapsed search) and why they depend on semantic embeddings and genuine abstraction.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">A vector search hit returns the second half of an explanation that started in the previous chunk. Which shape fixes this most cheaply?</p>
+  <ol>
+    <li>A community hierarchy with reports</li>
+    <li data-correct>A lexical graph with NEXT edges, expanding each hit to its neighbors in reading order</li>
+    <li>A hypergraph</li>
+    <li>An entity graph with gleaning</li>
+  </ol>
+  <div class="explain">Window expansion over NEXT edges needs no LLM calls and directly restores the text around a boundary.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the main structural difference between RAPTOR's tree and GraphRAG's community hierarchy?</p>
+  <ol>
+    <li>RAPTOR uses Leiden; GraphRAG uses Gaussian mixtures</li>
+    <li>RAPTOR summarizes; GraphRAG does not</li>
+    <li data-correct>RAPTOR clusters chunk embeddings without extraction; GraphRAG clusters an extracted entity graph by its edges</li>
+    <li>RAPTOR only works on a single document</li>
+  </ol>
+  <div class="explain">Both add summaries. What gets clustered, and by what signal (embedding similarity vs graph structure), is the difference, and it determines both cost and what the groupings mean.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which statement about LinearRAG's Tri-Graph is accurate?</p>
+  <ol>
+    <li>It uses an LLM to extract typed relations between entities</li>
+    <li>It clusters passages into communities and summarizes them</li>
+    <li>It stores facts as hyperedges</li>
+    <li data-correct>It links entities, sentences and passages with mention and contain edges, with no entity-to-entity relations</li>
+  </ol>
+  <div class="explain">LinearRAG is deliberately relation-free: lightweight NER finds entities, and retrieval propagates relevance through sentences and ranks passages with Personalized PageRank.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Your team plans a GraphRAG index for 2 million support tickets that change daily. Users mostly ask “find tickets like this one” and “which tickets involve customer X and product Y”. What is the best first design?</p>
+  <ol>
+    <li>A full community hierarchy with reports at every level, rebuilt nightly</li>
+    <li data-correct>A lexical graph plus cheap entity links (NER or a curated customer/product KG) with MENTIONS edges; defer summaries</li>
+    <li>A RAPTOR tree over all tickets</li>
+    <li>A hypergraph with n-ary facts extracted by an LLM</li>
+  </ol>
+  <div class="explain">The questions are similarity and entity-filter lookups, not global sensemaking, and the corpus is large and changing. Per-chunk LLM extraction and nightly report generation would be expensive for little benefit.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does keeping MENTIONS edges (or source ids) from chunks to entities matter even if you only plan entity-level retrieval?</p>
+  <ol>
+    <li>It reduces extraction cost</li>
+    <li>It is required for community detection</li>
+    <li data-correct>It lets answers cite source text and lets you debug a wrong edge back to the sentence that produced it</li>
+    <li>It makes the graph undirected</li>
+  </ol>
+  <div class="explain">Provenance is what makes an entity graph trustworthy: local search includes source chunks in context, and a bad relation can be traced and fixed.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the lexical graph code, why are same-document pairs excluded from SIMILAR_TO edges?</p>
+  <ol>
+    <li>Because cosine similarity is undefined within a document</li>
+    <li>Because NetworkX cannot store two edges between the same nodes</li>
+    <li>Because it makes the graph a tree</li>
+    <li data-correct>Because NEXT and PART_OF already connect them, and they would crowd out the cross-document links that structure cannot provide</li>
+  </ol>
+  <div class="explain">Chunks from the same document are usually the most similar to each other. Letting them fill every top-k slot wastes the similarity edges on connections you already have.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Is a lexical graph really “GraphRAG”?</summary>
+  <div><p>By the broad definition used in the surveys, any retrieval that uses graph structure counts, and window expansion and similarity hops are graph traversals. The label matters less than the capability: a lexical graph fixes boundary and neighboring-passage problems and nothing more. It is a good baseline to beat, and a layer every other shape benefits from.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I start with one shape and add another later?</summary>
+  <div><p>Yes, if you keep stable chunk ids (<a href="07-chunking-text-units.html">Chapter 7</a>). A lexical graph can gain entities by adding MENTIONS edges; an entity graph can gain communities and reports on top. What is hard to add later is anything that needed information you discarded, such as offsets into the source text or the dates of documents.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should chunks and entities live in the same database?</summary>
+  <div><p>It is convenient, and graph databases handle it well (the graphrag.com patterns assume one graph). But it is not required: many systems keep chunk text in a document or vector store and only ids in the graph, joined by id at query time. The shape is a logical design; storage is a separate decision covered in Chapter 13.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Which shape gives the best accuracy?</summary>
+  <div><p>No shape wins everywhere. Comparative studies of graph-based RAG methods report that results depend strongly on the dataset and question type, and vector RAG remains strong on single-hop lookups. Pick candidates with the decision table, build the cheapest one that could work, and evaluate on your own questions before paying for more structure.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Where do hypothetical questions fit?</summary>
+  <div><p>The graphrag.com catalog includes a lexical graph variant where an LLM generates questions each chunk can answer, stored as nodes linked to the chunk. Queries are matched against those questions instead of the raw text, which often matches user phrasing better. It adds one LLM call per chunk, so it sits between shapes (a) and (b) in cost.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a shape decision record for your own corpus</h3>
+  <p>Pick a corpus you care about (your team's docs, a set of filings, a code repository's issues) or stay with Kestrel Labs, and produce the design document you would want before building.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A list of 15 to 20 real or realistic user questions, each tagged with a question type from the decision table</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A chosen shape (or combination) with a node and edge schema diagram, and the shapes you rejected with reasons</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A cost estimate in LLM calls and tokens for indexing the whole corpus, using the formulas in this chapter</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A working lexical graph over the corpus built with <code>build_lexical_graph</code>, with SIMILAR_TO thresholds chosen from the score distribution</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>For three questions, a hand-traced retrieval walk on your chosen shape that reaches the evidence, and one question your shape cannot answer</span></li>
+  </ul>
+  <p><strong>Done when</strong> someone else on your team could read the record and predict which questions the system will handle well and what indexing will cost.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>A retrieval graph is defined by what its nodes are, who creates its edges, and how retrieval moves over it; decide these before building.</li>
+    <li>Lexical graphs cost no LLM calls and fix boundary and neighboring-passage problems, but know nothing about entities.</li>
+    <li>Entity graphs make multi-hop chains explicit; linking them to chunks with MENTIONS edges adds grounding and citations for free, which makes the hybrid a strong default.</li>
+    <li>Tree indexes (RAPTOR) and community hierarchies (GraphRAG) add summaries for broad questions; they differ in clustering embeddings versus graph structure.</li>
+    <li>Passage graphs such as HippoRAG 2 and LinearRAG use entities as connectors to rank passages, sometimes with no LLM at indexing time.</li>
+    <li>Hypergraphs keep n-ary facts whole; curated KGs give precise, typed, temporal answers if you can link your text to them.</li>
+    <li>Match shapes to question types and cost, and expect to combine shapes.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Sarthi, Abdullah, Tuli, Khanna, Goldie and Manning. <a href="https://arxiv.org/abs/2401.18059">RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval</a>. <span class="venue">arXiv 2401.18059, 2024</span></li>
+  <li>Huang et al. <a href="https://arxiv.org/abs/2503.10150">Retrieval-Augmented Generation with Hierarchical Knowledge</a> (HiRAG). <span class="venue">arXiv 2503.10150, 2025</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>Liang et al. <a href="https://arxiv.org/abs/2409.13731">KAG: Boosting LLMs in Professional Domains via Knowledge Augmented Generation</a>. <span class="venue">arXiv 2409.13731, 2024</span></li>
+  <li>Zhuang et al. <a href="https://arxiv.org/abs/2510.10114">LinearRAG: Linear Graph Retrieval Augmented Generation on Large-scale Corpora</a>. <span class="venue">arXiv 2510.10114, 2025</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2405.14831">HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models</a>. <span class="venue">arXiv 2405.14831, 2024</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2502.14802">From RAG to Memory: Non-Parametric Continual Learning for Large Language Models</a> (HippoRAG 2). <span class="venue">arXiv 2502.14802, 2025</span></li>
+  <li>Luo et al. <a href="https://arxiv.org/abs/2503.21322">HyperGraphRAG: Retrieval-Augmented Generation via Hypergraph-Structured Knowledge Representation</a>. <span class="venue">arXiv 2503.21322, 2025</span></li>
+  <li>Li et al. <a href="https://arxiv.org/abs/2410.08815">StructRAG: Boosting Knowledge Intensive Reasoning of LLMs via Inference-time Hybrid Information Structurization</a>. <span class="venue">arXiv 2410.08815, 2024</span></li>
+  <li>Zhou et al. <a href="https://arxiv.org/abs/2503.04338">In-depth Analysis of Graph-based RAG in a Unified Framework</a> (DIGIMON). <span class="venue">arXiv 2503.04338, 2025</span></li>
+  <li>GraphRAG pattern catalog. <a href="https://graphrag.com/reference/">Knowledge graph models and retriever patterns</a>. <span class="venue">graphrag.com</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

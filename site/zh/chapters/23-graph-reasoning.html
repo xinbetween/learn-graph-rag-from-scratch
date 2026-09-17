@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graph-guided reasoning | Graph RAG from Scratch</title>
+<meta name="description" content="Let the model reason with the graph: Graph Chain-of-Thought tool loops, relation-path planning (RoG), graph-constrained decoding, and hop-by-hop verification of reasoning paths.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/23-graph-reasoning.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="23-graph-reasoning" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Graph-guided reasoning</h1>
+  <p class="lede">So far the graph has been a place to fetch context from, once, before the model writes. This chapter lets the graph shape the reasoning itself: the model plans relation paths, calls graph functions step by step, is constrained to paths that really exist, and has each hop of its argument checked against the source text.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Implement a Graph Chain-of-Thought loop that alternates LLM reasoning, graph function calls and execution, using the <code>minigraphrag</code> LLM protocol</li>
+      <li>Explain Reasoning on Graphs (RoG): planning relation paths, grounding them with constrained search, and reasoning over the retrieved paths</li>
+      <li>Describe how graph-constrained decoding with a KG-Trie (GCR) and Decoding on Graphs make generated paths faithful by construction</li>
+      <li>Verify a reasoning path hop by hop against source passages and prune the hops that no source supports</li>
+      <li>Use self-consistency across paths, and decide when graph reasoning helps and when a single retrieval pass is better</li>
+    </ul>
+  </div>
+</header>
+
+<h2>From retrieving a graph to reasoning with it</h2>
+<p>Every search method in Part 3 follows one pattern: retrieve, build a context, generate once. That works when the retriever can guess all the evidence in advance. It struggles when the next thing to look up depends on what you just found. Consider canonical question 2:</p>
+<blockquote><p>“Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?”</p></blockquote>
+<p>A person answering it does not retrieve everything about reefs, drones, boards and investors at once. They reason: <em>which drones detected the bleaching? Sentinel. Who runs Sentinel? Kestrel Labs. Who is on Kestrel's board? Lena Park. Where is she a partner? Brightwater Capital.</em> Each step picks one relation to follow from the entity the previous step produced. Local search can get lucky here, and <a href="18-paths-and-agents.html">Chapter 18</a> showed Think-on-Graph exploring with beam search. This chapter looks at the broader family of methods where reasoning and graph access are interleaved, and at how to keep the resulting reasoning honest.</p>
+
+<p>The chapter covers four ideas, from least to most structural:</p>
+<table>
+  <thead><tr><th>Idea</th><th>What the model does</th><th>What the graph does</th><th>Representative work</th></tr></thead>
+  <tbody>
+    <tr><td>Tool-using reasoning</td><td>Decides which graph function to call next</td><td>Answers function calls</td><td>Graph Chain-of-Thought</td></tr>
+    <tr><td>Plan, then ground</td><td>Writes a relation-path plan up front</td><td>Retrieves the paths that match the plan</td><td>Reasoning on Graphs (RoG)</td></tr>
+    <tr><td>Constrained generation</td><td>Generates a path token by token</td><td>Masks every token that would leave the graph</td><td>Graph-constrained Reasoning, Decoding on Graphs</td></tr>
+    <tr><td>Verification</td><td>Proposes a reasoning chain</td><td>Supplies the sources used to accept or cut each hop</td><td>Chain-of-Knowledge, post-retrieval pruning</td></tr>
+  </tbody>
+</table>
+
+<h2>Graph Chain-of-Thought: reason, interact, execute</h2>
+
+<h3>The loop</h3>
+<p>Graph Chain-of-Thought (Graph-CoT) treats the graph as an environment an LLM agent explores. Each iteration has three sub-steps:</p>
+<ol>
+  <li><strong>Reasoning.</strong> The LLM states what it knows and what information it still needs, or decides it can answer.</li>
+  <li><strong>Interaction.</strong> The LLM writes a call to one of a small set of predefined graph functions.</li>
+  <li><strong>Execution.</strong> The system runs the call on the graph and appends the result to the transcript.</li>
+</ol>
+<p>The loop repeats until the model emits a <code>Finish[answer]</code> action. The paper defines four graph functions that cover both the text attached to nodes and the structure around them:</p>
+<ul>
+  <li><code>RetrieveNode(Text)</code>: find the related node with semantic search.</li>
+  <li><code>NodeFeature(NodeID, FeatureName)</code>: read a textual feature of a node, such as its name or description.</li>
+  <li><code>NeighborCheck(NodeID, NeighborType)</code>: return the node's neighbors of one type.</li>
+  <li><code>NodeDegree(NodeID, NeighborType)</code>: return how many neighbors of that type the node has.</li>
+</ul>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "One Graph-CoT episode for “What connects Priya Nair to Deepcast?”",
+  "perRow": 3,
+  "stages": [
+    {"label": "Reason", "detail": "Thought: I need the Priya Nair node first. The model decides what is missing before touching the graph."},
+    {"label": "Interact", "detail": "Action: RetrieveNode[Priya Nair]. The model writes a call to one of the allowed graph functions."},
+    {"label": "Execute", "detail": "Observation: The best matching node is PRIYA NAIR. The system runs the call against the graph and appends the result."},
+    {"label": "Reason again", "detail": "Thought: Which organizations is she connected to? The new observation changes what to ask next."},
+    {"label": "Interact and execute", "detail": "Action: NeighborCheck[PRIYA NAIR, ORGANIZATION] returns KESTREL LABS, DEEPCAST. Then EdgeFeature[PRIYA NAIR, DEEPCAST] returns the board memo sentence and its source id."},
+    {"label": "Finish", "detail": "Action: Finish[She co-leads the project that replaces Deepcast units (board memo, 08_kestrel_board_memo_supply-001)]. The loop ends; the trace doubles as an explanation."}
+  ]
+}
+</script>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Jin et al., Graph Chain-of-Thought: Augmenting Large Language Models by Reasoning on Graphs (2024)</span>
+  <p>Published at ACL 2024. The authors built GRBench, 1,740 questions over ten domain graphs (academic, e-commerce, literature, healthcare and legal), where answers need both node text and graph structure. Graph-CoT lets the LLM interact with the graph through the four functions above, with the procedure taught by in-context demonstrations rather than fine-tuning. The paper frames Graph-CoT explicitly as an agent: the LLM is the agent, the graph is the environment, and the functions are its action space. With each of the three LLM backbones they tested, it beat the plain-prompting and retrieval-augmented baselines.</p>
+</div>
+
+<h3>Tools backed by the minigraphrag index</h3>
+<p>The <code>minigraphrag</code> graph is a NetworkX <code>Graph</code> whose nodes carry <code>type</code>, <code>description</code>, <code>aliases</code> and <code>source_ids</code>, and whose edges carry <code>description</code>, <code>weight</code> and <code>source_ids</code>. That maps neatly onto Graph-CoT's functions: <code>NeighborType</code> becomes our entity type. We add one function the paper does not define, <code>EdgeFeature</code>, because our edges carry the evidence text and source ids we need for citations. Tool results are strings, because the model reads them.</p>
+<pre data-file="examples/graph_cot.py"><code class="language-python">import re
+from collections import Counter
+
+GRAPH_COT_SYSTEM = """You answer questions by exploring a knowledge graph step by step.
+At each step write one line starting with "Thought:" and one line starting with "Action:".
+Available actions:
+  RetrieveNode[text]                    find the node whose name or description best matches text
+  NodeFeature[node, feature]            read a node attribute: type, description, aliases
+  NeighborCheck[node, neighbor_type]    list neighbors of node, optionally only of one type (or ALL)
+  NodeDegree[node, neighbor_type]       count neighbors of node of one type (or ALL)
+  EdgeFeature[node_a, node_b]           read the description and source ids of the edge
+  Finish[answer]                        give the final answer, or Finish[I don't know]
+Use exact node names returned by earlier observations. Never invent facts that no observation showed."""
+
+class GraphTools:
+    """Graph functions in the style of Graph-CoT, backed by a minigraphrag Index."""
+
+    def __init__(self, index, max_list: int = 15):
+        self.index, self.G, self.max_list = index, index.graph, max_list
+
+    def _node(self, name: str) -&gt; str | None:
+        name = name.strip().strip('"').upper()
+        return name if name in self.G else None
+
+    def retrieve_node(self, text: str) -&gt; str:
+        exact = self._node(text)
+        if exact:
+            return f"The best matching node is {exact}."
+        hits = self.index.entity_store.search(self.index.embedder.embed([text])[0], k=3)
+        return "Candidate nodes: " + ", ".join(f"{name} ({score:.2f})" for name, score, _ in hits)
+
+    def node_feature(self, node: str, feature: str) -&gt; str:
+        n = self._node(node)
+        if n is None:
+            return f"No node named {node}. Use RetrieveNode first."
+        value = self.G.nodes[n].get(feature.strip().lower())
+        return f"{feature.strip()} of {n}: {str(value)[:500]}" if value else f"{n} has no feature {feature}."
+
+    def neighbor_check(self, node: str, neighbor_type: str = "ALL") -&gt; str:
+        n = self._node(node)
+        if n is None:
+            return f"No node named {node}. Use RetrieveNode first."
+        t = neighbor_type.strip().upper()
+        nbrs = [m for m in self.G.neighbors(n) if t == "ALL" or self.G.nodes[m].get("type") == t]
+        nbrs.sort(key=lambda m: -self.G.edges[n, m].get("weight", 0))
+        more = f" (+{len(nbrs) - self.max_list} more)" if len(nbrs) &gt; self.max_list else ""
+        return f"Neighbors of {n} [{t}]: " + (", ".join(nbrs[: self.max_list]) or "none") + more
+
+    def node_degree(self, node: str, neighbor_type: str = "ALL") -&gt; str:
+        n = self._node(node)
+        if n is None:
+            return f"No node named {node}."
+        t = neighbor_type.strip().upper()
+        return f"{n} has {sum(1 for m in self.G.neighbors(n) if t == 'ALL' or self.G.nodes[m].get('type') == t)} {t} neighbors."
+
+    def edge_feature(self, a: str, b: str) -&gt; str:
+        u, v = self._node(a), self._node(b)
+        if not (u and v and self.G.has_edge(u, v)):
+            return f"There is no edge between {a} and {b}."
+        d = self.G.edges[u, v]
+        return f"Edge {u} -- {v}: {d.get('description', '')[:500]} [sources: {', '.join(d.get('source_ids', []))}]"
+
+ACTION = re.compile(r"Action:\s*(\w+)\[(.*)\]\s*$", re.M)
+
+def graph_cot(llm, tools: GraphTools, question: str, max_steps: int = 8) -&gt; dict:
+    dispatch = {
+        "RetrieveNode": lambda a: tools.retrieve_node(a[0]),
+        "NodeFeature": lambda a: tools.node_feature(a[0], a[1] if len(a) &gt; 1 else "description"),
+        "NeighborCheck": lambda a: tools.neighbor_check(a[0], a[1] if len(a) &gt; 1 else "ALL"),
+        "NodeDegree": lambda a: tools.node_degree(a[0], a[1] if len(a) &gt; 1 else "ALL"),
+        "EdgeFeature": lambda a: tools.edge_feature(a[0], a[1]),
+    }
+    transcript = f"Question: {question}\n"
+    trace = []
+    for step in range(max_steps):
+        reply = llm.complete(transcript, system=GRAPH_COT_SYSTEM)       # 1. reason
+        m = ACTION.search(reply)
+        if not m:                                                       # malformed: tell the model, retry
+            transcript += reply + "\nObservation: No valid Action line. Use Name[args].\n"
+            continue
+        name, raw_args = m.group(1), m.group(2)
+        thought = reply[: m.start()].strip()
+        if name == "Finish":
+            trace.append((thought, f"Finish[{raw_args}]", ""))
+            return {"answer": raw_args.strip(), "steps": step + 1, "trace": trace}
+        args = [a.strip() for a in raw_args.split(",")]                 # 2. interact
+        try:
+            observation = dispatch[name](args) if name in dispatch else f"Unknown action {name}."
+        except (IndexError, KeyError) as err:                          # 3. execute (safely)
+            observation = f"Action failed: {err!r}"
+        trace.append((thought, f"{name}[{raw_args}]", observation))
+        transcript += f"{thought}\nAction: {name}[{raw_args}]\nObservation: {observation}\n"
+    return {"answer": "I don't know (step limit reached)", "steps": max_steps, "trace": trace}</code></pre>
+
+<p>Design choices worth copying:</p>
+<ul>
+  <li><strong>Errors become observations.</strong> An unknown node or a malformed action is reported back in words (“Use RetrieveNode first”), never raised. The model can recover from a message; it cannot recover from a crashed loop.</li>
+  <li><strong>Lists are capped and sorted.</strong> <code>NeighborCheck[KESTREL LABS, ALL]</code> would return 15 names on the Kestrel graph and hundreds on a real one. Sorting by edge weight and saying “+N more” keeps observations short and tells the model to filter by type.</li>
+  <li><strong>A hard step limit with an explicit abstention.</strong> Without it, a confused model loops until your budget runs out.</li>
+  <li><strong>The LLM protocol is the only dependency.</strong> <code>graph_cot</code> calls <code>llm.complete(prompt, system=...)</code>, so it works with <code>OpenAICompatibleLLM</code>, <code>AnthropicLLM</code>, <code>CachedLLM</code> or a scripted test double. <code>MockLLM</code> does not know this prompt and simply returns “OK”, so use a real model or a scripted one.</li>
+</ul>
+
+<h3>A trace on the Kestrel index</h3>
+<p>These observations come from running the tools on an index built with <code>MockLLM</code>; the thoughts and actions are what a capable model typically writes.</p>
+<pre><code>Question: What connects Priya Nair to Deepcast?
+Thought: I need the Priya Nair node.
+Action: RetrieveNode[Priya Nair]
+Observation: The best matching node is PRIYA NAIR.
+Thought: Which organizations is she connected to?
+Action: NeighborCheck[PRIYA NAIR, ORGANIZATION]
+Observation: Neighbors of PRIYA NAIR [ORGANIZATION]: KESTREL LABS, DEEPCAST
+Thought: There is a direct edge to Deepcast. What does it say?
+Action: EdgeFeature[PRIYA NAIR, DEEPCAST]
+Observation: Edge PRIYA NAIR -- DEEPCAST: We propose to start a dedicated internal engineering
+  project in June, co-led by Jonas Vehl (CTO) and Priya Nair (lead engineer, Project Sentinel),
+  with a goal of replacing every Deepcast unit in the fleet by the end of 2026.
+  [sources: 08_kestrel_board_memo_supply-001]
+Thought: Is there also a Marlow Dynamics link?
+Action: EdgeFeature[PRIYA NAIR, MARLOW DYNAMICS]
+Observation: There is no edge between PRIYA NAIR and MARLOW DYNAMICS.
+Action: Finish[Priya Nair co-leads the in-house sonar project meant to replace every Deepcast unit
+  (08_kestrel_board_memo_supply-001).]</code></pre>
+<p>The trace is honest about something one-shot retrieval would hide: the offline extractor missed the Priya Nair to Marlow Dynamics relationship, so the loop found only half of the expected answer. A stronger extractor, or a follow-up <code>RetrieveNode[Priya Nair Marlow Dynamics]</code> over passages, would find the other half. Traces make gaps like this visible, which is one of the best reasons to use them.</p>
+
+<h3>Cost and failure modes</h3>
+<p>Each iteration is an LLM call whose prompt contains the entire transcript so far, so input tokens grow roughly quadratically with the number of steps: step <em>t</em> resends the <em>t</em> − 1 earlier steps. A five-step episode with 300-token steps and a 600-token system prompt sends about 600 × 5 + 300 × (0 + 1 + 2 + 3 + 4) = 6,000 input tokens, against perhaps 3,000 for a single local search call with a larger context. Latency is sequential steps, not parallel ones. Typical failures:</p>
+<table>
+  <thead><tr><th>Failure</th><th>Symptom</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Wrong starting node</td><td>Every later step explores the wrong neighborhood</td><td>Return several candidates with scores from <code>RetrieveNode</code>; let the model choose</td></tr>
+    <tr><td>Invented node names</td><td>Calls on “DEEPCAST INC” that does not exist</td><td>“Use exact names from observations” in the prompt; helpful error text</td></tr>
+    <tr><td>Hub flooding</td><td>Long neighbor lists crowd the transcript</td><td>Type filters, caps, sorting by weight</td></tr>
+    <tr><td>Premature finish</td><td>Answers after one hop</td><td>Demonstrations that show multi-hop episodes; a verifier after Finish</td></tr>
+    <tr><td>Looping</td><td>Repeats the same call</td><td>Step limit; detect repeated actions and say so in the observation</td></tr>
+  </tbody>
+</table>
+
+<h2>Reasoning on Graphs: plan relation paths, then ground them</h2>
+<p>Graph-CoT decides one step at a time. Reasoning on Graphs (RoG) separates <em>deciding the shape</em> of the reasoning from <em>finding the facts</em>. Its planning–retrieval–reasoning framework works in three steps:</p>
+<ol>
+  <li><strong>Planning.</strong> Given the question, the LLM generates relation paths that should lead to the answer, such as <code>ACQUIRED → SUPPLIED</code>. A plan mentions relation types only, no entities, which is why it can be checked against the schema and reused.</li>
+  <li><strong>Retrieval.</strong> For each plan, a constrained breadth-first search starts at the question entity and follows only edges whose relation matches the next element of the plan. The results are concrete reasoning paths, instances of the plan in the graph.</li>
+  <li><strong>Reasoning.</strong> The LLM reads the retrieved paths and answers, discarding paths that do not fit the question.</li>
+</ol>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Grounding a relation-path plan on Kestrel",
+  "subtitle": "Plan: Organization -ACQUIRED-> Organization -SUPPLIED-> Organization",
+  "height": 390,
+  "directed": true,
+  "nodes": [
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 12, "y": 45},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 42, "y": 18},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 74, "y": 45},
+    {"id": "priya", "label": "Priya Nair", "group": 3, "x": 30, "y": 85},
+    {"id": "tern", "label": "Project Tern", "group": 2, "x": 90, "y": 82},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 2, "x": 90, "y": 12},
+    {"id": "brightwater", "label": "Brightwater Capital", "group": 1, "x": 60, "y": 88}
+  ],
+  "edges": [
+    {"source": "marlow", "target": "deepcast", "label": "ACQUIRED"},
+    {"source": "deepcast", "target": "kestrel", "label": "SUPPLIED"},
+    {"source": "marlow", "target": "kestrel", "label": "COMPETES_WITH"},
+    {"source": "priya", "target": "marlow", "label": "FORMERLY_WORKED_AT"},
+    {"source": "priya", "target": "tern", "label": "CO_LEADS"},
+    {"source": "kestrel", "target": "tern", "label": "RUNS"},
+    {"source": "kestrel", "target": "sentinel", "label": "RUNS"},
+    {"source": "brightwater", "target": "kestrel", "label": "INVESTED_IN"}
+  ],
+  "legend": {"1": "Organization", "2": "Project", "3": "Person"},
+  "steps": [
+    {"caption": "Question: “Which company lost its sonar supplier because of an acquisition by Marlow Dynamics?” <strong>Planning</strong>: the LLM writes the relation path <span class=\"viz-chip edge\">ACQUIRED → SUPPLIED</span>, without naming any entity except the topic.", "showAllLabels": true, "dim": false},
+    {"caption": "<strong>Check the plan against the schema.</strong> Both relation types exist in the graph, so the plan is kept. A plan containing SUPPLIES_TO would be dropped here, before any search.", "active": ["marlow"], "showAllLabels": true},
+    {"caption": "<strong>Constrained BFS, hop 1.</strong> From <span class=\"viz-chip node\">Marlow Dynamics</span>, follow only outgoing ACQUIRED edges. COMPETES_WITH is skipped even though it leads straight to Kestrel Labs.", "active": ["deepcast"], "visited": ["marlow"], "edges": ["marlow>deepcast"]},
+    {"caption": "<strong>Hop 2.</strong> From Deepcast, follow only SUPPLIED. One match: <span class=\"viz-chip node\">Kestrel Labs</span>.", "active": ["kestrel"], "visited": ["marlow", "deepcast"], "edges": ["deepcast>kestrel"], "visitedEdges": ["marlow>deepcast"]},
+    {"caption": "<strong>Reasoning.</strong> The retrieved path Marlow Dynamics -ACQUIRED-> Deepcast -SUPPLIED-> Kestrel Labs goes to the answer prompt. The LLM answers Kestrel Labs and can cite both edges. Priya Nair, Brightwater and the projects never entered the context.", "active": ["kestrel"], "visited": ["marlow", "deepcast"], "visitedEdges": ["marlow>deepcast", "deepcast>kestrel"]}
+  ]
+}
+</script>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Luo, Li, Haffari and Pan, Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning (2024)</span>
+  <p>Published at ICLR 2024. RoG fine-tunes LLaMA2-Chat-7B on two instruction tasks. <em>Planning optimization</em> teaches the model to generate relation paths that are valid in the KG, using the shortest paths between question entities and answer entities in the training data as supervision. <em>Retrieval-reasoning optimization</em> teaches it to answer from retrieved reasoning paths. Retrieval itself is a constrained BFS that follows the planned relations. The paper also shows the planning module is plug-and-play: plans generated by RoG improved other LLMs, including ChatGPT, when their retrieved paths were given to those models without retraining them.</p>
+</div>
+
+<p>You do not need RoG's fine-tuning to use the pattern. A prompted planner plus the constrained search gives you most of the structure, and <a href="24-training-with-graphs.html">Chapter 24</a> covers training when prompting is not enough. The code works on the typed Kestrel view from <a href="21-hybrid-design-patterns.html">Chapter 21</a>, because plans need relation types:</p>
+<pre data-file="examples/rog.py"><code class="language-python">import networkx as nx
+
+def ground_relation_plan(G: nx.MultiDiGraph, start: str, plan: list[str], max_paths: int = 20) -&gt; list[list[tuple]]:
+    """RoG-style retrieval: constrained BFS that follows the planned relation sequence from `start`."""
+    paths = [[(None, None, start)]]
+    for relation in plan:
+        nxt = []
+        for path in paths:
+            node = path[-1][2]
+            for _, v, d in G.out_edges(node, data=True):
+                if d["relation"] == relation and all(v != hop[2] for hop in path):
+                    nxt.append(path + [(node, relation, v)])
+        paths = nxt[:max_paths]
+        if not paths:
+            break                                  # the plan does not exist in this graph
+    return [p[1:] for p in paths]</code></pre>
+<pre data-file="examples/rog.py"><code class="language-python">from minigraphrag.llm import parse_json_response
+
+PLAN_PROMPT = """Relation types in the knowledge graph: {relations}
+
+Question: {question}
+Topic entity: {topic}
+
+Write up to {n} relation paths that, followed from the topic entity, would reach the answer.
+A relation path is a list of relation types, for example ["ACQUIRED", "SUPPLIED"].
+Return JSON: {{"plans": [[...], [...]]}}"""
+
+def plan_relation_paths(llm, G, question: str, topic: str, n: int = 3) -&gt; list[list[str]]:
+    """Step 1 of RoG, done by prompting: propose relation paths, keep only those made of real relation types."""
+    relations = sorted({d["relation"] for _, _, d in G.edges(data=True)})
+    out = parse_json_response(llm.complete(PLAN_PROMPT.format(
+        relations=", ".join(relations), question=question, topic=topic, n=n), json=True))
+    valid = set(relations)
+    return [p for p in out.get("plans", []) if isinstance(p, list) and p and all(r in valid for r in p)]
+
+def rog_answer_context(G, topic: str, plans: list[list[str]]) -&gt; str:
+    """Step 2: ground every plan with constrained BFS and render the reasoning paths for the answer prompt."""
+    lines = []
+    for plan in plans:
+        for path in ground_relation_plan(G, topic, plan):
+            lines.append(" -&gt; ".join([path[0][0]] + [f"{rel} -&gt; {v}" for _, rel, v in path]))
+    return "\n".join(dict.fromkeys(lines)) or "No reasoning path in the graph matches the plans."</code></pre>
+<p>Given plans <code>[["ACQUIRED", "SUPPLIED"], ["ACQUIRED", "SUPPLIES_TO"], ["COMPETES_WITH"]]</code>, the schema check drops the second (no SUPPLIES_TO relation exists) and grounding returns two lines: <code>Marlow Dynamics -&gt; ACQUIRED -&gt; Deepcast -&gt; SUPPLIED -&gt; Kestrel Labs</code> and <code>Marlow Dynamics -&gt; COMPETES_WITH -&gt; Kestrel Labs</code>. Both reach Kestrel Labs, but only the first explains <em>why</em>; the reasoning step must tell them apart, which is why RoG trains its model to reason over paths after generating them.</p>
+
+<div class="callout note">
+  <span class="callout-title">Plans and metapaths</span>
+  <p>A RoG plan is a metapath without node types, generated per question. The curated metapaths of Chapter 21 are the same object written by a person and reused. A practical system can use curated metapaths when a question matches a known shape and fall back to generated plans otherwise.</p>
+</div>
+
+<h2>Faithful paths by construction: constrained decoding</h2>
+<p>Both Graph-CoT and RoG let the model write whatever it likes and then check it against the graph. A different idea is to make it impossible for the model to write a path that is not in the graph at all. At each decoding step, a language model produces a probability for every token in its vocabulary. <em>Constrained decoding</em> sets the probability of every token that would leave the set of valid outputs to zero before choosing. The model still decides which valid continuation is best; it just cannot pick an invalid one.</p>
+
+<h3>Graph-constrained Reasoning and the KG-Trie</h3>
+<p>To constrain decoding to graph paths, you need a fast way to answer “given the path written so far, which tokens may come next?” A <em>trie</em> (prefix tree) answers exactly that. Graph-constrained Reasoning (GCR) builds a KG-Trie: it enumerates reasoning paths within a few hops of the question entities, tokenizes them, and inserts them into a trie. During decoding, the allowed next tokens are the children of the current trie node.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 290" role="img" aria-labelledby="trie-title">
+      <title id="trie-title">A KG-Trie of two-hop paths from Marlow Dynamics, with the decoded path highlighted and an invalid token masked</title>
+      <defs>
+        <marker id="trie-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box comm" x="8" y="120" width="112" height="40" rx="6"/>
+      <text class="d-text bold" x="64" y="145" text-anchor="middle">Marlow Dyn.</text>
+
+      <rect class="d-box edge" x="150" y="62" width="100" height="34" rx="6"/>
+      <text class="d-text mono" x="200" y="84" text-anchor="middle">ACQUIRED</text>
+      <rect class="d-box" x="150" y="186" width="116" height="34" rx="6"/>
+      <text class="d-text mono" x="208" y="208" text-anchor="middle">COMPETES_WITH</text>
+      <rect class="d-box bad" x="150" y="124" width="100" height="34" rx="6"/>
+      <text class="d-text mono" x="200" y="146" text-anchor="middle">INVESTED_IN</text>
+      <line class="d-line hot" x1="120" y1="132" x2="148" y2="84" marker-end="url(#trie-arrow)"/>
+      <line class="d-line" x1="120" y1="148" x2="148" y2="200" marker-end="url(#trie-arrow)"/>
+      <line class="d-line dash" x1="120" y1="140" x2="148" y2="141"/>
+      <text class="d-text small" x="150" y="118">masked: not in trie</text>
+
+      <rect class="d-box node" x="284" y="62" width="88" height="34" rx="6"/>
+      <text class="d-text" x="328" y="84" text-anchor="middle">Deepcast</text>
+      <line class="d-line hot" x1="250" y1="79" x2="282" y2="79" marker-end="url(#trie-arrow)"/>
+      <rect class="d-box node" x="290" y="186" width="96" height="34" rx="6"/>
+      <text class="d-text" x="338" y="208" text-anchor="middle">Kestrel Labs</text>
+      <line class="d-line" x1="266" y1="203" x2="288" y2="203" marker-end="url(#trie-arrow)"/>
+
+      <rect class="d-box edge" x="400" y="40" width="92" height="34" rx="6"/>
+      <text class="d-text mono" x="446" y="62" text-anchor="middle">SUPPLIED</text>
+      <rect class="d-box ghost" x="400" y="86" width="92" height="30" rx="6"/>
+      <text class="d-text small" x="446" y="106" text-anchor="middle">&lt;END&gt;</text>
+      <line class="d-line hot" x1="372" y1="74" x2="398" y2="58" marker-end="url(#trie-arrow)"/>
+      <line class="d-line" x1="372" y1="84" x2="398" y2="100" marker-end="url(#trie-arrow)"/>
+
+      <rect class="d-box node" x="520" y="40" width="100" height="34" rx="6"/>
+      <text class="d-text" x="570" y="62" text-anchor="middle">Kestrel Labs</text>
+      <line class="d-line hot" x1="492" y1="57" x2="518" y2="57" marker-end="url(#trie-arrow)"/>
+
+      <rect class="d-box edge" x="410" y="150" width="60" height="30" rx="6"/>
+      <text class="d-text mono" x="440" y="170" text-anchor="middle">RUNS</text>
+      <rect class="d-box edge" x="410" y="196" width="96" height="30" rx="6"/>
+      <text class="d-text mono" x="458" y="216" text-anchor="middle">LOCATED_IN</text>
+      <rect class="d-box ghost" x="410" y="240" width="60" height="30" rx="6"/>
+      <text class="d-text small" x="440" y="260" text-anchor="middle">&lt;END&gt;</text>
+      <line class="d-line" x1="386" y1="198" x2="408" y2="168" marker-end="url(#trie-arrow)"/>
+      <line class="d-line" x1="386" y1="205" x2="408" y2="210" marker-end="url(#trie-arrow)"/>
+      <line class="d-line" x1="386" y1="212" x2="408" y2="252" marker-end="url(#trie-arrow)"/>
+      <text class="d-text small" x="490" y="170">Project Sentinel, Project Tern</text>
+      <text class="d-text small" x="516" y="216">Port Avalon</text>
+      
+    </svg>
+  </div>
+  <figcaption>A KG-Trie of paths up to two hops from Marlow Dynamics, at the level of whole relation and entity tokens (a real KG-Trie works on subword tokens). Even if the model prefers INVESTED_IN, it is masked because no such edge leaves Marlow Dynamics. The highlighted branch is the decoded path ACQUIRED, Deepcast, SUPPLIED, Kestrel Labs.</figcaption>
+</figure>
+
+<pre data-file="examples/kg_trie.py"><code class="language-python">from collections import defaultdict
+import networkx as nx
+
+def build_kg_trie(G: nx.MultiDiGraph, start: str, max_hops: int = 2) -&gt; dict:
+    """A trie over every relation path of 1 to max_hops hops that starts at `start`.
+
+    Keys are path prefixes, tuples of tokens (relation, entity, relation, entity, ...).
+    Values are the tokens allowed next. "&lt;END&gt;" is allowed only right after an entity.
+    """
+    trie = defaultdict(set)
+
+    def walk(node: str, prefix: tuple, hops: int) -&gt; None:
+        if prefix:
+            trie[prefix].add("&lt;END&gt;")            # a complete path may stop here
+        if hops == max_hops:
+            return
+        for _, v, d in G.out_edges(node, data=True):
+            trie[prefix].add(d["relation"])
+            trie[prefix + (d["relation"],)].add(v)
+            walk(v, prefix + (d["relation"], v), hops + 1)
+
+    walk(start, (), 0)
+    return trie
+
+def constrained_decode(score_next, trie: dict, max_len: int = 4) -&gt; tuple:
+    """Greedy decoding: `score_next(prefix, token)` plays the model, the trie masks every invalid token."""
+    prefix = ()
+    while len(prefix) &lt; max_len:
+        allowed = sorted(trie[prefix])
+        token = max(allowed, key=lambda t: score_next(prefix, t))
+        if token == "&lt;END&gt;":
+            break
+        prefix += (token,)
+    return prefix</code></pre>
+<p>Try it with a “model” whose preferences are wrong: it likes INVESTED_IN (0.9) more than ACQUIRED (0.6), and after ACQUIRED it would rather say Kestrel Labs (0.95) than Deepcast (0.7). Decoding from Marlow Dynamics still returns <code>("ACQUIRED", "Deepcast", "SUPPLIED", "Kestrel Labs")</code>: INVESTED_IN is not a child of the root, and after ACQUIRED the only allowed entity is Deepcast. Whatever the scores, the output is a path that exists.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Luo et al., Graph-constrained Reasoning: Faithful Reasoning on Knowledge Graphs with Large Language Models (2024)</span>
+  <p>Accepted at ICML 2025. GCR builds a KG-Trie over KG paths and uses it to constrain the decoding of a lightweight KG-specialized LLM, which generates reasoning paths and hypothesis answers. A larger general-purpose LLM then reasons inductively over several generated paths to produce the final answer. Because every generated path is decoded through the trie, the paths cannot be hallucinated relative to the graph; the authors describe this as eliminating reasoning hallucination about the graph structure.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Li et al., Decoding on Graphs: Faithful and Sound Reasoning on Knowledge Graphs through Generation of Well-Formed Chains (2024)</span>
+  <p>DoG defines a <em>well-formed chain</em> as a sequence of interrelated fact triples that starts from the question entities and leads to the answer, and applies graph-aware constrained decoding so the LLM's generated chains follow the KG's topology. It is training-free, and the authors show it working with several off-the-shelf open-weight models.</p>
+</div>
+
+<h3>What constrained decoding does and does not guarantee</h3>
+<p>Constraints guarantee that the path <em>exists in the graph</em>. They do not guarantee that it is <em>relevant</em> (Marlow Dynamics COMPETES_WITH Kestrel Labs is a valid path that explains nothing), that the graph is <em>correct</em> (an extraction error is a valid path too), or that the final answer <em>follows</em> from the path. They also require control over decoding, meaning open-weight models or providers that support custom logit masks, and the trie grows quickly with hops: from Marlow Dynamics there are 6 complete paths of up to two hops on our small typed view, from Priya Nair 11, and from a real hub, thousands. That is why GCR limits hops and why the paths come from the neighborhood of the question entities only.</p>
+
+<h2>Checking the reasoning after the fact</h2>
+
+<h3>Chain-of-Knowledge</h3>
+<p>Two different papers use the name Chain-of-Knowledge, and both are about grounding reasoning steps in knowledge:</p>
+<div class="callout paper">
+  <span class="callout-title">Wang et al., Boosting Language Models Reasoning with Chain-of-Knowledge Prompting (2024)</span>
+  <p>Published at ACL 2024. Instead of free-form chain-of-thought, CoK prompting asks the model to write explicit evidence as structured triples before answering, mimicking a knowledge map. An F²-Verification step then checks the chain for factuality and faithfulness, and when the chain looks unreliable the model is prompted to reconsider. For GraphRAG, the useful move is that the reasoning is written in the same triple form as the graph, which makes each step checkable.</p>
+</div>
+<div class="callout paper">
+  <span class="callout-title">Li et al., Chain-of-Knowledge: Grounding Large Language Models via Dynamic Knowledge Adapting over Heterogeneous Sources (2024)</span>
+  <p>Published at ICLR 2024. This framework first drafts rationales and answers and identifies relevant knowledge domains. When the drafts do not agree, it corrects the rationales step by step with knowledge retrieved from structured and unstructured sources, using an adaptive query generator that can write SPARQL, SQL or natural-language queries. Corrections are progressive: each corrected rationale informs the next, which limits error propagation.</p>
+</div>
+
+<h3>Post-retrieval pruning: verify every hop</h3>
+<p>A reasoning path is a chain of claims, and a chain is only as strong as its weakest hop. The simplest reliable check uses the provenance you have kept since <a href="08-entity-relation-extraction.html">Chapter 8</a>: for each hop, (1) the edge must exist, (2) at least one of its source passages must mention both entities, and (3) a judge must agree that the passage states the specific claim the reasoning makes about that hop. The first two are cheap string checks; the third is one short LLM call per hop, and only for hops that pass the first two. Cut the path at the first hop that fails.</p>
+<pre data-file="examples/verify_paths.py"><code class="language-python">import re
+
+def _mentions(text: str, name: str, aliases: list[str]) -&gt; bool:
+    return any(re.search(rf"(?&lt;!\w){re.escape(s)}(?!\w)", text, re.I) for s in [name, *aliases])
+
+def verify_path(index, path: list[str]) -&gt; list[dict]:
+    """Check every hop: the edge exists, it has sources, and one source mentions both endpoints."""
+    G, report = index.graph, []
+    for u, v in zip(path, path[1:]):
+        hop = {"hop": (u, v), "edge": G.has_edge(u, v), "sources": [], "supported": False}
+        if hop["edge"]:
+            for uid in G.edges[u, v].get("source_ids", []):
+                unit = index.text_units.get(uid)
+                if unit and _mentions(unit.text, u, G.nodes[u].get("aliases", [])) \
+                        and _mentions(unit.text, v, G.nodes[v].get("aliases", [])):
+                    hop["sources"].append(uid)
+            hop["supported"] = bool(hop["sources"])
+        report.append(hop)
+    return report
+
+HOP_CHECK_PROMPT = """Passage:
+{passage}
+
+Claim: {claim}
+
+Does the passage state the claim, directly or by clear paraphrase? Answer YES or NO."""
+
+def prune_path(llm, index, hops: list[tuple[str, str, str]]) -&gt; dict:
+    """Verify a reasoning path hop by hop and cut it at the first hop no source passage states.
+
+    `hops` are (entity_a, claim_text, entity_b), e.g.
+    ("MARLOW DYNAMICS", "Marlow Dynamics acquired Deepcast", "DEEPCAST").
+    """
+    verified = []
+    for u, claim, v in hops:
+        lexical = verify_path(index, [u, v])[0]              # cheap: edge exists and a source names both
+        evidence = None
+        for uid in lexical["sources"]:                        # expensive: does a source state *this* claim?
+            answer = llm.complete(HOP_CHECK_PROMPT.format(passage=index.text_units[uid].text, claim=claim))
+            if answer.strip().upper().startswith("YES"):
+                evidence = uid
+                break
+        if evidence is None:
+            return {"verified": verified, "failed_at": (u, claim, v), "complete": False}
+        verified.append((u, claim, v, evidence))
+    return {"verified": verified, "failed_at": None, "complete": True}</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">Co-mention is not support</span>
+  <p>On the offline index, <code>verify_path</code> accepts the hop KESTREL LABS to MARLOW DYNAMICS because Priya Nair's profile mentions both. That passage says she came to Kestrel from Marlow; it does not say Kestrel and Marlow have any relationship of their own. If the reasoning claims “Kestrel Labs partnered with Marlow Dynamics”, only the claim-level check in <code>prune_path</code> catches it. The lexical stage filters; it does not verify.</p>
+</div>
+
+<h3>Self-consistency across paths</h3>
+<p>Self-consistency (Wang et al., 2022) samples several reasoning chains and returns the most common final answer. With graphs, you can make the samples meaningfully different by giving each one a different retrieved path. If three of five evidence paths lead to “Marlow Dynamics” and two to “Brightwater Capital”, the vote is 0.6 and you can report low confidence or abstain below a threshold.</p>
+<pre data-file="examples/self_consistency.py"><code class="language-python">from collections import Counter
+
+def self_consistent_answer(llm, question: str, path_texts: list[str], samples: int = 5) -&gt; tuple[str, float]:
+    """Ask for an answer from each evidence path separately and return the majority answer and its share."""
+    votes = Counter()
+    for i in range(samples):
+        evidence = path_texts[i % len(path_texts)]
+        reply = llm.complete(f"Evidence path:\n{evidence}\n\nQuestion: {question}\n"
+                             "Answer in at most five words, or say I don't know.")
+        votes[reply.strip().rstrip(".").lower()] += 1
+    answer, count = votes.most_common(1)[0]
+    return answer, count / samples</code></pre>
+<p>Voting helps when errors are independent. It fails when they are correlated: if an extraction error created a wrong edge that sits on most paths, most votes will repeat the error confidently. Pair voting with hop verification rather than using it as a substitute.</p>
+
+<h2>When graph reasoning helps and when it hurts</h2>
+<table>
+  <thead><tr><th>Situation</th><th>Better choice</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Single-hop factual question (“Who is the CTO?”)</td><td>One retrieval pass</td><td>An agent loop adds calls and latency and can wander</td></tr>
+    <tr><td>Global sensemaking (“main themes?”)</td><td>Global search over community reports</td><td>No path answers a summary question</td></tr>
+    <tr><td>Multi-hop question with a clear chain (canonical 2)</td><td>RoG-style plan and ground, or Graph-CoT</td><td>The next lookup depends on the previous answer</td></tr>
+    <tr><td>Recurring question shapes over a typed graph</td><td>Curated metapaths or Text2Cypher</td><td>Deterministic, cheap, reviewable</td></tr>
+    <tr><td>High-stakes answers, LLM-built graph</td><td>Any method plus hop verification</td><td>Faithful to the graph is not the same as faithful to the sources</td></tr>
+    <tr><td>Sparse or noisy graph, detailed text</td><td>Hybrid text retrieval, with the graph as a hint</td><td>Structural reasoning over missing edges finds nothing or the wrong thing</td></tr>
+    <tr><td>You control decoding and need zero invalid paths</td><td>Constrained decoding (GCR, DoG)</td><td>Guarantees validity by construction</td></tr>
+  </tbody>
+</table>
+<p>The pattern across the table: graph reasoning pays off when the <em>structure</em> of the answer is a chain through the graph and the graph is good enough to contain that chain. When either condition fails, reasoning over the graph mainly adds cost, and sometimes adds confidence to wrong answers. <a href="25-evaluation.html">Chapter 25</a> shows how to measure which regime you are in, and <a href="30-agentic-graphrag.html">Chapter 30</a> extends the tool loop into full agents with memory.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 23.1 <span class="level">Warm-up</span></h4>
+  <p>On the typed Kestrel view (<code>examples/kestrel_kg.py</code>), ground these plans by hand with constrained BFS and list the resulting paths: (a) from Priya Nair, <code>[FORMERLY_WORKED_AT, ACQUIRED]</code>; (b) from Lena Park, <code>[BOARD_MEMBER_OF, RUNS]</code>; (c) from Priya Nair, <code>[CO_LEADS, REPLACES]</code>; (d) from Brightwater Capital, <code>[INVESTED_IN, RUNS, DETECTED]</code>. Which canonical question does (d) help answer?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ol type="a">
+      <li>Priya Nair -FORMERLY_WORKED_AT-&gt; Marlow Dynamics -ACQUIRED-&gt; Deepcast. One path.</li>
+      <li>Lena Park -BOARD_MEMBER_OF-&gt; Kestrel Labs -RUNS-&gt; Project Sentinel, and the same prefix -RUNS-&gt; Project Tern. Two paths: the plan branches at Kestrel Labs.</li>
+      <li>No paths. Priya Nair -CO_LEADS-&gt; Project Tern works, but the typed view has no REPLACES edge (in the running example Tern replaces “Deepcast sonar”, which is not an entity). The plan is reasonable; the graph cannot ground it. RoG would report no path, and the answer step should say what is missing rather than guess.</li>
+      <li>Brightwater Capital -INVESTED_IN-&gt; Kestrel Labs -RUNS-&gt; Project Sentinel -DETECTED-&gt; 2024 Halden Reef bleaching event. It is canonical question 2 read backwards: starting from the investor instead of the event. Planning from the event (with inverse relations) is more natural because the question names the event, not the investor.</li>
+    </ol>
+    <pre><code class="language-python">from examples.kestrel_kg import typed_graph
+from examples.rog import ground_relation_plan
+G = typed_graph()
+print(ground_relation_plan(G, "Brightwater Capital", ["INVESTED_IN", "RUNS", "DETECTED"]))</code></pre>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 23.2 <span class="level">Core</span></h4>
+  <p>Build the KG-Trie of paths up to two hops from Marlow Dynamics on the typed view, by hand, listing each prefix and its allowed next tokens. How many complete paths does it contain? Then run greedy constrained decoding with these model scores: INVESTED_IN 0.9, ACQUIRED 0.6, COMPETES_WITH 0.3, Kestrel Labs 0.95, Deepcast 0.7, SUPPLIED 0.8, &lt;END&gt; 0.4, anything else 0.1. What path comes out, and what would unconstrained greedy decoding have produced?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code>()                                        ACQUIRED, COMPETES_WITH
+(ACQUIRED,)                               Deepcast
+(COMPETES_WITH,)                          Kestrel Labs
+(ACQUIRED, Deepcast)                      &lt;END&gt;, SUPPLIED
+(COMPETES_WITH, Kestrel Labs)             &lt;END&gt;, LOCATED_IN, RUNS
+(ACQUIRED, Deepcast, SUPPLIED)            Kestrel Labs
+(COMPETES_WITH, Kestrel Labs, LOCATED_IN) Port Avalon
+(COMPETES_WITH, Kestrel Labs, RUNS)       Project Sentinel, Project Tern
+... and &lt;END&gt; after each of the 4 two-hop paths</code></pre>
+    <p>Complete paths (prefixes that allow &lt;END&gt;): 2 one-hop paths (ACQUIRED Deepcast; COMPETES_WITH Kestrel Labs) and 4 two-hop paths (via SUPPLIED; via LOCATED_IN; two via RUNS), so <strong>6</strong>.</p>
+    <p><strong>Constrained.</strong> Root: allowed ACQUIRED (0.6) and COMPETES_WITH (0.3), pick ACQUIRED. Then only Deepcast. Then &lt;END&gt; (0.4) vs SUPPLIED (0.8), pick SUPPLIED. Then only Kestrel Labs. Then only &lt;END&gt;. Output: <code>ACQUIRED, Deepcast, SUPPLIED, Kestrel Labs</code>.</p>
+    <p><strong>Unconstrained.</strong> Greedy picks INVESTED_IN (0.9) and then Kestrel Labs (0.95): “Marlow Dynamics INVESTED_IN Kestrel Labs”, a fluent, plausible and false statement. The example shows the core value of the trie: the model's preferences still choose among valid continuations, but invalid ones are never available.</p>
+    <p>Check: <code>constrained_decode(lambda p, t: prefs.get(t, 0.1), build_kg_trie(typed_graph(), "Marlow Dynamics", 2))</code>.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 23.3 <span class="level">Core</span></h4>
+  <p>Write unit tests for <code>graph_cot</code> without calling a real model. Cover: (a) a reply with no Action line is reported back and the loop continues, (b) an unknown node name produces guidance rather than an exception, (c) the step limit forces an abstention.</p>
+  <details class="hint"><summary>Hint</summary><p>Any object with <code>complete(prompt, system=None, json=False)</code> satisfies the <code>LLM</code> protocol. Record the prompts it receives so you can assert on what the model was told.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre data-file="tests/test_graph_cot.py"><code class="language-python">from examples.graph_cot import GraphTools, graph_cot
+
+class ScriptedLLM:
+    """Returns canned replies in order and records every prompt it saw."""
+    def __init__(self, replies):
+        self.replies, self.prompts = list(replies), []
+
+    def complete(self, prompt, system=None, json=False):
+        self.prompts.append(prompt)
+        return self.replies.pop(0)
+
+def test_malformed_action_is_reported_and_loop_continues(index):
+    llm = ScriptedLLM(["I think it is Marlow.",                                   # no Action line
+                       "Thought: finish properly\nAction: Finish[Marlow Dynamics]"])
+    out = graph_cot(llm, GraphTools(index), "Who acquired Deepcast?")
+    assert out["answer"] == "Marlow Dynamics" and out["steps"] == 2
+    assert "No valid Action line" in llm.prompts[1]                               # the model was told
+
+def test_unknown_node_returns_guidance_not_exception(index):
+    llm = ScriptedLLM(["Thought: check\nAction: NeighborCheck[DEEPCAST CORP, ALL]",
+                       "Thought: give up\nAction: Finish[I don't know]"])
+    out = graph_cot(llm, GraphTools(index), "Who owns Deepcast Corp?")
+    assert "Use RetrieveNode first" in out["trace"][0][2]
+    assert out["answer"] == "I don't know"
+
+def test_step_limit_forces_abstention(index):
+    llm = ScriptedLLM(["Thought: look\nAction: NodeDegree[KESTREL LABS, ALL]"] * 3)
+    out = graph_cot(llm, GraphTools(index), "Loop forever", max_steps=3)
+    assert out["answer"].startswith("I don't know") and len(out["trace"]) == 3</code></pre>
+    <p>Provide <code>index</code> as a pytest fixture that loads an index built with <code>MockLLM</code>; all three tests pass against that index. Test (a) asserts on the second prompt as well as the answer: the point of the feedback is that the model sees it. Test (b) passes because <code>GraphTools._node</code> returns <code>None</code> for unknown names and every tool turns that into a sentence. Scripted LLMs make agent loops as testable as any other code; keep a few recorded real-model transcripts as regression fixtures too.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 23.4 <span class="level">Core</span></h4>
+  <p>For “Who acquired Kestrel's former sonar supplier?”, five samples over different evidence paths return: “Marlow Dynamics.”, “Marlow Dynamics”, “Brightwater Capital”, “marlow dynamics”, “Marlow Dynamics”. (a) What does <code>self_consistent_answer</code> return? (b) Suppose instead all five paths pass through one wrong edge “Brightwater Capital ACQUIRED Deepcast” created by an extraction error. What happens to the vote, and which technique from this chapter catches the error?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Normalization strips the trailing period and lowercases, so the votes are marlow dynamics × 4 and brightwater capital × 1. The function returns <code>("marlow dynamics", 0.8)</code>.</p>
+    <p>(b) All five samples read the same wrong edge, so the vote becomes brightwater capital with share 1.0: maximal confidence in a wrong answer. Self-consistency measures agreement, not truth, and correlated evidence defeats it. Hop verification catches it: <code>prune_path</code> would look for a source passage that states “Brightwater Capital acquired Deepcast”. No passage in the Kestrel corpus states that Brightwater acquired Deepcast (the Series A and Series B articles are about investing in Kestrel Labs), so whichever passages are attached to the bad edge, the claim-level check fails and the path is cut at that hop. Constrained decoding would not help here, because the wrong edge is in the graph.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 23.5 <span class="level">Stretch</span></h4>
+  <p>Compare <code>local_search</code> with <code>graph_cot</code> on the multi-hop questions in <code>data/questions.jsonl</code> using a real model. Record token F1 (<code>minigraphrag.evaluation.token_f1</code>), LLM calls, total input characters, and how often each abstains. Then add <code>prune_path</code>-style verification after Finish (ask the model to restate its answer as hops) and report how many answers change. Write down the decision rule you would ship.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.evaluation import load_questions, token_f1
+from minigraphrag.indexer import load_index
+from minigraphrag.llm import CachedLLM, get_llm
+from minigraphrag.search.local import local_search
+from examples.graph_cot import GraphTools, graph_cot
+
+class Meter:
+    def __init__(self, llm): self.llm, self.calls, self.chars = llm, 0, 0
+    def complete(self, prompt, system=None, json=False):
+        self.calls += 1
+        self.chars += len(prompt) + len(system or "")
+        return self.llm.complete(prompt, system=system, json=json)
+
+index = load_index("out/kestrel")
+base = get_llm("openai", cache_dir=".cache/llm")
+rows = []
+for q in [q for q in load_questions("data/questions.jsonl") if q["type"] == "multi-hop"]:
+    m1 = Meter(base)
+    a1 = local_search(index, q["question"], m1).answer
+    m2 = Meter(base)
+    a2 = graph_cot(m2, GraphTools(index), q["question"], max_steps=8)["answer"]
+    rows.append((q["id"], token_f1(a1, q["answer"]), m1.calls, m1.chars,
+                 token_f1(a2, q["answer"]), m2.calls, m2.chars, "don't know" in a2.lower()))
+for r in rows:
+    print(r)</code></pre>
+    <p>What to expect and how to decide. Local search makes one call with a large context; Graph-CoT makes several calls, and because each resends the transcript its input characters are often comparable to or larger than local search's. On the Kestrel multi-hop questions, Graph-CoT tends to help when the evidence is spread over entities the question does not name (question 2), and to tie or lose when local search's seed entities already pull in all the evidence (question 1, where Kestrel Labs and Project Tern are named). Verification after Finish typically changes a small number of answers, but those are the confidently wrong ones, which matter most. A sensible rule: route questions classified as <em>path</em> (Chapter 21's router) to Graph-CoT with a step limit and verification, keep local search for everything else, and abstain when verification cuts the path before the answer entity. Keep your per-question table; the rule should be justified by it, not by the averages alone.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">What are the three sub-steps of each Graph Chain-of-Thought iteration?</p>
+  <ol>
+    <li>Retrieve, rerank, generate</li>
+    <li data-correct>LLM reasoning, LLM-graph interaction (a function call), graph execution</li>
+    <li>Plan relation paths, constrained BFS, answer</li>
+    <li>Extract triples, verify, vote</li>
+  </ol>
+  <div class="explain">Graph-CoT alternates reasoning about what is needed, writing a call to a graph function such as NeighborCheck, and executing it on the graph, until the model finishes.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In RoG, what does a plan contain, and how are plans turned into evidence?</p>
+  <ol>
+    <li>A list of entities; they are looked up in a vector store</li>
+    <li>A Cypher query; it is run on Neo4j</li>
+    <li>A list of passages; they are reranked by a cross-encoder</li>
+    <li data-correct>A sequence of relation types; constrained BFS from the question entity follows them to retrieve reasoning paths</li>
+  </ol>
+  <div class="explain">Plans are relation paths like ACQUIRED → SUPPLIED. Retrieval instantiates them in the KG, and the model reasons over the resulting paths.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A KG-Trie constrains decoding. Which of these does it guarantee?</p>
+  <ol>
+    <li>The final answer is correct</li>
+    <li data-correct>Every generated path exists in the graph</li>
+    <li>The path is the most relevant one for the question</li>
+    <li>The graph's edges are supported by source text</li>
+  </ol>
+  <div class="explain">Constrained decoding enforces validity with respect to the graph, nothing more. A valid path can be irrelevant, and a wrong edge in the graph is still a valid path.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does <code>prune_path</code> run an LLM check on a hop even when a source passage mentions both entities?</p>
+  <ol>
+    <li>To translate the passage into triples</li>
+    <li>Because string matching is too slow</li>
+    <li data-correct>Because co-mention does not mean the passage states the specific claim the reasoning makes about that hop</li>
+    <li>Because source ids are unreliable</li>
+  </ol>
+  <div class="explain">Priya Nair's profile mentions Kestrel Labs and Marlow Dynamics without stating any relation between those two companies. Only a claim-level check catches a hop that invents one.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Five evidence paths all contain the same extraction error, and self-consistency returns the wrong answer with share 1.0. What is the underlying problem?</p>
+  <ol>
+    <li>Too few samples</li>
+    <li>Temperature was too low</li>
+    <li>The vote should use embeddings instead of strings</li>
+    <li data-correct>The samples' errors are correlated, so agreement does not indicate truth</li>
+  </ol>
+  <div class="explain">Voting assumes independent errors. Shared evidence breaks that assumption; hop-level verification against sources addresses it.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">For which question is an iterative Graph-CoT loop least likely to be worth its cost on the Kestrel corpus?</p>
+  <ol>
+    <li>“Which investor's board member oversees the company whose drones detected the bleaching?”</li>
+    <li>“What connects Priya Nair to Deepcast?”</li>
+    <li data-correct>“What are the main themes in this corpus?”</li>
+    <li>“Which company lost its supplier because of Marlow's acquisition?”</li>
+  </ol>
+  <div class="explain">Themes are a global sensemaking question with no path to follow; global search over community reports fits it. The others are chains through the graph.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Is Graph-CoT just ReAct with graph tools?</summary>
+  <div><p>Structurally, yes: the paper cites ReAct as inspiration and describes Graph-CoT as an agent framework. Its contribution is the choice of a small, graph-specific action space that covers both node text and structure, and a benchmark showing that this beats one-shot retrieval on graph questions. The practical lesson is the same: a few well-designed tools with good error messages beat many generic ones.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I use constrained decoding with a hosted API model?</summary>
+  <div><p>Usually not in the KG-Trie sense, because it needs control over the token distribution at every step. Structured output features constrain output to a JSON schema or grammar, and you can approximate path constraints by making the allowed next relations an enum per step, one call per hop. That is effectively Graph-CoT with a restricted action space. GCR's split helps here: a small open-weight model does constrained path generation, and a hosted general model reasons over the paths.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How is this different from Think-on-Graph in Chapter 18?</summary>
+  <div><p>Think-on-Graph has the LLM score and prune candidate relations and entities in a beam search, exploring several paths in parallel. Graph-CoT follows one line of reasoning with free-form tool calls. RoG plans the whole relation path first. GCR and DoG constrain generation. They trade off exploration breadth, number of LLM calls and guarantees differently, and they combine well with the same verification step.</p></div>
+</details>
+
+<details class="qa">
+  <summary>My graph has free-text edge descriptions, not relation types. Can I still plan relation paths?</summary>
+  <div><p>Not directly. Options, in order of effort: normalize descriptions into a small set of relation labels at indexing time (an extra LLM pass per edge, or a label field in extraction as suggested in Chapter 8); plan with natural-language hop descriptions and match them to edges by embedding similarity (fuzzier and less faithful); or skip planning and use Graph-CoT, whose NeighborCheck by entity type works on the untyped <code>minigraphrag</code> graph as is.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Do reasoning models make these methods unnecessary?</summary>
+  <div><p>Models with long internal reasoning are better at planning and at noticing gaps, which makes Graph-CoT-style loops work with fewer demonstrations. They do not know your graph, and their private reasoning is not checkable against your sources. Graph access and hop verification remain necessary; what changes is that you can give the model broader tools and fewer instructions.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a verifiable multi-hop answerer</h3>
+  <p>Combine a reasoning method from this chapter with verification so that every multi-hop answer comes with a checked chain of evidence.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A Graph-CoT loop over the <code>minigraphrag</code> index with at least five tools, capped observations and a step limit, plus the unit tests from Exercise 23.3</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A RoG-style planner over the typed Kestrel view that drops plans with unknown relations and reports when no plan can be grounded</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Hop-by-hop verification that returns, for each accepted hop, the source id that states it</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An answer format that lists the verified chain and marks the answer as unverified or abstains when the chain is cut</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A table for canonical questions 1 to 3: method, answer, calls, input size, verified or not</span></li>
+  </ul>
+  <p><strong>Done when</strong> for each canonical multi-hop question you can click from the final answer to the passage behind every hop, and at least one wrong chain was caught by your verifier.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Graph reasoning interleaves thinking and graph access, which helps when the next lookup depends on the last answer.</li>
+    <li>Graph-CoT gives the model a small graph action space (RetrieveNode, NodeFeature, NeighborCheck, NodeDegree) in a reason, interact, execute loop; tools should turn errors into observations.</li>
+    <li>RoG plans relation paths, grounds them with constrained BFS and reasons over the resulting paths; plans are checkable against the schema.</li>
+    <li>KG-Trie constrained decoding (GCR) and Decoding on Graphs make generated paths valid by construction, but not relevant or true to the sources.</li>
+    <li>Verify reasoning hop by hop against source passages; co-mention filters, claim-level checks verify.</li>
+    <li>Self-consistency helps only when errors are independent; routing decides whether graph reasoning is worth its cost at all.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Jin, B. et al. <a href="https://arxiv.org/abs/2404.07103">Graph Chain-of-Thought: Augmenting Large Language Models by Reasoning on Graphs</a>. <span class="venue">ACL 2024; arXiv 2404.07103</span></li>
+  <li>Luo, L., Li, Y.-F., Haffari, G. and Pan, S. <a href="https://arxiv.org/abs/2310.01061">Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning</a>. <span class="venue">ICLR 2024; arXiv 2310.01061</span></li>
+  <li>Luo, L. et al. <a href="https://arxiv.org/abs/2410.13080">Graph-constrained Reasoning: Faithful Reasoning on Knowledge Graphs with Large Language Models</a>. <span class="venue">ICML 2025; arXiv 2410.13080</span></li>
+  <li>Li, K. et al. <a href="https://arxiv.org/abs/2410.18415">Decoding on Graphs: Faithful and Sound Reasoning on Knowledge Graphs through Generation of Well-Formed Chains</a>. <span class="venue">arXiv 2410.18415, 2024</span></li>
+  <li>Wang, J. et al. <a href="https://arxiv.org/abs/2306.06427">Boosting Language Models Reasoning with Chain-of-Knowledge Prompting</a>. <span class="venue">ACL 2024; arXiv 2306.06427</span></li>
+  <li>Li, X. et al. <a href="https://openreview.net/forum?id=cPgh4gWZlz">Chain-of-Knowledge: Grounding Large Language Models via Dynamic Knowledge Adapting over Heterogeneous Sources</a>. <span class="venue">ICLR 2024; arXiv 2305.13269</span></li>
+  <li>Sun, J. et al. <a href="https://arxiv.org/abs/2307.07697">Think-on-Graph: Deep and Responsible Reasoning of Large Language Model on Knowledge Graph</a>. <span class="venue">ICLR 2024; arXiv 2307.07697</span></li>
+  <li>Wang, X. et al. <a href="https://arxiv.org/abs/2203.11171">Self-Consistency Improves Chain of Thought Reasoning in Language Models</a>. <span class="venue">ICLR 2023; arXiv 2203.11171</span></li>
+  <li>Yao, S. et al. <a href="https://arxiv.org/abs/2210.03629">ReAct: Synergizing Reasoning and Acting in Language Models</a>. <span class="venue">ICLR 2023; arXiv 2210.03629</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

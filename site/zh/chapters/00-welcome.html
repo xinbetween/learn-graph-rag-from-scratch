@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome: the map and the toolkit | Graph RAG from Scratch</title>
+<meta name="description" content="What GraphRAG is, where it came from, how this course is organized, the Kestrel Labs running example, and how to set up the minigraphrag reference code.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/00-welcome.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/00-welcome.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/00-welcome.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="00-welcome" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Welcome: the map and the toolkit</h1>
+  <p class="lede">This course teaches you to build GraphRAG yourself: turning documents into a knowledge graph, summarizing it, searching it and grounding an LLM's answers in it. This first chapter gives you the whole picture, the running example you will use in every chapter, and a working copy of the reference code on your machine.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Describe the GraphRAG pipeline in one picture, from documents to a grounded answer</li>
+      <li>Place GraphRAG in the history of retrieval-augmented generation, from 2020 to 2026</li>
+      <li>Use the course taxonomy (knowledge organization, retrieval, integration) to locate any technique</li>
+      <li>Navigate the Kestrel Labs corpus and trace the paths behind its canonical questions</li>
+      <li>Install <code>minigraphrag</code>, build an index offline with the mock LLM, and switch to a real provider</li>
+      <li>Pick a learning path that fits your background and goals</li>
+    </ul>
+  </div>
+</header>
+
+<h2>GraphRAG in one picture</h2>
+<p><strong>Retrieval-augmented generation</strong> (RAG) answers a question by first retrieving relevant material from your own data and then asking a large language model (LLM) to answer from that material, with citations. Classic RAG retrieves text chunks whose embeddings are similar to the question. That works well for lookups (“Who supplied Kestrel's sonar in 2024?”) and poorly for questions whose evidence is scattered (“Why did Kestrel start Project Tern?”) or spread across the whole collection (“What are the main themes here?”).</p>
+<p><strong>GraphRAG</strong> is the family of methods that put a graph between the documents and the model. At indexing time, an LLM reads the documents and extracts <em>entities</em> (people, organizations, projects) and the <em>relationships</em> between them. Duplicate names are merged, the graph is partitioned into <em>communities</em> of closely connected entities, and each community gets a written summary. At query time, a retriever uses that structure: it starts from the entities a question names and follows edges, or it reads community summaries to answer questions about the whole corpus. The LLM then writes an answer from the retrieved entities, relationships, summaries and source text.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="pic-title">
+      <title id="pic-title">The GraphRAG pipeline: documents become text units, then a graph of entities and relationships, then communities with reports; retrieval uses the graph and reports to build context for a grounded answer</title>
+      <defs><marker id="pic-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <text class="d-text small" x="12" y="20">Indexing, once per corpus change</text>
+      <rect class="d-box" x="12" y="34" width="112" height="116" rx="8"/>
+      <text class="d-text bold" x="68" y="56" text-anchor="middle">Documents</text>
+      <rect class="d-box ghost" x="30" y="68" width="76" height="16" rx="2"/>
+      <rect class="d-box ghost" x="30" y="90" width="76" height="16" rx="2"/>
+      <rect class="d-box ghost" x="30" y="112" width="76" height="16" rx="2"/>
+      <text class="d-text small" x="68" y="142" text-anchor="middle">12 Kestrel docs</text>
+      <line class="d-line" x1="124" y1="92" x2="152" y2="92" marker-end="url(#pic-arr)"/>
+      <rect class="d-box node" x="156" y="34" width="150" height="116" rx="8"/>
+      <text class="d-text bold" x="231" y="56" text-anchor="middle">Entity graph</text>
+      <line class="d-line" x1="190" y1="84" x2="230" y2="108"/>
+      <line class="d-line" x1="230" y1="108" x2="272" y2="80"/>
+      <line class="d-line" x1="230" y1="108" x2="214" y2="132"/>
+      <circle class="d-node" cx="190" cy="84" r="8"/>
+      <circle class="d-node hot" cx="230" cy="108" r="9"/>
+      <circle class="d-node warm" cx="272" cy="80" r="8"/>
+      <circle class="d-node alt" cx="214" cy="132" r="7"/>
+      <text class="d-text small" x="231" y="146" text-anchor="middle">extract, resolve</text>
+      <line class="d-line" x1="306" y1="92" x2="334" y2="92" marker-end="url(#pic-arr)"/>
+      <rect class="d-box comm" x="338" y="34" width="150" height="116" rx="8"/>
+      <text class="d-text bold" x="413" y="56" text-anchor="middle">Communities</text>
+      <ellipse class="d-area" cx="384" cy="96" rx="32" ry="24"/>
+      <ellipse class="d-area" cx="448" cy="100" rx="26" ry="20"/>
+      <circle class="d-node" cx="374" cy="92" r="6"/>
+      <circle class="d-node" cx="394" cy="102" r="6"/>
+      <circle class="d-node warm" cx="444" cy="96" r="6"/>
+      <circle class="d-node warm" cx="456" cy="106" r="6"/>
+      <text class="d-text small" x="413" y="146" text-anchor="middle">cluster, summarize</text>
+      <line class="d-line" x1="488" y1="92" x2="516" y2="92" marker-end="url(#pic-arr)"/>
+      <rect class="d-box comm" x="520" y="34" width="148" height="116" rx="8"/>
+      <text class="d-text bold" x="594" y="56" text-anchor="middle">Index</text>
+      <text class="d-text small" x="534" y="80">entities, relations</text>
+      <text class="d-text small" x="534" y="98">community reports</text>
+      <text class="d-text small" x="534" y="116">text units</text>
+      <text class="d-text small" x="534" y="134">embeddings</text>
+      <text class="d-text small" x="12" y="186">Querying, per question</text>
+      <rect class="d-box edge" x="12" y="200" width="150" height="80" rx="8"/>
+      <text class="d-text bold" x="87" y="232" text-anchor="middle">Question</text>
+      <text class="d-text small" x="87" y="254" text-anchor="middle">“Why did Kestrel</text>
+      <text class="d-text small" x="87" y="268" text-anchor="middle">start Project Tern?”</text>
+      <line class="d-line" x1="162" y1="240" x2="190" y2="240" marker-end="url(#pic-arr)"/>
+      <rect class="d-box node" x="194" y="200" width="160" height="80" rx="8"/>
+      <text class="d-text bold" x="274" y="228" text-anchor="middle">Graph retrieval</text>
+      <text class="d-text small" x="274" y="250" text-anchor="middle">seed entities, walk edges,</text>
+      <text class="d-text small" x="274" y="266" text-anchor="middle">or read community reports</text>
+      <line class="d-line" x1="354" y1="240" x2="382" y2="240" marker-end="url(#pic-arr)"/>
+      <rect class="d-box edge" x="386" y="200" width="130" height="80" rx="8"/>
+      <text class="d-text bold" x="451" y="228" text-anchor="middle">Context</text>
+      <text class="d-text small" x="451" y="250" text-anchor="middle">tables with ids,</text>
+      <text class="d-text small" x="451" y="266" text-anchor="middle">within a token budget</text>
+      <line class="d-line" x1="516" y1="240" x2="544" y2="240" marker-end="url(#pic-arr)"/>
+      <rect class="d-box good" x="548" y="200" width="120" height="80" rx="8"/>
+      <text class="d-text bold" x="608" y="228" text-anchor="middle">Answer</text>
+      <text class="d-text small" x="608" y="250" text-anchor="middle">grounded, with</text>
+      <text class="d-text small" x="608" y="266" text-anchor="middle">citations</text>
+      <line class="d-line dash" x1="594" y1="150" x2="290" y2="196" marker-end="url(#pic-arr)"/>
+    </svg>
+  </div>
+  <figcaption>The whole course in one figure. Parts 1 and 2 build the top row; Part 3 builds the retrieval box in many variations; Part 4 is about the context and answer boxes; Parts 5 and 6 are about making all of it measurable, affordable and current.</figcaption>
+</figure>
+
+<p>Applied to Kestrel Labs, the graph lets retrieval answer “Why did Kestrel start Project Tern?” by starting at <em>Project Tern</em>, stepping to <em>Deepcast</em> (whose sonar Tern replaces) and on to <em>Marlow Dynamics</em> (which acquired Deepcast), collecting the three facts that explain the decision. Plain vector search, as you will measure in <a href="03-where-rag-breaks.html">Chapter 3</a>, ranks the article about the acquisition 21st of 24 chunks for that question.</p>
+
+<div class="callout note">
+  <span class="callout-title">GraphRAG is a family of methods</span>
+  <p>“GraphRAG” is also the name of Microsoft Research's paper and open-source project, which popularized the approach in 2024. This course uses the word for the whole family: Microsoft-style community summaries, LightRAG's keyword-level retrieval, HippoRAG's Personalized PageRank, path- and subgraph-based retrieval, Text2Cypher over existing knowledge graphs and agentic graph search. You will build a small version of each.</p>
+</div>
+
+<h2>A short history</h2>
+<p>You do not need the history to build anything, but it explains why the field looks the way it does and why so many methods have similar names.</p>
+
+<table>
+  <thead><tr><th>When</th><th>Milestone</th><th>Why it matters here</th></tr></thead>
+  <tbody>
+    <tr><td>2020</td><td>Lewis et al. name <strong>retrieval-augmented generation</strong>: a dense retriever plus a generator. REALM and Dense Passage Retrieval appear the same year.</td><td>The retrieve-then-generate loop every chapter uses (<a href="01-llms-and-context.html">Chapter 1</a>).</td></tr>
+    <tr><td>2022–2023</td><td>Chat models make RAG the default way to answer from private data: chunk, embed, vector search, prompt. Iterative methods such as IRCoT and ReAct interleave retrieval with reasoning. Think-on-Graph (2023) has an LLM explore a knowledge graph step by step.</td><td>The vector baseline (<a href="02-vector-rag.html">Chapter 2</a>) and its multi-hop limits (Chapter 3).</td></tr>
+    <tr><td>Early 2024</td><td>RAPTOR builds a tree of recursive summaries over chunks. G-Retriever retrieves subgraphs for graph question answering. Microsoft Research describes GraphRAG and publishes <em>From Local to Global</em>: LLM-extracted entity graphs, community reports and map-reduce global search.</td><td>Community detection and reports (Chapters 11, 12, 15), subgraph retrieval (19).</td></tr>
+    <tr><td>Mid–late 2024</td><td>Microsoft open-sources GraphRAG. HippoRAG ranks passages with Personalized PageRank over an entity graph. LightRAG proposes dual-level keyword retrieval with incremental updates. The first GraphRAG surveys appear. Microsoft Research announces LazyGraphRAG to cut indexing cost.</td><td>PPR (17), LightRAG (16), cost (26).</td></tr>
+    <tr><td>2025</td><td>A second survey organizes the field into knowledge organization, retrieval and integration. HippoRAG 2 and PathRAG refine graph retrieval. Graph-R1 trains agentic graph retrievers with reinforcement learning, and GraphSearch proposes an agentic deep-search workflow over graphs. Temporal graph memory for agents (Zep, Graphiti) goes into production use.</td><td>Paths and agents (18, 30), training with graphs (24), temporal graphs (27).</td></tr>
+    <tr><td>2026</td><td>Microsoft GraphRAG is in maintenance mode while the ideas spread into many frameworks. Research focuses on cost (for example LiteRAG), bi-temporal graph engines on ordinary databases (post-graph-rag), and careful comparisons of when hybrid GraphRAG beats classic RAG on real domains.</td><td>Frameworks, production and the research map (28, 29, 33).</td></tr>
+  </tbody>
+</table>
+
+<p>Two threads run through that history. One builds a better <em>index</em> (graphs, trees, communities) so that retrieval has more to work with. The other builds a better <em>retriever</em> (PageRank, paths, agents) that uses structure at query time. Most current systems combine both, plus plain vector and keyword search.</p>
+
+<h2>The taxonomy this course follows</h2>
+<p>With dozens of GraphRAG papers a month, you need a map. This course uses the three-stage structure from the survey by Zhang et al., <em>A Survey of Graph Retrieval-Augmented Generation for Customized Large Language Models</em>, and the curated DEEP-PolyU/Awesome-GraphRAG list organized by it. Every method answers three questions: how is knowledge organized into a graph, how is it retrieved, and how is it integrated into the model's generation?</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="tax-title">
+      <title id="tax-title">Three stages of GraphRAG: knowledge organization, knowledge retrieval and knowledge integration, each with its sub-areas and course parts</title>
+      <defs><marker id="tax-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box node" x="10" y="14" width="206" height="222" rx="8"/>
+      <text class="d-text bold" x="24" y="40">1. Knowledge organization</text>
+      <text class="d-text small" x="24" y="62">How text becomes a graph</text>
+      <text class="d-text" x="24" y="92">Graphs as an index</text>
+      <text class="d-text" x="24" y="114">Graphs as knowledge carriers</text>
+      <text class="d-text small" x="36" y="132">built from a corpus, or existing KGs</text>
+      <text class="d-text" x="24" y="156">Hybrid designs</text>
+      <text class="d-text small" x="24" y="222">Course Part 2: Chapters 6–13</text>
+      <line class="d-line" x1="216" y1="125" x2="232" y2="125" marker-end="url(#tax-arr)"/>
+      <rect class="d-box comm" x="236" y="14" width="206" height="222" rx="8"/>
+      <text class="d-text bold" x="250" y="40">2. Knowledge retrieval</text>
+      <text class="d-text small" x="250" y="62">How evidence is found</text>
+      <text class="d-text" x="250" y="92">Similarity-based</text>
+      <text class="d-text" x="250" y="112">Logical reasoning-based</text>
+      <text class="d-text" x="250" y="132">LLM-based and GNN-based</text>
+      <text class="d-text" x="250" y="152">Multi-round (agentic)</text>
+      <text class="d-text" x="250" y="172">Post-retrieval and hybrid</text>
+      <text class="d-text small" x="250" y="222">Course Part 3: Chapters 14–21</text>
+      <line class="d-line" x1="442" y1="125" x2="458" y2="125" marker-end="url(#tax-arr)"/>
+      <rect class="d-box edge" x="462" y="14" width="208" height="222" rx="8"/>
+      <text class="d-text bold" x="476" y="40">3. Knowledge integration</text>
+      <text class="d-text small" x="476" y="62">How evidence shapes the answer</text>
+      <text class="d-text" x="476" y="92">In-context learning</text>
+      <text class="d-text small" x="488" y="110">prompts, graph chain-of-thought</text>
+      <text class="d-text" x="476" y="138">Fine-tuning</text>
+      <text class="d-text small" x="488" y="156">node, path, subgraph level</text>
+      <text class="d-text small" x="476" y="222">Course Part 4: Chapters 22–24</text>
+    </svg>
+  </div>
+  <figcaption>The survey's three stages, with its main sub-areas, mapped to the parts of this course. Part 1 builds the foundations for all three; Parts 5 and 6 cover evaluation, operations and frontier topics that cut across them.</figcaption>
+</figure>
+
+<p>When you read a new paper, place it on this map first. LightRAG, for example, is mostly an organization choice (entities and relations with keyword descriptions) plus a similarity-based dual-level retriever. Think-on-Graph is an LLM-based, multi-round retriever over an existing knowledge graph. <a href="33-research-map.html">Chapter 33</a> returns to this map with the papers you have met along the way.</p>
+
+<h2>How chapters are built</h2>
+<p>Every chapter follows the same structure, so you always know where to find what you need.</p>
+<table>
+  <thead><tr><th>Element</th><th>What it is for</th><th>How to use it</th></tr></thead>
+  <tbody>
+    <tr><td>Objectives and lede</td><td>What you will be able to do afterwards</td><td>Read first; check yourself against them at the end</td></tr>
+    <tr><td>Explanations</td><td>Motivation, intuition, mechanism, code and trade-offs, in that order</td><td>Read with the reference code open next to you</td></tr>
+    <tr><td>Interactive visualizations</td><td>Step through algorithms on the Kestrel graph: BFS, PageRank, Louvain, map-reduce</td><td>Press Next slowly and predict the next step before you see it</td></tr>
+    <tr><td>Diagrams</td><td>Static pictures of structures and data flow</td><td>Redraw the important ones from memory</td></tr>
+    <tr><td>Code</td><td>Real <code>minigraphrag</code> code, labeled with its file path</td><td>Run it, change it, break it</td></tr>
+    <tr><td>Exercises</td><td>Warm-up (by hand), core (coding and analysis), stretch (open-ended)</td><td>Attempt before opening the hint; every exercise has a full worked answer</td></tr>
+    <tr><td>Quiz</td><td>Five or more questions that check understanding, not recall</td><td>Wrong answers explain themselves; the score is only for you</td></tr>
+    <tr><td>Questions learners often ask</td><td>The follow-up questions that come up when people learn this</td><td>Skim; open what you were wondering about</td></tr>
+    <tr><td>Project</td><td>A small build with a checklist and a “done when” line</td><td>Do at least the projects on your learning path</td></tr>
+    <tr><td>Capstones</td><td>Four end-to-end builds (MiniGraphRAG, code graph, temporal memory, enterprise KG QA)</td><td>Milestones with starter code, checkpoints and reference solutions</td></tr>
+  </tbody>
+</table>
+
+<div class="callout tip">
+  <span class="callout-title">Mark chapters complete</span>
+  <p>Each chapter has a “mark complete” button at the bottom, and your progress shows in the sidebar and on the course map. Progress is stored in your browser only.</p>
+</div>
+
+<h2>Meet Kestrel Labs</h2>
+<p>Every example, exercise and project in the course uses one fictional world, so you can watch the same graph grow from raw text to communities to answers. Because it is fictional, no language model knows anything about it: when a model answers a Kestrel question correctly, your retrieval did the work.</p>
+
+<p><strong>Kestrel Labs</strong> is an ocean-technology startup in the coastal city of Port Avalon, founded in 2021 by Dr. Mira Okafor (CEO, formerly a researcher at Tidewater Institute) and Jonas Vehl (CTO until March 2026, then Chief Scientist). It builds autonomous underwater drones. Its reef-monitoring program, <strong>Project Sentinel</strong>, runs with Tidewater Institute as research partner, and in August 2024 its drones detected a mass bleaching event at Halden Reef before divers saw it. Kestrel bought all its sonar from <strong>Deepcast</strong> until competitor <strong>Marlow Dynamics</strong> acquired Deepcast in April 2025 and ended outside supply. Kestrel responded with <strong>Project Tern</strong>, an in-house sonar module co-led by Vehl and Priya Nair, a former Marlow engineer who became CTO in March 2026. Brightwater Capital led Kestrel's Series A ($12M, 2022) and Series B ($40M, 2025); its partner Lena Park sits on Kestrel's board. The regional <strong>Ocean Health Act</strong> (2025) requires quarterly reef monitoring, which led the Port Avalon City Council to contract Kestrel in November 2025.</p>
+
+<h3>The twelve documents</h3>
+<table>
+  <thead><tr><th>File</th><th>Kind</th><th>Date</th><th>Main facts</th></tr></thead>
+  <tbody>
+    <tr><td><code>01_herald_kestrel_founding</code></td><td>Newspaper article</td><td>Oct 2021</td><td>Founding by Okafor and Vehl; Okafor's Tidewater past</td></tr>
+    <tr><td><code>02_brightwater_series_a</code></td><td>Press release</td><td>Mar 2022</td><td>$12M Series A; Lena Park joins the board</td></tr>
+    <tr><td><code>03_deepcast_supply_agreement</code></td><td>Trade press</td><td>Aug 2022</td><td>Deepcast to supply sonar; single-supplier risk</td></tr>
+    <tr><td><code>04_twi_sentinel_launch</code></td><td>Institute blog</td><td>Feb 2023</td><td>Project Sentinel launched; Ana Ruiz leads the science</td></tr>
+    <tr><td><code>05_kestrel_blog_priya_nair</code></td><td>Company blog</td><td>Sep 2023</td><td>Priya Nair joins from Marlow Dynamics</td></tr>
+    <tr><td><code>06_twi_bleaching_research_note</code></td><td>Research note</td><td>Sep 2024</td><td>Sentinel drones detect the 2024 bleaching</td></tr>
+    <tr><td><code>07_marlow_acquires_deepcast</code></td><td>Trade press</td><td>Apr 2025</td><td>Marlow buys Deepcast; outside contracts end</td></tr>
+    <tr><td><code>08_kestrel_board_memo_supply</code></td><td>Confidential memo</td><td>May 2025</td><td>Supply disruption; proposal to build in-house sonar</td></tr>
+    <tr><td><code>09_kestrel_eng_blog_project_tern</code></td><td>Engineering blog</td><td>Jun 2025</td><td>Project Tern kicks off to replace Deepcast sonar</td></tr>
+    <tr><td><code>10_brightwater_series_b</code></td><td>Press release</td><td>Sep 2025</td><td>$40M Series B; Ocean Health Act creates demand</td></tr>
+    <tr><td><code>11_city_council_minutes</code></td><td>Meeting minutes</td><td>Nov 2025</td><td>Council contracts Kestrel for Act compliance</td></tr>
+    <tr><td><code>12_interview_leadership_change_2026</code></td><td>Podcast transcript</td><td>Mar 2026</td><td>Priya Nair becomes CTO; risks the company faces</td></tr>
+  </tbody>
+</table>
+
+<p>The corpus is small (5,427 words) on purpose: you can read all of it in twenty minutes, check every answer by hand, and run the whole pipeline offline in well under a second. It is also written so that facts are spread realistically: the board memo never names Marlow Dynamics, the bleaching note never names Kestrel Labs, and names appear under aliases such as “TWI”, “Okafor” and “Tern”.</p>
+
+<h3>The canonical questions</h3>
+<p>Seven questions recur throughout the course. <code>data/questions.jsonl</code> contains them and sixteen more, each with a reference answer and supporting documents.</p>
+<ul>
+  <li><strong>Multi-hop</strong>: (1) Why did Kestrel Labs start Project Tern? (2) Which investor's board member oversees the company whose drones detected the Halden Reef bleaching? (3) What connects Priya Nair to Deepcast?</li>
+  <li><strong>Global</strong>: (4) What are the main themes in this corpus? (5) What risks does Kestrel Labs face?</li>
+  <li><strong>Temporal</strong>: (6) Who is the CTO of Kestrel Labs? (7) Who supplied Kestrel's sonar in 2024?</li>
+</ul>
+
+<p>Step through the graph below to see the path each question needs. This is the hand-drawn “ideal” graph from the running-example specification; the graph your code extracts will be close to it but not identical, and comparing the two is part of the fun.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "The Kestrel Labs knowledge graph",
+  "subtitle": "Step through the canonical questions",
+  "height": 460,
+  "directed": false,
+  "nodes": [
+    {"id": "brightwater", "label": "Brightwater Capital", "group": 2, "x": 10, "y": 10},
+    {"id": "lena", "label": "Lena Park", "group": 3, "x": 9, "y": 40},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 2, "x": 34, "y": 34},
+    {"id": "okafor", "label": "Mira Okafor", "group": 3, "x": 22, "y": 62},
+    {"id": "vehl", "label": "Jonas Vehl", "group": 3, "x": 42, "y": 12},
+    {"id": "tern", "label": "Project Tern", "group": 4, "x": 58, "y": 12},
+    {"id": "deepcast", "label": "Deepcast", "group": 2, "x": 78, "y": 40},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 2, "x": 91, "y": 10},
+    {"id": "nair", "label": "Priya Nair", "group": 3, "x": 56, "y": 50},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 4, "x": 48, "y": 70},
+    {"id": "bleach", "label": "2024 bleaching", "group": 5, "x": 74, "y": 56},
+    {"id": "halden", "label": "Halden Reef", "group": 6, "x": 92, "y": 70},
+    {"id": "ruiz", "label": "Ana Ruiz", "group": 3, "x": 92, "y": 88},
+    {"id": "twi", "label": "Tidewater Institute", "group": 2, "x": 60, "y": 88},
+    {"id": "avalon", "label": "Port Avalon", "group": 6, "x": 30, "y": 88},
+    {"id": "council", "label": "City Council", "group": 2, "x": 9, "y": 68},
+    {"id": "oha", "label": "Ocean Health Act", "group": 7, "x": 10, "y": 88}
+  ],
+  "edges": [
+    {"source": "okafor", "target": "kestrel", "label": "CEO, co-founded"},
+    {"source": "vehl", "target": "kestrel", "label": "CTO 2021–2026-03"},
+    {"source": "nair", "target": "kestrel", "label": "CTO since 2026-03"},
+    {"source": "okafor", "target": "twi", "label": "formerly at"},
+    {"source": "nair", "target": "marlow", "label": "formerly at"},
+    {"source": "ruiz", "target": "twi", "label": "directs"},
+    {"source": "kestrel", "target": "sentinel", "label": "runs"},
+    {"source": "twi", "target": "sentinel", "label": "partners on"},
+    {"source": "nair", "target": "sentinel", "label": "leads"},
+    {"source": "sentinel", "target": "halden", "label": "monitors"},
+    {"source": "sentinel", "target": "bleach", "label": "detected 2024-08"},
+    {"source": "bleach", "target": "halden", "label": "occurred at"},
+    {"source": "ruiz", "target": "halden", "label": "leads survey"},
+    {"source": "brightwater", "target": "kestrel", "label": "invested in"},
+    {"source": "lena", "target": "brightwater", "label": "partner at"},
+    {"source": "lena", "target": "kestrel", "label": "board member"},
+    {"source": "deepcast", "target": "kestrel", "label": "supplied 2022–2025"},
+    {"source": "marlow", "target": "deepcast", "label": "acquired 2025-04"},
+    {"source": "marlow", "target": "kestrel", "label": "competes with"},
+    {"source": "kestrel", "target": "tern", "label": "runs"},
+    {"source": "vehl", "target": "tern", "label": "co-leads"},
+    {"source": "nair", "target": "tern", "label": "co-leads"},
+    {"source": "tern", "target": "deepcast", "label": "replaces sonar"},
+    {"source": "oha", "target": "sentinel", "label": "drives demand"},
+    {"source": "council", "target": "kestrel", "label": "contracted 2025-11"},
+    {"source": "council", "target": "oha", "label": "complies with"},
+    {"source": "kestrel", "target": "avalon", "label": "located in"},
+    {"source": "twi", "target": "avalon", "label": "located in"},
+    {"source": "council", "target": "avalon", "label": "located in"}
+  ],
+  "legend": {"2": "Organization", "3": "Person", "4": "Project", "5": "Event", "6": "Location", "7": "Law"},
+  "steps": [
+    {"caption": "Seventeen entities and the relationships the canonical questions depend on. Kestrel Labs is the hub; notice the looser clusters around reef science (bottom right), supply chain (top right), funding (top left) and regulation (bottom left). Those clusters become communities in Chapter 11."},
+    {"caption": "<strong>Q1. Why did Kestrel Labs start Project Tern?</strong> Marlow Dynamics <em>acquired</em> Deepcast, which had <em>supplied</em> Kestrel Labs; Kestrel <em>runs</em> Project Tern, which <em>replaces</em> the Deepcast sonar. The evidence sits in three different documents.", "active": ["tern", "marlow"], "visited": ["deepcast", "kestrel"], "edges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>tern", "tern>deepcast"]},
+    {"caption": "<strong>Q2. Which investor's board member oversees the company whose drones detected the bleaching?</strong> The 2024 bleaching was <em>detected</em> by Project Sentinel, which Kestrel Labs <em>runs</em>; Lena Park is a <em>board member</em> of Kestrel and a <em>partner at</em> Brightwater Capital.", "active": ["bleach", "brightwater"], "visited": ["sentinel", "kestrel", "lena"], "edges": ["bleach>sentinel", "sentinel>kestrel", "kestrel>lena", "lena>brightwater"]},
+    {"caption": "<strong>Q3. What connects Priya Nair to Deepcast?</strong> Two paths: she was <em>formerly at</em> Marlow Dynamics, which <em>acquired</em> Deepcast; and she <em>co-leads</em> Project Tern, which <em>replaces</em> Deepcast's sonar.", "active": ["nair", "deepcast"], "visited": ["marlow", "tern"], "edges": ["nair>marlow", "marlow>deepcast", "nair>tern", "tern>deepcast"]},
+    {"caption": "<strong>Q4. What are the main themes?</strong> No path answers this. The answer summarizes clusters: reef science and monitoring, supply-chain risk and vertical integration, funding and growth, and regulation creating demand. That is what community reports (Chapter 12) and global search (Chapter 15) are for.", "active": ["sentinel", "deepcast", "brightwater", "oha"], "visited": ["twi", "ruiz", "halden", "bleach", "marlow", "tern", "lena", "council"], "showAllLabels": false},
+    {"caption": "<strong>Q5. What risks does Kestrel Labs face?</strong> Also global: dependence on a single supplier and the Tern replacement (supply chain), competition from Marlow, dependence on the Ocean Health Act, and concentration on one reef and one scientific partner.", "active": ["kestrel"], "visited": ["deepcast", "tern", "marlow", "oha", "halden", "twi"], "edges": ["deepcast>kestrel", "kestrel>tern", "marlow>kestrel", "oha>sentinel", "sentinel>halden", "twi>sentinel"]},
+    {"caption": "<strong>Q6. Who is the CTO of Kestrel Labs?</strong> Two edges with different validity periods: Jonas Vehl from 2021 to March 2026, Priya Nair since March 2026. A graph without time attached would return both. Temporal facts arrive in Chapter 10.", "active": ["nair", "kestrel"], "visited": ["vehl"], "edges": ["nair>kestrel"], "visitedEdges": ["vehl>kestrel"]},
+    {"caption": "<strong>Q7. Who supplied Kestrel's sonar in 2024?</strong> One edge, Deepcast <em>supplied</em> Kestrel Labs, valid 2022–2025, so 2024 falls inside it. The only simple question of the seven, and the one where plain vector RAG already does well.", "active": ["deepcast", "kestrel"], "edges": ["deepcast>kestrel"]}
+  ]
+}
+</script>
+</div>
+
+<h2>Set up the reference code</h2>
+<p><code>minigraphrag</code> is a small, readable GraphRAG written for this course: chunking, extraction with gleaning, entity resolution, communities, community reports, eight retrieval methods, Text2Cypher, a bi-temporal graph and evaluation. Chapters show its real code. It depends only on <code>networkx</code> and <code>numpy</code> by default and runs fully offline.</p>
+
+<h3>Install</h3>
+<p>You need Python 3.10 or newer. From the repository root:</p>
+<pre data-file="terminal"><code class="language-bash">cd code
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -e ".[dev]"
+pytest -q</code></pre>
+<p><code>-e</code> installs the package in editable mode, so changes you make to <code>minigraphrag/</code> take effect without reinstalling; several exercises have you edit it. <code>[dev]</code> adds pytest. The test suite should pass in well under a second.</p>
+
+<h3>Build an index offline</h3>
+<pre data-file="terminal"><code class="language-bash"># mock LLM + hashing embedder: no network, no API key, about a second
+python -m minigraphrag index --input data/corpus --output .index
+
+# ask questions with different retrieval methods
+python -m minigraphrag query --method basic  "Who supplied Kestrel's sonar in 2024?"
+python -m minigraphrag query --method local  "Why did Kestrel Labs start Project Tern?"
+python -m minigraphrag query --method global "What are the main themes in this corpus?"
+python -m minigraphrag query --method hybrid --show-context "Who supplied Kestrel's sonar in 2024?"</code></pre>
+
+<p>Indexing prints one line per stage. On the Kestrel corpus with the defaults you should see:</p>
+<pre data-file="output"><code>chunked 12 documents into 24 text units
+extracted 194 entity mentions, 154 relationship mentions
+graph: 17 entities, 54 relationships
+4 communities, 4 reports
+saved index to .index</code></pre>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "What python -m minigraphrag index just did",
+  "perRow": 3,
+  "stages": [
+    {"label": "Chunk", "detail": "12 documents into 24 text units of 300 words with 50 words of overlap (<code>chunking.py</code>, Chapters 2 and 7)."},
+    {"label": "Extract", "detail": "The LLM, here <code>MockLLM</code>, reads each unit and emits entities and relationships, with one gleaning round: 194 entity mentions and 154 relationship mentions (<code>extraction.py</code>, Chapter 8)."},
+    {"label": "Resolve and build", "detail": "Aliases such as “Okafor” and “Dr. Mira Okafor” merge; duplicate edges combine; descriptions are summarized: 17 entities, 54 relationships (<code>resolution.py</code>, <code>graph_build.py</code>, Chapter 9)."},
+    {"label": "Communities", "detail": "The graph is partitioned into 4 communities of closely connected entities (<code>communities.py</code>, Chapter 11)."},
+    {"label": "Reports", "detail": "Each community gets a JSON report: title, summary, findings and a rating (<code>reports.py</code>, Chapter 12)."},
+    {"label": "Embed and save", "detail": "Entities, relationships, text units and reports are embedded and everything is written as plain files in <code>.index/</code> (<code>indexer.py</code>, Chapter 13)."}
+  ]
+}
+</script>
+</div>
+
+<p>The index folder contains plain artifacts you can open in an editor: <code>text_units.json</code>, <code>entities.json</code>, <code>relationships.json</code>, <code>graph.graphml</code> (opens in Gephi or yEd), <code>communities.json</code>, <code>community_reports.json</code>, <code>claims.json</code>, the <code>*_embeddings.npz</code>/<code>.json</code> pairs and <code>config.json</code>.</p>
+
+<div class="callout warn">
+  <span class="callout-title">The mock is a teaching device</span>
+  <p><code>MockLLM</code> recognizes each course prompt by a marker phrase and answers with deterministic heuristics: a small gazetteer of Kestrel names for extraction, co-occurrence for relationships, and extractive answers that return context sentences with <code>[Data: ...]</code> citations. It shows you <em>what each retriever put into the context</em>, reproducibly and for free. To judge how well a method actually answers, switch to a real LLM.</p>
+</div>
+
+<h3>Switch to a real LLM</h3>
+<p>The <code>--llm</code> flag picks a provider; environment variables configure it.</p>
+<table>
+  <thead><tr><th><code>--llm</code></th><th>Install</th><th>Environment variables</th><th>Default model</th></tr></thead>
+  <tbody>
+    <tr><td><code>mock</code></td><td>nothing</td><td>none</td><td>none</td></tr>
+    <tr><td><code>openai</code></td><td><code>pip install -e ".[openai]"</code></td><td><code>OPENAI_API_KEY</code>; optional <code>OPENAI_MODEL</code>, <code>OPENAI_BASE_URL</code></td><td><code>gpt-4o-mini</code></td></tr>
+    <tr><td><code>anthropic</code></td><td><code>pip install -e ".[anthropic]"</code></td><td><code>ANTHROPIC_API_KEY</code>; optional <code>ANTHROPIC_MODEL</code></td><td><code>claude-sonnet-5</code></td></tr>
+    <tr><td><code>ollama</code></td><td><code>pip install -e ".[openai]"</code> (Ollama speaks the OpenAI API)</td><td>optional <code>OLLAMA_BASE_URL</code> (default <code>http://localhost:11434/v1</code>), <code>OLLAMA_MODEL</code></td><td><code>llama3.1</code></td></tr>
+  </tbody>
+</table>
+
+<pre data-file="terminal"><code class="language-bash">pip install -e ".[anthropic]"
+export ANTHROPIC_API_KEY=...
+python -m minigraphrag index --llm anthropic --cache-dir .cache/llm --output .index-claude
+python -m minigraphrag query --llm anthropic --index .index-claude --method local "Who is the CTO of Kestrel Labs?"</code></pre>
+
+<p><code>--cache-dir</code> wraps the LLM in <code>CachedLLM</code>, a disk cache keyed by a hash of the model, system prompt, prompt and JSON flag, so rerunning indexing after a code change does not pay for identical calls again. vLLM, LM Studio and other OpenAI-compatible servers work through <code>OPENAI_BASE_URL</code>. For neural embeddings, pass <code>--embedder openai</code> or <code>--embedder st:all-MiniLM-L6-v2</code> (after installing the <code>st</code> extra); the embedder name is saved in <code>config.json</code> and reused at query time.</p>
+
+<h3>The same thing from Python</h3>
+<p>Most exercises use the Python API directly:</p>
+<pre data-file="examples/ch00_first_index.py"><code class="language-python">from minigraphrag import HashingEmbedder, IndexConfig, build_index, load_index
+from minigraphrag.llm import get_llm
+from minigraphrag.search.basic import basic_search
+from minigraphrag.search.local import local_search
+
+llm = get_llm("mock")                        # "openai", "anthropic" or "ollama", configured by env vars
+build_index("data/corpus", ".index", llm, HashingEmbedder(), IndexConfig(max_gleanings=1), log=print)
+
+index = load_index(".index")
+print(index.graph.number_of_nodes(), "entities,", index.graph.number_of_edges(), "relationships")
+
+for search in (basic_search, local_search):
+    result = search(index, "Why did Kestrel Labs start Project Tern?", llm)
+    print(result.method, result.llm_calls, result.sources)
+    print(result.answer[:300], "\n")</code></pre>
+<p>Every search method returns a <code>SearchResult</code> with the <code>answer</code>, the <code>method</code> name, the <code>context_text</code> the model saw, structured <code>context_data</code>, the <code>sources</code> (document ids that reached the context) and the number of <code>llm_calls</code>. Comparing <code>sources</code> across methods is the quickest way to see what a retriever found.</p>
+
+<h2>Suggested learning paths</h2>
+<p>The course map on the home page shows chapter prerequisites. Three paths through it:</p>
+<table>
+  <thead><tr><th>Path</th><th>For</th><th>Chapters</th><th>Rough time</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Full path</strong></td><td>Engineers new to RAG or graphs who want to understand everything from first principles</td><td>All chapters in order, every core exercise, all projects, then Capstone 1 and one more capstone</td><td>Around 30 hours of reading plus projects and capstones</td></tr>
+    <tr><td><strong>“I already know RAG”</strong></td><td>You have built vector RAG and want the graph part fast</td><td><a href="03-where-rag-breaks.html">3</a> (skim), <a href="04-graph-fundamentals.html">4</a>, <a href="06-graph-shapes.html">6</a>, <a href="08-entity-relation-extraction.html">8</a>, <a href="09-entity-resolution.html">9</a>, <a href="11-community-detection.html">11</a>, <a href="12-community-reports.html">12</a>, <a href="14-local-search.html">14</a>, <a href="15-global-search.html">15</a>, <a href="17-ppr-hipporag.html">17</a>, <a href="21-hybrid-design-patterns.html">21</a>, <a href="22-context-construction.html">22</a>, <a href="25-evaluation.html">25</a>, then <a href="c1-minigraphrag.html">Capstone 1</a></td><td>About half of the full path</td></tr>
+    <tr><td><strong>“I need production”</strong></td><td>You will ship or run a GraphRAG system and need to decide what to build</td><td><a href="03-where-rag-breaks.html">3</a>, <a href="06-graph-shapes.html">6</a>, <a href="13-storage-indexing.html">13</a>, <a href="14-local-search.html">14</a>, <a href="15-global-search.html">15</a>, <a href="20-text2cypher.html">20</a>, <a href="21-hybrid-design-patterns.html">21</a>, <a href="25-evaluation.html">25</a>–<a href="29-production-ops.html">29</a>, then <a href="c4-enterprise-kgqa.html">Capstone 4</a></td><td>Similar to the fast path, weighted toward Part 5</td></tr>
+  </tbody>
+</table>
+<p>Whatever path you choose, do not skip <a href="03-where-rag-breaks.html">Chapter 3</a>. Once you know which failures your questions hit, you can choose techniques instead of collecting them.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 0.1 <span class="level">Warm-up</span></h4>
+  <p>Set up your environment and run the offline pipeline: create the virtual environment, install with the <code>dev</code> extra, run the tests, build an index with the mock LLM, and ask the <code>basic</code> method “Who supplied Kestrel's sonar in 2024?”. Record the five log lines from indexing and the list of sources the query reports.</p>
+  <details class="hint"><summary>Hint</summary><p>If <code>python -m minigraphrag</code> says “No module named minigraphrag”, your virtual environment is not active in this shell, or you ran <code>pip install</code> outside <code>code/</code>.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-bash">cd code
+python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -e ".[dev]"
+pytest -q
+python -m minigraphrag index --input data/corpus --output .index
+python -m minigraphrag query --method basic "Who supplied Kestrel's sonar in 2024?"</code></pre>
+    <p>Indexing prints:</p>
+    <pre><code>chunked 12 documents into 24 text units
+extracted 194 entity mentions, 154 relationship mentions
+graph: 17 entities, 54 relationships
+4 communities, 4 reports
+saved index to .index</code></pre>
+    <p>The query prints an extractive answer whose first sentence is “Deepcast has supplied every sonar module in our fleet since 2022. [Data: Sources (08_kestrel_board_memo_supply-000)]”, followed by a status line <code>[method=basic llm_calls=1 sources=08_kestrel_board_memo_supply, 10_brightwater_series_b, 03_deepcast_supply_agreement]</code>.</p>
+    <p>If your counts differ slightly, check <code>git status</code> in <code>code/</code>: the reference code evolves, and any local edits to extraction or resolution change entity counts. The first line depends only on chunking and should always read 24 text units with default settings. Common setup problems: Python older than 3.10 (the code uses <code>str | None</code> annotations), or <code>pip</code> pointing to a different interpreter (use <code>python -m pip</code>).</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 0.2 <span class="level">Warm-up</span></h4>
+  <p>Without looking at the visualization, read documents 02, 04 and 06 and sketch by hand the smallest graph that answers canonical question 2: “Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?” List nodes with types, edges with labels and the document each edge comes from, then write the path.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <table>
+      <thead><tr><th>Edge</th><th>Source document</th><th>Supporting text</th></tr></thead>
+      <tbody>
+        <tr><td>Project Sentinel (PROJECT) —detected→ 2024 Halden Reef bleaching event (EVENT)</td><td>06 research note</td><td>“autonomous drones operating under the Sentinel program recorded the onset of a mass coral bleaching event at Halden Reef”</td></tr>
+        <tr><td>2024 Halden Reef bleaching event —occurred at→ Halden Reef (LOCATION)</td><td>06</td><td>same sentence</td></tr>
+        <tr><td>Kestrel Labs (ORGANIZATION) —runs→ Project Sentinel</td><td>04 Sentinel launch</td><td>“Kestrel Labs runs Project Sentinel”</td></tr>
+        <tr><td>Lena Park (PERSON) —board member of→ Kestrel Labs</td><td>02 Series A</td><td>“Lena Park, a partner at Brightwater Capital, will join the Kestrel Labs board of directors”</td></tr>
+        <tr><td>Lena Park —partner at→ Brightwater Capital (ORGANIZATION)</td><td>02</td><td>same sentence</td></tr>
+      </tbody>
+    </table>
+    <p>Path: 2024 bleaching event ← detected ← Project Sentinel ← runs ← Kestrel Labs ← board member of ← Lena Park → partner at → Brightwater Capital. Answer: Brightwater Capital, through Lena Park.</p>
+    <p>Two things to notice. First, you had to decide that “the Sentinel program” in document 06 is the same entity as “Project Sentinel” in document 04; that is entity resolution, Chapter 9. Second, Halden Reef is not needed for the answer but is a natural node to extract; real graphs always contain more than any one question needs.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 0.3 <span class="level">Core</span></h4>
+  <p>Classify each question as <em>local</em> (answerable from a few connected facts), <em>global</em> (needs a summary across much of the corpus) or <em>temporal</em> (the answer depends on time), and say whether it is also multi-hop. Then check your labels against the <code>type</code> field in <code>data/questions.jsonl</code> and explain any disagreement.</p>
+  <ol>
+    <li>How much did Kestrel Labs raise in its Series A and who led it?</li>
+    <li>Who was the CTO of Kestrel Labs when the Halden Reef bleaching event was detected?</li>
+    <li>How has Kestrel Labs' leadership evolved since its founding?</li>
+    <li>Where did the CEO of Kestrel Labs work before founding the company, and how is that organization involved with Project Sentinel?</li>
+    <li>What role does regulation play in Kestrel Labs' business?</li>
+    <li>When did Marlow Dynamics acquire Deepcast?</li>
+  </ol>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import json
+for q in map(json.loads, open("data/questions.jsonl")):
+    print(q["id"], q["type"], q["question"])</code></pre>
+    <table>
+      <thead><tr><th>#</th><th>Your label</th><th>Multi-hop?</th><th>Dataset type (id)</th><th>Comment</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Local</td><td>No</td><td>single-hop (q09)</td><td>One press release states both facts.</td></tr>
+        <tr><td>2</td><td>Temporal</td><td>Yes</td><td>temporal (q15)</td><td>Find the detection date (Aug 2024), then the CTO valid at that date (Jonas Vehl). Both labels are defensible; the dataset files it under its harder aspect.</td></tr>
+        <tr><td>3</td><td>Global (and temporal)</td><td>Yes</td><td>global (q21)</td><td>A narrative across four documents and five years. “Evolved” signals change over time, but the task is summarization.</td></tr>
+        <tr><td>4</td><td>Local</td><td>Yes, two hops</td><td>multi-hop (q16)</td><td>Okafor → formerly at → Tidewater Institute → partners on → Project Sentinel.</td></tr>
+        <tr><td>5</td><td>Global</td><td>Partly</td><td>global (q22)</td><td>Evidence spans the Series B release, council minutes and interview. Could be answered locally from the Ocean Health Act's neighborhood, which is why local search does reasonably on some “global” questions.</td></tr>
+        <tr><td>6</td><td>Local</td><td>No</td><td>temporal (q13)</td><td>The dataset calls it temporal because the answer is a date. Retrieval-wise it is a simple lookup. Question type labels describe the answer, not necessarily the retrieval difficulty.</td></tr>
+      </tbody>
+    </table>
+    <p>The disagreements are the lesson: real questions mix types, and a system that routes each question to exactly one retrieval method will sometimes route wrongly. Chapter 21 discusses routers and hybrids for this reason.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 0.4 <span class="level">Core</span></h4>
+  <p>Open the index you built. Using <code>load_index</code>, print each community's members, find the relationship between MARLOW DYNAMICS and DEEPCAST with its description and weight, and list the neighbors of PROJECT TERN. Compare the communities with the “expected communities” in the running example. Where do they differ, and why might a mock extractor produce that?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag import load_index
+
+index = load_index(".index")
+G = index.graph
+for c in index.communities:
+    print(c.id, c.level, sorted(c.nodes))
+
+edge = G.edges["MARLOW DYNAMICS", "DEEPCAST"]
+print(edge.get("weight"), edge.get("description", "")[:200])
+print(sorted(G.neighbors("PROJECT TERN")))</code></pre>
+    <p>With the mock and default settings, the four level-0 communities are:</p>
+    <ul>
+      <li>2024 bleaching event, Ana Ruiz, Halden Reef, Port Avalon, Project Sentinel, Project Tern, Tidewater Institute</li>
+      <li>Mira Okafor, Jonas Vehl, Kestrel Labs, Port Avalon City Council, Priya Nair</li>
+      <li>Brightwater Capital, Lena Park, Ocean Health Act</li>
+      <li>Deepcast, Marlow Dynamics</li>
+    </ul>
+    <p>The running example expects five: a Kestrel core that includes Project Tern; reef science around Sentinel; Marlow and Deepcast; Brightwater and Lena Park; and regulation (Ocean Health Act, City Council, Port Avalon). Differences: Project Tern lands with the reef-science group, because the mock links entities that co-occur in a sentence and Tern is mentioned alongside Sentinel and Halden Reef in the engineering blog; the regulation community dissolves, with the Ocean Health Act joining Brightwater (the Series B release discusses both) and the City Council joining the Kestrel core. Marlow–Deepcast comes out as expected because those two co-occur heavily in one article.</p>
+    <p>Community detection reflects the graph it is given, and a co-occurrence extractor produces co-occurrence graphs. A real LLM extractor writes more specific relationships and usually gets closer to the expected grouping. You will measure that difference yourself in Chapters 8 and 11. Exact community membership can also change if the reference code's extraction or clustering is updated, so rely on your own output.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 0.5 <span class="level">Stretch</span></h4>
+  <p>Build a second index with a real LLM (OpenAI, Anthropic or a local Ollama model) using a cache directory. Compare the two indexes: number of entities and relationships, the entity names that appear in only one of them, and the <code>local</code> answer to “Why did Kestrel Labs start Project Tern?”. Estimate how many LLM calls indexing made.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-bash">pip install -e ".[openai]"          # or [anthropic]; Ollama also uses the openai extra
+export OPENAI_API_KEY=...
+python -m minigraphrag index --llm openai --cache-dir .cache/llm --output .index-real
+python -m minigraphrag query --llm openai --index .index-real --method local "Why did Kestrel Labs start Project Tern?"</code></pre>
+    <pre><code class="language-python">from minigraphrag import load_index
+
+mock, real = load_index(".index"), load_index(".index-real")
+for name, idx in (("mock", mock), ("real", real)):
+    print(name, idx.graph.number_of_nodes(), idx.graph.number_of_edges(), len(idx.communities))
+only_mock = set(mock.graph) - set(real.graph)
+only_real = set(real.graph) - set(mock.graph)
+print("only in mock:", sorted(only_mock))
+print("only in real:", sorted(only_real))</code></pre>
+    <p>Counting calls: the pipeline calls the LLM once per text unit for extraction, plus one “continue extracting” call per unit and gleaning round (with <code>max_gleanings=1</code> there is no follow-up “anything left?” check, since nothing would be done with the answer), once per unit for claims, once per merged description that needs summarizing, and once per community report. With 24 units that is at least 24 × 3 = 72 calls before summaries and reports. The offline mock run made 122 calls in total. The files in <code>.cache/llm</code> give you the exact number of distinct calls for the real run: one file per call.</p>
+    <p>What to expect: a real model typically extracts more entities than the mock's gazetteer allows, including things such as the Series A and Series B rounds, the Sentinel sonar array, or the harbour survey firms quoted in articles, and it writes relationship descriptions in its own words rather than copying sentences. Some names will differ in form (“MIRA OKAFOR” vs. “DR. MIRA OKAFOR”), which is why resolution matters. The <code>local</code> answer from a real model should mention the Marlow acquisition if local search pulled in Deepcast's relationships. Rerunning the same command is nearly free thanks to the cache, which is worth verifying: the second run should be fast and make no API calls.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">What distinguishes GraphRAG from classic vector RAG?</p>
+  <ol>
+    <li>GraphRAG does not use an LLM at query time</li>
+    <li data-correct>GraphRAG builds an index of entities, relationships and often community summaries, and retrieval uses that structure</li>
+    <li>GraphRAG only works with graph databases such as Neo4j</li>
+    <li>GraphRAG replaces embeddings entirely</li>
+  </ol>
+  <div class="explain">The loop is still retrieve-then-generate. What changes is what is indexed and how retrieval navigates it. Most GraphRAG systems still use embeddings, for example to find seed entities.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the survey taxonomy, where does Personalized PageRank retrieval over an entity graph (HippoRAG) belong?</p>
+  <ol>
+    <li>Knowledge organization</li>
+    <li>Knowledge integration</li>
+    <li data-correct>Knowledge retrieval</li>
+    <li>Evaluation</li>
+  </ol>
+  <div class="explain">PPR is a way of finding evidence in a graph that already exists. How the graph was built is organization; how the evidence reaches the model's answer is integration.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why is the Kestrel Labs corpus fictional?</p>
+  <ol>
+    <li>Real documents would be too long to index</li>
+    <li>Licensing prevents using real news articles</li>
+    <li>Graph algorithms only work on synthetic data</li>
+    <li data-correct>No model has parametric knowledge of it, so correct answers must come from retrieval</li>
+  </ol>
+  <div class="explain">With a real company, a model might answer from memory and hide retrieval failures. The fictional world makes every success and failure attributable.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Canonical question 6, “Who is the CTO of Kestrel Labs?”, is filed as temporal. What makes it hard even with a perfect graph?</p>
+  <ol>
+    <li>The CTO is never named in the corpus</li>
+    <li data-correct>Two people held the role at different times, so the graph needs validity periods to return the current one</li>
+    <li>CTO is an alias that cannot be resolved</li>
+    <li>It requires a global summary of the corpus</li>
+  </ol>
+  <div class="explain">Jonas Vehl was CTO until March 2026 and Priya Nair since then. Without time on edges, both are “the CTO”.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You run <code>python -m minigraphrag index</code> with no <code>--llm</code> flag and no API keys. What happens?</p>
+  <ol>
+    <li>It fails asking for <code>OPENAI_API_KEY</code></li>
+    <li>It downloads a small local model</li>
+    <li data-correct>It runs offline with <code>MockLLM</code> and <code>HashingEmbedder</code>, producing a deterministic index in about a second</li>
+    <li>It skips extraction and builds only a vector index</li>
+  </ol>
+  <div class="explain">The mock is the default so the whole course runs offline and in CI. Use <code>--llm openai|anthropic|ollama</code> for real answers.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What does <code>--cache-dir .cache/llm</code> do?</p>
+  <ol>
+    <li>Stores the index artifacts</li>
+    <li>Caches embeddings for faster search</li>
+    <li>Saves query answers for the evaluation harness</li>
+    <li data-correct>Wraps the LLM in <code>CachedLLM</code>, so identical calls (same model, system, prompt, JSON flag) are read from disk instead of paid for again</li>
+  </ol>
+  <div class="explain">Indexing makes many calls. Deterministic prompts plus a hash-keyed cache make reruns after code changes cheap.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Do I need to know graph theory or machine learning before starting?</summary>
+  <div><p>No. You need to be comfortable with Python and with reading short formulas. <a href="04-graph-fundamentals.html">Chapter 4</a> teaches the graph ideas you need (adjacency, traversal, shortest paths, PageRank, modularity) from scratch, and <a href="02-vector-rag.html">Chapter 2</a> covers embeddings. Chapter 24, on training models with graphs, is the only one that assumes some familiarity with model training, and it is optional on every path except the full one.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why build from scratch instead of using Microsoft GraphRAG, LightRAG or LlamaIndex?</summary>
+  <div><p>Because configuration without understanding fails in production: you cannot tune extraction prompts, pick a community level, or explain a bad answer if the pipeline is a black box. The frameworks are good, and <a href="28-frameworks-in-practice.html">Chapter 28</a> teaches them. After building <code>minigraphrag</code>, you will read their configuration files and source code as variations on things you have already written.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How much will a real LLM cost for the exercises?</summary>
+  <div><p>For the Kestrel corpus, very little: indexing makes about 120 LLM calls over roughly 5,400 words of source text (122 with the mock and default settings), and a query makes between one and a few dozen calls depending on the method. With a small hosted model this is typically cents to low dollars across the whole course, and <code>--cache-dir</code> means you pay for each distinct call once. A local model through Ollama costs nothing but time. Chapter 26 does the cost math for large corpora, where it matters.</p></div>
+</details>
+
+<details class="qa">
+  <summary>The mock's answers look like copied sentences. Is something broken?</summary>
+  <div><p>No. The mock answers extractively on purpose: it returns the context sentences that best match the question, each with a <code>[Data: ...]</code> citation. That makes it a window into what the retriever found. If the right sentences appear, retrieval worked; turning them into a well-written answer is the real model's job.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I use my own documents instead of Kestrel?</summary>
+  <div><p>Yes: <code>--input</code> takes any folder of <code>.md</code> files. Do the chapters on Kestrel first, because the exercises and answers refer to it, then rerun your favorite exercises on your own data. You will need a real LLM for that, since the mock's gazetteer only knows Kestrel names.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: your workbench and learning journal</h3>
+  <p>Set up the environment you will use for the rest of the course and start a record of the questions you want it to answer.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A working <code>code/.venv</code> with <code>pytest -q</code> passing and a mock index in <code>.index/</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A real-LLM configuration that works (hosted or Ollama), tested with one <code>query --llm ...</code> command and a cache directory</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>journal.md</code> with the seven canonical questions and at least five questions of your own about Kestrel, each labeled local, global or temporal and multi-hop or not</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>For each journal question, your prediction of whether plain vector RAG will answer it, to check after Chapter 3</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>If you have a real use case, five questions from it with the same labels, and one sentence on why the answers matter</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can build and query an index with both the mock and a real LLM, and your journal has at least twelve labeled questions with predictions.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>GraphRAG keeps retrieve-then-generate and adds a graph of entities, relationships and community summaries between documents and the model.</li>
+    <li>The field grew from RAG (2020) through Microsoft's GraphRAG, HippoRAG and LightRAG (2024) to agentic and temporal graph retrieval (2025–2026).</li>
+    <li>Place every method on the map: knowledge organization, knowledge retrieval, knowledge integration.</li>
+    <li>Kestrel Labs is fictional so that every correct answer is earned by retrieval; its seven canonical questions cover multi-hop, global and temporal needs.</li>
+    <li><code>minigraphrag</code> runs offline with a mock LLM and switches to OpenAI, Anthropic or Ollama with one flag.</li>
+    <li>Choose a learning path, but do not skip Chapter 3.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Lewis et al. <a href="https://arxiv.org/abs/2005.11401">Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</a>. <span class="venue">NeurIPS 2020; arXiv 2005.11401</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Zhang et al. <a href="https://arxiv.org/abs/2501.13958">A Survey of Graph Retrieval-Augmented Generation for Customized Large Language Models</a>. <span class="venue">arXiv 2501.13958, 2025</span></li>
+  <li>DEEP-PolyU. <a href="https://github.com/DEEP-PolyU/Awesome-GraphRAG">Awesome-GraphRAG</a>. <span class="venue">GitHub</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+  <li>Sarthi et al. <a href="https://arxiv.org/abs/2401.18059">RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval</a>. <span class="venue">ICLR 2024; arXiv 2401.18059</span></li>
+  <li>He et al. <a href="https://arxiv.org/abs/2402.07630">G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering</a>. <span class="venue">arXiv 2402.07630, 2024</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2405.14831">HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models</a>. <span class="venue">NeurIPS 2024; arXiv 2405.14831</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>Sun et al. <a href="https://arxiv.org/abs/2307.07697">Think-on-Graph: Deep and Responsible Reasoning of Large Language Model on Knowledge Graph</a>. <span class="venue">ICLR 2024; arXiv 2307.07697</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2502.14802">From RAG to Memory: Non-Parametric Continual Learning for Large Language Models</a> (HippoRAG 2). <span class="venue">arXiv 2502.14802, 2025</span></li>
+  <li>Chen et al. <a href="https://arxiv.org/abs/2502.14902">PathRAG: Pruning Graph-based Retrieval Augmented Generation with Relational Paths</a>. <span class="venue">arXiv 2502.14902, 2025</span></li>
+  <li>Luo et al. <a href="https://arxiv.org/abs/2507.21892">Graph-R1: Towards Agentic GraphRAG Framework via End-to-end Reinforcement Learning</a>. <span class="venue">arXiv 2507.21892, 2025</span></li>
+  <li>Yang et al. <a href="https://arxiv.org/abs/2509.22009">GraphSearch: An Agentic Deep Searching Workflow for Graph Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2509.22009, 2025</span></li>
+  <li>Coll Tejeda et al. <a href="https://arxiv.org/abs/2609.10239">LiteRAG: Cost-Efficient Graph-Based Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2609.10239, 2026</span></li>
+  <li>Rajah. <a href="https://arxiv.org/abs/2608.24921">post-graph-rag: A PostgreSQL-Native Bi-Temporal Graph RAG Engine with Temporal Grounding at Synthesis</a>. <span class="venue">arXiv 2608.24921, 2026</span></li>
+  <li>Naiff et al. <a href="https://arxiv.org/abs/2608.28766">Beyond Vector Search: Comparing Classical RAG with Hybrid GraphRAG for Climate Science Q&amp;A</a>. <span class="venue">arXiv 2608.28766, 2026</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

@@ -43,19 +43,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Every chapter in curriculum.js exists, has its required components,
-      # valid visualization JSON, one correct answer per quiz, and no broken
-      # internal links.
+      # Every chapter in curriculum.js exists in both languages, has its required
+      # components, valid visualization JSON, one correct answer per quiz, and no
+      # broken internal links. A translated Chinese chapter must keep the shape of
+      # its English source: figure types in order, component counts, and which
+      # option is correct in every quiz.
       - name: Check site
         run: python3 tools/check_site.py
 
-      # Pages link CSS/JS with ?v=<content hash> so browsers never mix stale and
-      # fresh assets. If someone edits site/assets without re-stamping, the
-      # stamps below change and this step fails with the diff.
-      - name: Asset stamps are current
+      # The Chinese mirror under site/zh/ is regenerated from the English pages
+      # (translated pages keep their content), and pages link CSS/JS with
+      # ?v=<content hash> so browsers never mix stale and fresh assets. If either
+      # step would change a committed file, someone skipped it: fail with the diff.
+      - name: Chinese mirror and asset stamps are current
         run: |
+          python3 tools/build_zh.py
           python3 tools/stamp_assets.py
-          git diff --exit-code -- site
+          git status --porcelain -- site
+          test -z "$(git status --porcelain -- site)"
 
   render:
     name: Render every page in Chromium
@@ -73,7 +78,7 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
-      # Loads all pages at desktop and phone widths in light and dark, steps
+      # Loads all pages in both languages at desktop and phone widths in light and dark, steps
       # through every visualization, and fails on console errors, pages whose
       # figures did not mount, or horizontal overflow.
       - name: Render check

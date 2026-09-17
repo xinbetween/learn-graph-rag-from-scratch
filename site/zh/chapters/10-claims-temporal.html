@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claims, covariates and time | Graph RAG from Scratch</title>
+<meta name="description" content="Extract claims with status and dates, normalize relative time expressions against the document date, and attach validity intervals to relationships so the graph can answer as-of questions.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/10-claims-temporal.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/10-claims-temporal.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/10-claims-temporal.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="10-claims-temporal" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Claims, covariates and time</h1>
+  <p class="lede">Entity descriptions tell you what something is; they are bad at saying what happened, when, and whether it is even true. This chapter adds claims with status and dates, normalizes “last month” into real calendar ranges, and puts validity intervals on edges so the graph can answer “who was CTO in 2024?”.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain what a GraphRAG claim (covariate) is and which facts it preserves that summarized descriptions lose</li>
+      <li>Write and parse a claim extraction prompt with subject, object, type, status, start and end dates, description and source text</li>
+      <li>Normalize absolute and relative time expressions into date ranges anchored on the document date</li>
+      <li>Attach valid_from and valid_to to relationships and filter the graph to any point in time</li>
+      <li>Tell a genuine contradiction from a change over time, and model point events differently from interval facts</li>
+    </ul>
+  </div>
+</header>
+
+<h2>What descriptions blur</h2>
+<p>By the end of <a href="09-entity-resolution.html">Chapter 9</a> each entity has one summarized description. Here is the kind of profile a summarizer writes for Jonas Vehl from four chunks spanning 2021 to 2026:</p>
+<blockquote><p>Jonas Vehl is a co-founder of Kestrel Labs who has served as its CTO and Chief Scientist. He designed the acoustic array used in Sentinel drones and co-leads Project Tern with Priya Nair.</p></blockquote>
+<p>Every sentence is supported, and the paragraph is still misleading. It does not say that Vehl stopped being CTO in March 2026, or that Priya Nair replaced him. Ask “Who is the CTO of Kestrel Labs?” (canonical question 6) and a model reading this profile, plus a similar one for Nair that says she “became CTO”, can easily answer “Jonas Vehl and Priya Nair”. The summarizer did its job: it merged descriptions. Merging is exactly what destroys sequence.</p>
+<p>The graph edges don't help either. After Chapter 9, {JONAS VEHL, KESTREL LABS} is one undirected edge with a summed weight and a merged description. It has no dates. Three kinds of information need a better home:</p>
+<ul>
+  <li><strong>Events</strong>: things that happened at a time. Marlow Dynamics acquired Deepcast in April 2025. Sentinel drones detected bleaching on 11 August 2024.</li>
+  <li><strong>Dated states</strong>: facts that were true over an interval. Deepcast supplied Kestrel's sonar from 2022 until mid-2025. Vehl was CTO from 2021 to March 2026.</li>
+  <li><strong>Assertions with uncertain truth</strong>: allegations, rumors, estimates and denials. People familiar with the deal put the price at $180 to $220 million. A councillor asked whether Kestrel's contract created a conflict of interest, and the City Attorney said it did not.</li>
+</ul>
+<p>Microsoft GraphRAG calls these records <strong>claims</strong> and stores them in a table of <strong>covariates</strong>: extra data attached to entities that is not itself a node or an edge. This chapter builds that table, then goes one step further and puts time directly on relationships.</p>
+
+<h2>Anatomy of a claim</h2>
+<p>A claim is a statement <em>about</em> an entity, extracted from one text unit, with enough metadata to judge it later. GraphRAG's claim extractor asks for eight fields, and <code>minigraphrag</code> mirrors them in a dataclass.</p>
+
+<pre data-file="minigraphrag/extraction.py"><code class="language-python">@dataclass
+class Claim:
+    subject: str
+    object: str
+    type: str
+    status: str
+    start_date: str | None
+    end_date: str | None
+    description: str
+    source_text: str
+    source_id: str = ""
+
+    def to_dict(self) -&gt; dict:
+        return asdict(self)</code></pre>
+
+<table>
+  <thead><tr><th>Field</th><th>Why it exists</th><th>Kestrel example</th></tr></thead>
+  <tbody>
+    <tr><td>subject</td><td>Links the claim to a node, so local search can pull it with the entity</td><td>MARLOW DYNAMICS</td></tr>
+    <tr><td>object</td><td>Second endpoint; lets a claim act like a dated, typed relationship</td><td>DEEPCAST</td></tr>
+    <tr><td>type</td><td>Groups claims across chunks and enables filters (“all FUNDING claims”)</td><td>ACQUISITION</td></tr>
+    <tr><td>status</td><td>Separates confirmed facts from allegations and refuted ones</td><td>TRUE</td></tr>
+    <tr><td>start_date, end_date</td><td>Places the claim in time; equal for a one-day event</td><td>2025-04-15, 2025-04-15</td></tr>
+    <tr><td>description</td><td>Human-readable statement with the reasoning</td><td>Marlow Dynamics acquired sonar supplier Deepcast in an all-cash deal announced on Tuesday 15 April 2025</td></tr>
+    <tr><td>source_text</td><td>Verbatim evidence; the cheapest hallucination check you will ever get</td><td>“Marlow Dynamics … has acquired sonar hardware supplier Deepcast in an all-cash deal, the companies announced on Tuesday.”</td></tr>
+  </tbody>
+</table>
+
+<h3>The three statuses</h3>
+<p>Status is what makes claims more than dated relationships. GraphRAG's prompt defines them precisely: TRUE means the claim is confirmed, FALSE means it was found to be false, and SUSPECTED means it is not verified. The Kestrel corpus has natural examples of each.</p>
+<ul>
+  <li><strong>TRUE</strong>: “Kestrel Labs today announced a $40 million Series B financing led by Brightwater Capital” (press release, 23 September 2025).</li>
+  <li><strong>SUSPECTED</strong>: “Terms were not disclosed, but two people familiar with the transaction put the price at between $180 million and $220 million” (trade journal, 17 April 2025). Also: “The acquisition is expected to close in May, subject to regulatory approval.” A forecast is not yet a fact.</li>
+  <li><strong>FALSE</strong>: Councillor Brandt asked whether the contract created a conflict of interest because Kestrel's CEO formerly worked at Tidewater Institute. “The City Attorney advised that no conflict exists” (council minutes, 18 November 2025). The allegation was raised and refuted in the same chunk.</li>
+</ul>
+<div class="callout warn">
+  <span class="callout-title">Status is relative to the chunk, not to the world</span>
+  <p>The extractor only sees one text unit. In the council minutes, Councillor Adeyemi refers to “press reports of a sonar supply problem”: from that chunk alone, a supply disruption is at best SUSPECTED. The CEO's board memo from May 2025 states it as fact. The same real-world claim can therefore arrive as SUSPECTED from one chunk and TRUE from another. Keep both records; decide how to reconcile them at query time or in the community report, where all claims about an entity sit side by side.</p>
+</div>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 280" role="img" aria-labelledby="three-homes-title">
+      <title id="three-homes-title">The same text feeds an entity description, a relationship and a claim, each keeping different information</title>
+      <rect class="d-box" x="10" y="12" width="660" height="54" rx="6"/>
+      <text class="d-text small" x="22" y="34">Maritime Industry Journal, 17 April 2025:</text>
+      <text class="d-text" x="22" y="54">“Marlow Dynamics … has acquired … Deepcast in an all-cash deal … announced on Tuesday.”</text>
+      <rect class="d-box node" x="10" y="100" width="206" height="160" rx="6"/>
+      <text class="d-text bold" x="22" y="124">Entity description</text>
+      <text class="d-text small" x="22" y="146">DEEPCAST: sonar supplier</text>
+      <text class="d-text small" x="22" y="162">acquired by Marlow Dynamics</text>
+      <text class="d-text small" x="22" y="194">Keeps: what Deepcast is</text>
+      <text class="d-text small" x="22" y="210">Loses: when; is it certain;</text>
+      <text class="d-text small" x="22" y="226">merged with other chunks,</text>
+      <text class="d-text small" x="22" y="242">the date soon disappears</text>
+      <rect class="d-box edge" x="237" y="100" width="206" height="160" rx="6"/>
+      <text class="d-text bold" x="249" y="124">Relationship</text>
+      <text class="d-text small" x="249" y="146">MARLOW DYNAMICS – DEEPCAST</text>
+      <text class="d-text small" x="249" y="162">weight 9, description</text>
+      <text class="d-text small" x="249" y="194">Keeps: that they are linked,</text>
+      <text class="d-text small" x="249" y="210">and how strongly</text>
+      <text class="d-text small" x="249" y="226">Loses: time, status, which</text>
+      <text class="d-text small" x="249" y="242">statement came from where</text>
+      <rect class="d-box comm" x="464" y="100" width="206" height="160" rx="6"/>
+      <text class="d-text bold" x="476" y="124">Claim (covariate)</text>
+      <text class="d-text small mono" x="476" y="146">ACQUISITION | TRUE</text>
+      <text class="d-text small mono" x="476" y="162">2025-04-15 .. 2025-04-15</text>
+      <text class="d-text small" x="476" y="194">Keeps: type, status, dates,</text>
+      <text class="d-text small" x="476" y="210">verbatim source text</text>
+      <text class="d-text small" x="476" y="226">Costs: a second LLM pass</text>
+      <text class="d-text small" x="476" y="242">over every chunk</text>
+      <line class="d-line faint" x1="113" y1="66" x2="113" y2="100"/>
+      <line class="d-line faint" x1="340" y1="66" x2="340" y2="100"/>
+      <line class="d-line faint" x1="567" y1="66" x2="567" y2="100"/>
+    </svg>
+  </div>
+  <figcaption>One sentence, three records. Descriptions and relationships are built to be merged across chunks; claims are built to stay separate, dated and attributable.</figcaption>
+</figure>
+
+<h2>Extracting claims</h2>
+<p>Claim extraction is a second LLM pass over each text unit, with its own prompt. It is separate from entity extraction for two reasons: the instructions are long enough that combining them hurts both tasks, and many deployments don't need claims at all. In Microsoft GraphRAG, claim extraction is off by default (<code>extract_claims.enabled: false</code>), and the default claim description is deliberately broad: “Any claims or facts that could be relevant to information discovery.” Narrow it for your domain; for a risk-analysis corpus it might be “financial transactions, supply agreements, leadership changes, legal and regulatory findings”.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "From a text unit to dated claims on the graph",
+  "perRow": 3,
+  "stages": [
+    {"label": "Text unit + doc date", "detail": "Pass the chunk together with its document's publication date and title. Without the date, “last month” cannot be resolved later."},
+    {"label": "Claim prompt", "detail": "Entity specification (types or names), claim description, output format with 8 fields, statuses TRUE/FALSE/SUSPECTED and ISO dates, and a worked example."},
+    {"label": "Parse tuples", "detail": "Split on the record delimiter, split fields on the tuple delimiter, turn NONE into null, uppercase subject, object, type and status. Drop records with fewer than 8 fields."},
+    {"label": "Normalize dates", "detail": "Validate ISO dates. Where the model echoed a phrase (“last month”) or guessed, re-resolve against the document date and record the granularity."},
+    {"label": "Resolve entities", "detail": "Rewrite subject and object with the Chapter 9 name map so “KESTREL” claims attach to KESTREL LABS."},
+    {"label": "Store and attach", "detail": "Write the covariates table keyed by subject, and promote dated state claims (CTO_OF, SUPPLIED) into valid_from and valid_to on relationships."}
+  ]
+}
+</script>
+</div>
+
+<h3>The prompt</h3>
+<p>Here is the claim prompt in <code>minigraphrag/prompts.py</code>. It is a condensed version of GraphRAG's, which has the same steps and field list plus two worked examples.</p>
+
+<pre data-file="minigraphrag/prompts.py"><code class="language-python">CLAIM_EXTRACTION_PROMPT = """-Target activity-
+You are an intelligent assistant that helps a human analyst to analyze claims against certain entities presented in a text document.
+
+-Goal-
+Given a text document, an entity specification, and a claim description, extract all entities that match the entity specification and all claims against those entities.
+
+-Steps-
+1. Extract all named entities that match the entity specification: {entity_specs}
+2. For each entity, extract all claims matching the claim description: {claim_description}
+For each claim extract: subject, object (or NONE), claim type, claim status (TRUE, FALSE or SUSPECTED), claim start and end dates in ISO-8601 (or NONE), a description with evidence, and the source text quote.
+Format each claim as (&lt;subject&gt;{tuple_delimiter}&lt;object&gt;{tuple_delimiter}&lt;claim_type&gt;{tuple_delimiter}&lt;claim_status&gt;{tuple_delimiter}&lt;start_date&gt;{tuple_delimiter}&lt;end_date&gt;{tuple_delimiter}&lt;description&gt;{tuple_delimiter}&lt;source_text&gt;)
+Use **{record_delimiter}** as the list delimiter. When finished, output {completion_delimiter}
+
+-Real Data-
+Text:
+{input_text}
+######################
+Output:
+"""</code></pre>
+
+<p>A few details in GraphRAG's full prompt are worth copying when you tune this for your own domain:</p>
+<ul>
+  <li><strong>The subject is the actor.</strong> “The subject entity is one that committed the action described in the claim.” This keeps claims about an acquisition on the acquirer, not scattered across both parties.</li>
+  <li><strong>Types must be reusable.</strong> “Name it in a way that can be repeated across multiple text inputs, so that similar claims share the same claim type.” Otherwise you get ACQUISITION, ACQUIRED, BUYOUT and PURCHASE for one concept.</li>
+  <li><strong>Single dates repeat.</strong> “If the claim was made on a single date rather than a date range, set the same date for both start_date and end_date.” The prompt's own example dates a claim about “corruption activities in 2015” to the whole year, 2015-01-01 to 2015-12-30. (Yes, the example stops a day short of the year's end. Don't copy that part.)</li>
+  <li><strong>Source text is plural.</strong> The model should list all relevant quotes, which matters when the evidence is split across sentences.</li>
+</ul>
+<p>What the prompt does <em>not</em> have is the document date. Add it. Put a line such as <code>Document date: 2025-04-17</code> right before <code>Text:</code>, and say in the instructions that relative expressions (“on Tuesday”, “last month”, “earlier this year”) must be resolved against that date. Of everything in this chapter, that one line does the most for temporal accuracy.</p>
+
+<h3>A worked extraction</h3>
+<p>Input: the council minutes, dated 18 November 2025, agenda item 5. A good extraction returns four claims:</p>
+
+<pre><code>(PORT AVALON CITY COUNCIL&lt;|&gt;KESTREL LABS&lt;|&gt;CONTRACT_AWARD&lt;|&gt;TRUE&lt;|&gt;2025-11-18&lt;|&gt;2025-11-18&lt;|&gt;The council voted 8 to 1 to authorize a three-year reef monitoring services contract with Kestrel Labs for Ocean Health Act compliance, conditioned on open data and review by Tidewater Institute&lt;|&gt;Motion: To authorise the City Manager to execute a three-year reef monitoring services contract with Kestrel Labs ... Vote: Carried, 8 to 1.)
+##
+(OCEAN HEALTH ACT&lt;|&gt;PORT AVALON CITY COUNCIL&lt;|&gt;REGULATORY_REQUIREMENT&lt;|&gt;TRUE&lt;|&gt;2026-01-01&lt;|&gt;NONE&lt;|&gt;The Ocean Health Act requires the city to submit quarterly reef monitoring reports beginning in the first quarter of 2026&lt;|&gt;Under the Ocean Health Act, the city must submit quarterly reef monitoring reports for the reefs within its coastal zone, beginning in the first quarter of 2026.)
+##
+(KESTREL LABS&lt;|&gt;TIDEWATER INSTITUTE&lt;|&gt;CONFLICT_OF_INTEREST&lt;|&gt;FALSE&lt;|&gt;2025-11-18&lt;|&gt;2025-11-18&lt;|&gt;A councillor asked whether the contract created a conflict of interest because Kestrel's CEO formerly worked at Tidewater Institute; the City Attorney advised that no conflict exists because the institute is not a party to the contract&lt;|&gt;Councillor Brandt asked whether the contract created a conflict of interest ... The City Attorney advised that no conflict exists)
+##
+(DEEPCAST&lt;|&gt;KESTREL LABS&lt;|&gt;SUPPLY_DISRUPTION&lt;|&gt;SUSPECTED&lt;|&gt;NONE&lt;|&gt;NONE&lt;|&gt;Press reports described a sonar supply problem at Kestrel Labs; Kestrel's CEO said spare modules cover the contract's first year&lt;|&gt;Councillor Adeyemi asked about the vendor's reliability given press reports of a sonar supply problem.)
+&lt;|COMPLETE|&gt;</code></pre>
+
+<p>Look at the judgment calls. The requirement claim has an open end date, because a law that starts applying has no stated end. The supply claim's subject is DEEPCAST, which is not named in the chunk at all: a model that knows the rest of the corpus might write that, but from this chunk alone a stricter extractor should use KESTREL LABS as subject and NONE as object. That is precisely the kind of world-knowledge leak you should test for with the <code>source_text</code> field.</p>
+
+<h3>Parsing</h3>
+<p>The parser reuses Chapter 8's record splitter and is equally forgiving. Three normalizations matter for claims: uppercase the subject, object, type and status so they group; map <code>NONE</code> or empty to <code>None</code>; and refuse records with fewer than eight fields rather than guessing which field is missing.</p>
+
+<pre data-file="minigraphrag/extraction.py"><code class="language-python">def parse_claims_output(text: str, source_id: str = "") -&gt; list[Claim]:
+    """Parse claim tuples: (subject&lt;|&gt;object&lt;|&gt;type&lt;|&gt;status&lt;|&gt;start&lt;|&gt;end&lt;|&gt;description&lt;|&gt;source)."""
+    claims = []
+    for record in _split_records(text, P.RECORD_DELIMITER, P.COMPLETION_DELIMITER):
+        fields = [_clean_field(f) for f in record.strip().strip("()").split(P.TUPLE_DELIMITER)]
+        if len(fields) &lt; 8:
+            continue
+        none = lambda v: None if v.upper() in ("NONE", "") else v  # noqa: E731
+        claims.append(Claim(fields[0].upper(), fields[1].upper(), fields[2].upper(), fields[3].upper(),
+                            none(fields[4]), none(fields[5]), fields[6], fields[7], source_id))
+    return claims
+
+
+def extract_claims(
+    llm: LLM,
+    unit: TextUnit,
+    entity_specs: list[str] | None = None,
+    claim_description: str = "Any claims or facts about the entity, especially dated events, roles and transactions",
+) -&gt; list[Claim]:
+    """Extract dated, attributable claims ("covariates" in GraphRAG) from one chunk."""
+    prompt = P.CLAIM_EXTRACTION_PROMPT.format(
+        entity_specs=", ".join(entity_specs or P.DEFAULT_ENTITY_TYPES), claim_description=claim_description,
+        input_text=unit.text, tuple_delimiter=P.TUPLE_DELIMITER, record_delimiter=P.RECORD_DELIMITER,
+        completion_delimiter=P.COMPLETION_DELIMITER,
+    )
+    return parse_claims_output(llm.complete(prompt), source_id=unit.id)</code></pre>
+
+<p>After parsing, validate more than the shape. Status should be one of the three allowed values; anything else (“CONFIRMED”, “LIKELY”) maps to the closest one or to SUSPECTED. Dates should parse as ISO-8601, and start must not be after end. And <code>source_text</code> should actually occur in the chunk: a fuzzy substring check (for example a partial ratio above 90 against the chunk text) catches invented quotes, which almost always accompany invented claims.</p>
+
+<pre data-file="examples/ch10_validate_claims.py"><code class="language-python">from datetime import date
+from rapidfuzz import fuzz
+
+STATUSES = {"TRUE", "FALSE", "SUSPECTED"}
+STATUS_ALIASES = {"CONFIRMED": "TRUE", "VERIFIED": "TRUE", "REFUTED": "FALSE", "DENIED": "FALSE",
+                  "ALLEGED": "SUSPECTED", "LIKELY": "SUSPECTED", "UNVERIFIED": "SUSPECTED"}
+
+def _iso(value):
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value[:10])     # accepts 2025-04-15 and 2025-04-15T00:00:00
+    except ValueError:
+        return "invalid"
+
+def validate_claim(claim, unit_text: str) -&gt; list[str]:
+    """Return a list of problems; an empty list means the claim passed."""
+    problems = []
+    claim.status = STATUS_ALIASES.get(claim.status, claim.status)
+    if claim.status not in STATUSES:
+        problems.append(f"unknown status {claim.status}")
+    start, end = _iso(claim.start_date), _iso(claim.end_date)
+    if "invalid" in (start, end):
+        problems.append("unparseable date")
+    elif start and end and start &gt; end:
+        problems.append("start after end")
+    if fuzz.partial_ratio(claim.source_text.lower(), unit_text.lower()) &lt; 90:
+        problems.append("source_text not found in chunk")
+    return problems</code></pre>
+
+<div class="callout tip">
+  <span class="callout-title">What claims cost</span>
+  <p>Claim extraction is another full pass over every chunk with a long prompt, plus gleaning if you enable it (GraphRAG's default for claims is one gleaning round). As a planning number, turning claims on roughly doubles the LLM calls of the extraction phase. Pay for it when your questions are about events, risks, allegations or change over time. For a static encyclopedia-style corpus, skip it.</p>
+</div>
+
+<h2>Normalizing time</h2>
+<p>An LLM asked for ISO dates will produce ISO-looking strings, and a surprising fraction of them will be wrong in a systematic way: relative expressions resolved against the model's idea of “now” rather than the document's date, a month guessed as January when only a year was given, or a day invented where the text only gave a season. Dates deserve their own normalization step, with the document date as the anchor.</p>
+
+<h3>Temporal expressions, anchored</h3>
+<p>Linguists call a phrase like “last month” a <strong>temporal expression</strong>. Some are absolute (“11 August 2024”), some are relative to the time of writing (“last year”), and some are relative to another event (“within weeks” of the acquisition). The TimeML annotation standard marks such expressions with a TIMEX3 tag whose <code>value</code> attribute holds the normalized date, and rule-based tools such as HeidelTime resolve them using the document creation time as the reference. You don't need the full standard, but you need its central idea: <em>every relative expression is resolved against a reference time, and for news and memos that reference is the document date</em>.</p>
+
+<table>
+  <thead><tr><th>Document (date)</th><th>Expression</th><th>Normalized range</th><th>Granularity</th></tr></thead>
+  <tbody>
+    <tr><td>Maritime Industry Journal (Thu 17 Apr 2025)</td><td>“announced on Tuesday”</td><td>2025-04-15</td><td>day</td></tr>
+    <tr><td>Board memo (14 May 2025)</td><td>“Deepcast's change of ownership last month”</td><td>2025-04-01 to 2025-04-30</td><td>month</td></tr>
+    <tr><td>Maritime Industry Journal (17 Apr 2025)</td><td>“through the end of the second quarter”</td><td>2025-06-30</td><td>day</td></tr>
+    <tr><td>Kestrel blog (12 Sep 2023)</td><td>“This summer Priya Nair joined”</td><td>2023-06-01 to 2023-08-31</td><td>season</td></tr>
+    <tr><td>Series B release (23 Sep 2025)</td><td>“loss of its sonar supplier earlier this year”</td><td>2025-01-01 to 2025-09-23</td><td>year, bounded</td></tr>
+    <tr><td>Podcast (26 Mar 2026)</td><td>“Marlow Dynamics bought Deepcast last year”</td><td>2025-01-01 to 2025-12-31</td><td>year</td></tr>
+    <tr><td>Podcast (26 Mar 2026)</td><td>“as of March 2026 Priya is our CTO”</td><td>2026-03-01 to 2026-03-31</td><td>month</td></tr>
+    <tr><td>Herald (4 Oct 2021)</td><td>“will begin talking to venture investors next year”</td><td>2022-01-01 to 2022-12-31</td><td>year (a plan, not a fact)</td></tr>
+  </tbody>
+</table>
+
+<p>Two rows deserve comment. “This summer” assumes the northern hemisphere; Port Avalon is fictional, so a real system would need a locale. And “bought Deepcast last year” resolves to all of 2025, a range that <em>contains</em> the more precise April 2025 from the trade journal. They are consistent, not conflicting: a coarser date is a wider interval, and the more precise claim should win when you merge.</p>
+
+<pre data-file="examples/ch10_dates.py"><code class="language-python">import calendar
+import re
+from datetime import date, timedelta
+
+MONTHS = {m.lower(): i for i, m in enumerate(calendar.month_name) if m}
+WEEKDAYS = {d.lower(): i for i, d in enumerate(calendar.day_name)}
+SEASONS = {"spring": (3, 5), "summer": (6, 8), "autumn": (9, 11), "fall": (9, 11)}  # northern hemisphere
+
+def month_end(y: int, m: int) -&gt; date:
+    return date(y, m, calendar.monthrange(y, m)[1])
+
+def quarter(y: int, q: int) -&gt; tuple[date, date]:
+    return date(y, 3 * q - 2, 1), month_end(y, 3 * q)
+
+def normalize_time_expression(expr: str, doc_date: date) -&gt; tuple[date, date, str] | None:
+    """Map a time expression to an inclusive (start, end, granularity) anchored on the document date."""
+    e = expr.lower().strip()
+    parts, y = e.split(), doc_date.year
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", e):                           # 2024-08-11
+        d = date.fromisoformat(e)
+        return d, d, "day"
+    if len(parts) == 3 and parts[1] in MONTHS and parts[0].isdigit():    # 11 august 2024
+        d = date(int(parts[2]), MONTHS[parts[1]], int(parts[0]))
+        return d, d, "day"
+    if len(parts) == 2 and parts[0] in MONTHS and parts[1].isdigit():    # march 2026
+        yy, mm = int(parts[1]), MONTHS[parts[0]]
+        return date(yy, mm, 1), month_end(yy, mm), "month"
+    if m := re.fullmatch(r"q([1-4]) (\d{4})", e):                         # q1 2026
+        return (*quarter(int(m[2]), int(m[1])), "quarter")
+    if re.fullmatch(r"\d{4}", e):                                         # 2021
+        return date(int(e), 1, 1), date(int(e), 12, 31), "year"
+    if e in ("this month", "earlier this month"):
+        return date(y, doc_date.month, 1), doc_date, "month"
+    if e == "last month":
+        prev = doc_date.replace(day=1) - timedelta(days=1)
+        return prev.replace(day=1), prev, "month"
+    if e in ("this year", "earlier this year"):
+        return date(y, 1, 1), doc_date, "year"
+    if e == "later this year":
+        return doc_date, date(y, 12, 31), "year"
+    if e == "last year":
+        return date(y - 1, 1, 1), date(y - 1, 12, 31), "year"
+    if e == "next year":
+        return date(y + 1, 1, 1), date(y + 1, 12, 31), "year"
+    if e == "last quarter":
+        q = (doc_date.month - 1) // 3 + 1
+        return (*(quarter(y, q - 1) if q &gt; 1 else quarter(y - 1, 4)), "quarter")
+    if m := re.fullmatch(r"(?:the )?end of the (first|second|third|fourth) quarter", e):
+        end = quarter(y, ["first", "second", "third", "fourth"].index(m[1]) + 1)[1]
+        return end, end, "day"
+    if m := re.fullmatch(r"(this|last) (spring|summer|autumn|fall)", e):
+        a, b = SEASONS[m[2]]
+        yy = y if (m[1] == "this" or doc_date.month &gt; b) else y - 1
+        end = month_end(yy, b)
+        return date(yy, a, 1), (min(end, doc_date) if yy == y else end), "season"
+    if parts and parts[-1] in WEEKDAYS and len(parts) &lt;= 2:              # "on tuesday" in past-tense news
+        back = (doc_date.weekday() - WEEKDAYS[parts[-1]]) % 7 or 7
+        d = doc_date - timedelta(days=back)
+        return d, d, "day"
+    return None                                                           # hand it to dateparser or the LLM</code></pre>
+
+<p>Rules like these cover most expressions in news, memos and reports. Return <code>None</code> for the rest and fall back to a library such as <code>dateparser</code> (which accepts a relative base date) or to the LLM with the document date in the prompt. Whatever resolves the expression, keep three things: the normalized range, the granularity, and the original phrase. The phrase is your audit trail when someone asks why the graph believes Nair joined Kestrel in June 2023.</p>
+
+<h3>Event-relative expressions</h3>
+<p>A sentence such as “Within weeks, Deepcast told outside customers it would stop taking new orders” is relative to an <em>event</em> (the acquisition), not to the document date. Resolve it in two steps: find the anchor event's date (2025-04-15) and apply a fuzzy offset (“within weeks” → up to about two months), giving the range 2025-04-15 to roughly 2025-06-10 with granularity <em>fuzzy</em>. If you cannot find the anchor, leave the dates as NONE and keep the phrase. A wrong precise date is worse than an honest missing one, because it will be used for filtering.</p>
+
+<h3>Planned, reported and actual time</h3>
+<p>Documents mix three different times, and a claim record should know which one it has:</p>
+<ul>
+  <li><strong>Event time</strong>: when the thing happened. Bleaching was first detected on 11 August 2024.</li>
+  <li><strong>Report time</strong>: when the document said it. The research note was issued on 3 September 2024.</li>
+  <li><strong>Planned or expected time</strong>: when something is supposed to happen. “The acquisition is expected to close in May.” “By the end of 2026 we want every drone in the fleet running a Tern module.”</li>
+</ul>
+<p>A planned date is not a fact. Store it as a SUSPECTED claim, or add an explicit modality field (PLANNED, EXPECTED), and never use it to set a relationship's validity interval until a later document confirms it. The board memo is a good test: it says Project Tern would start in June, and the engineering blog of 30 June 2025 confirms that it did.</p>
+
+<h2>Putting time on relationships</h2>
+<p>Claims live in a side table. For questions like “Who is the CTO?” you want time on the graph itself, so that traversal and retrieval can filter by date. The standard way is to give each relationship a <strong>validity interval</strong>: <code>valid_from</code> and <code>valid_to</code>, the period during which the fact was true in the world.</p>
+
+<h3>Intervals and points</h3>
+<p>Two kinds of temporal fact need different shapes:</p>
+<ul>
+  <li><strong>Interval facts</strong> (states) hold over a period: CTO_OF, SUPPLIED, BOARD_MEMBER_OF, FORMERLY_WORKED_AT. Represent them as half-open intervals [<code>valid_from</code>, <code>valid_to</code>), with <code>valid_to = None</code> for “still true”. Half-open intervals make handovers clean: Vehl's CTO_OF interval ends on 2026-03-01 and Nair's starts on 2026-03-01, and on that day exactly one of them is valid.</li>
+  <li><strong>Point facts</strong> (events) happen at a time: ACQUIRED, DETECTED, INVESTED_IN for a single round. Represent them as a single date, or as a short interval when the date is only known to a month or year. An event is not “valid” later; it has either happened by a given date or not.</li>
+</ul>
+<p>The Kestrel relationships come out like this:</p>
+<table>
+  <thead><tr><th>Relationship</th><th>Kind</th><th>valid_from</th><th>valid_to</th></tr></thead>
+  <tbody>
+    <tr><td>Jonas Vehl CTO_OF Kestrel Labs</td><td>interval</td><td>2021</td><td>2026-03</td></tr>
+    <tr><td>Priya Nair CTO_OF Kestrel Labs</td><td>interval</td><td>2026-03</td><td>open</td></tr>
+    <tr><td>Dr. Mira Okafor FORMERLY_WORKED_AT Tidewater Institute</td><td>interval</td><td>2015</td><td>2021 (spring)</td></tr>
+    <tr><td>Deepcast SUPPLIED Kestrel Labs</td><td>interval</td><td>2022-08</td><td>2025-06-30</td></tr>
+    <tr><td>Lena Park BOARD_MEMBER_OF Kestrel Labs</td><td>interval</td><td>2022-03</td><td>open</td></tr>
+    <tr><td>Marlow Dynamics ACQUIRED Deepcast</td><td>point</td><td>2025-04-15 (announced)</td><td>n/a</td></tr>
+    <tr><td>Project Sentinel DETECTED 2024 Halden Reef bleaching event</td><td>point</td><td>2024-08-11</td><td>n/a</td></tr>
+    <tr><td>Port Avalon City Council CONTRACTED Kestrel Labs</td><td>interval</td><td>2025-11-18</td><td>about 2028-11 (three years)</td></tr>
+  </tbody>
+</table>
+
+<p>Drag the “as of” line below to see which of these facts hold on any date. Bars are interval facts; diamonds are events, filled once they have happened. The caption answers canonical questions 6 and 7 for the chosen date.</p>
+
+<div class="viz" data-viz="ch10-timeline">
+<script type="application/json">
+{
+  "title": "Kestrel facts on a time axis",
+  "subtitle": "Drag the as-of line or use the slider",
+  "start": "2015-01",
+  "end": "2028-12",
+  "asOf": "2024-08",
+  "facts": [
+    {"label": "Okafor worked at Tidewater Institute", "from": "2015-01", "to": "2021-04", "group": 3},
+    {"label": "Nair worked at Marlow Dynamics", "from": "2016-06", "to": "2023-06", "group": 3, "approx": true},
+    {"label": "Okafor CEO of Kestrel Labs", "from": "2021-01", "to": null, "group": 1, "role": "CEO"},
+    {"label": "Vehl CTO of Kestrel Labs", "from": "2021-01", "to": "2026-03", "group": 1, "role": "CTO", "holder": "Jonas Vehl"},
+    {"label": "Nair CTO of Kestrel Labs", "from": "2026-03", "to": null, "group": 1, "role": "CTO", "holder": "Priya Nair"},
+    {"label": "Vehl Chief Scientist", "from": "2026-03", "to": null, "group": 1},
+    {"label": "Park on Kestrel board", "from": "2022-03", "to": null, "group": 2},
+    {"label": "Deepcast supplies Kestrel sonar", "from": "2022-08", "to": "2025-07", "group": 4, "role": "SUPPLIER", "holder": "Deepcast"},
+    {"label": "Kestrel runs Project Sentinel", "from": "2023-02", "to": null, "group": 6},
+    {"label": "Kestrel runs Project Tern", "from": "2025-06", "to": null, "group": 6},
+    {"label": "Council contract with Kestrel", "from": "2025-11", "to": "2028-11", "group": 7},
+    {"label": "Series A led by Brightwater", "at": "2022-03", "group": 2},
+    {"label": "Sentinel detects bleaching", "at": "2024-08", "group": 6},
+    {"label": "Marlow acquires Deepcast", "at": "2025-04", "group": 4},
+    {"label": "Ocean Health Act passed", "at": "2025-07", "group": 7},
+    {"label": "Series B led by Brightwater", "at": "2025-09", "group": 2}
+  ]
+}
+</script>
+</div>
+
+<p>Slide to March 2026 and watch the handover: Vehl's bar ends exactly where Nair's begins. Slide to anywhere in 2024 and the sonar supplier is Deepcast, the answer to question 7. From July 2025 the caption reports no supplier at all, which is also correct: Kestrel ran on spares while Tern was built. A graph without validity intervals cannot say “nobody”; it can only list every supplier it has ever seen.</p>
+
+<h3>An as-of filter in a few lines</h3>
+<p>With validity on edges, answering a temporal question is a filter followed by an ordinary lookup. <code>minigraphrag/temporal.py</code> uses a <code>networkx.MultiDiGraph</code>, so the same pair of nodes can carry several time-stamped edges (Vehl CTO_OF Kestrel and, later, Vehl CHIEF_SCIENTIST_OF Kestrel). Each edge also carries a second timeline, <code>recorded_at</code> and <code>invalidated_at</code>, which this chapter ignores and <a href="27-incremental-temporal.html">Chapter 27</a> puts to work.</p>
+
+<pre data-file="minigraphrag/temporal.py"><code class="language-python">from __future__ import annotations
+
+from datetime import date
+
+import networkx as nx
+
+# Relations where a target can have only one source at a time (one CTO per company).
+EXCLUSIVE_RELATIONS: set[str] = {"CTO_OF", "CEO_OF"}
+
+
+def parse_date(value: str | date | None) -&gt; date | None:
+    """Accept date objects or ISO-ish strings: '2026', '2026-03', '2026-03-26'."""
+    if value is None or isinstance(value, date):
+        return value
+    parts = [int(p) for p in str(value).split("-")]
+    return date(parts[0], parts[1] if len(parts) &gt; 1 else 1, parts[2] if len(parts) &gt; 2 else 1)
+
+
+def new_temporal_graph() -&gt; nx.MultiDiGraph:
+    """Directed multigraph: the same pair can hold many facts over time."""
+    return nx.MultiDiGraph()
+
+
+def add_fact(
+    G: nx.MultiDiGraph,
+    source: str,
+    relation: str,
+    target: str,
+    valid_from: str | date,
+    valid_to: str | date | None = None,
+    recorded_at: str | date | None = None,
+    description: str = "",
+    exclusive: bool | None = None,
+) -&gt; int:
+    """Add a fact edge, invalidating contradicting facts. Returns the new edge key."""
+    vf, vt = parse_date(valid_from), parse_date(valid_to)
+    rec = parse_date(recorded_at) or vf
+    exclusive = relation in EXCLUSIVE_RELATIONS if exclusive is None else exclusive
+
+    if exclusive and target in G:
+        for old_source, _, key, d in list(G.in_edges(target, keys=True, data=True)):
+            if d["relation"] != relation or old_source == source or d["invalidated_at"] is not None:
+                continue
+            if d["valid_to"] is None or d["valid_to"] &gt; vf:
+                # Close the old interval where the new one begins; remember what we believed before.
+                d["prior_valid_to"] = d["valid_to"]
+                d["valid_to"] = vf
+                d["invalidated_at"] = rec
+
+    return G.add_edge(source, target, relation=relation, description=description, valid_from=vf, valid_to=vt,
+                      recorded_at=rec, invalidated_at=None, prior_valid_to=None)
+
+
+def is_valid(d: dict, at: date, known_at: date | None = None) -&gt; bool:
+    """Was this fact true at `at`, according to what was recorded by `known_at` (default: now)?"""
+    valid_to = d["valid_to"]
+    if known_at is not None:
+        if d["recorded_at"] &gt; known_at:
+            return False  # we hadn't learned this fact yet
+        if d["invalidated_at"] is not None and d["invalidated_at"] &gt; known_at:
+            valid_to = d["prior_valid_to"]  # the invalidation hadn't happened yet
+    return d["valid_from"] &lt;= at and (valid_to is None or at &lt; valid_to)
+
+
+def as_of(G: nx.MultiDiGraph, at: str | date, known_at: str | date | None = None) -&gt; nx.MultiDiGraph:
+    """Snapshot of the facts valid at `at` (optionally as believed at `known_at`)."""
+    at_d, known_d = parse_date(at), parse_date(known_at)
+    snap = nx.MultiDiGraph()
+    snap.add_nodes_from(G.nodes(data=True))
+    for u, v, k, d in G.edges(keys=True, data=True):
+        if is_valid(d, at_d, known_d):
+            snap.add_edge(u, v, key=k, **d)
+    return snap
+
+
+def holders(G: nx.MultiDiGraph, relation: str, target: str, at: str | date, known_at: str | date | None = None) -&gt; list[str]:
+    """Sources holding `relation` to `target` at a date, e.g. holders(G, 'CTO_OF', 'Kestrel Labs', '2024-08')."""
+    snap = as_of(G, at, known_at)
+    if target not in snap:
+        return []
+    return sorted({u for u, _, d in snap.in_edges(target, data=True) if d["relation"] == relation})</code></pre>
+
+<pre data-file="examples/ch10_as_of.py"><code class="language-python">from minigraphrag.temporal import new_temporal_graph, add_fact, holders
+
+G = new_temporal_graph()
+add_fact(G, "Jonas Vehl", "CTO_OF", "Kestrel Labs", "2021", recorded_at="2021-10-04")
+add_fact(G, "Deepcast", "SUPPLIED", "Kestrel Labs", "2022-08", "2025-07", recorded_at="2022-08-09")
+add_fact(G, "Priya Nair", "CTO_OF", "Kestrel Labs", "2026-03", recorded_at="2026-03-26")  # closes Vehl's interval
+
+holders(G, "CTO_OF", "Kestrel Labs", "2026-09-16")   # ['Priya Nair']   question 6, today
+holders(G, "CTO_OF", "Kestrel Labs", "2024-06")      # ['Jonas Vehl']
+holders(G, "SUPPLIED", "Kestrel Labs", "2024-06")    # ['Deepcast']     question 7
+holders(G, "SUPPLIED", "Kestrel Labs", "2025-07")    # []              the supply ended</code></pre>
+
+<p>The module also ships <code>kestrel_timeline()</code>, which loads every dated fact of the running example in publication order, so you can run these queries without building the graph by hand. One thing to watch: <code>parse_date</code> maps “2026-03” to 2026-03-01, so month granularity is silently turned into a day. The section after next deals with that.</p>
+
+<p>The exclusive-relation rule is a small preview of <a href="27-incremental-temporal.html">Chapter 27</a>: when a new fact arrives that cannot coexist with an old one, the old one is not deleted but closed, and <code>invalidated_at</code> records when that happened. That keeps history queryable. The rule is only safe for relations you have declared exclusive, and it trusts the newer fact: it closes the old interval even if the new fact starts earlier than a date the old source stated explicitly. It also assumes facts arrive in time order. Load Nair's 2026 fact first and Vehl's 2021 to 2026 fact second, and the rule sets Nair's <code>valid_to</code> to 2021-01-01, an interval that ends before it begins; <code>holders</code> then reports no CTO at all for September 2026. Backfilling history is common, so a production version should compare the two intervals before closing anything and refuse to close an interval at a date before it starts.</p>
+
+<h3>Granularity at the boundaries</h3>
+<p>“Nair became CTO in March 2026” gives a month, not a day. Store <code>valid_from = 2026-03-01</code> with granularity <em>month</em>, and be honest at query time: on 2026-03-15, both “Vehl” and “Nair” are possible answers. A careful answer generator says “Priya Nair has been CTO since March 2026; Jonas Vehl held the role before that”, which is correct at any granularity. A system that stores 2026-03-01 as if it were exact will answer confidently and sometimes wrongly for dates inside the uncertain month.</p>
+
+<h2>Contradictions or changes over time?</h2>
+<p>Once facts carry time, you can finally tell apart two situations that look identical in a timeless graph.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="contra-title">
+      <title id="contra-title">Change over time versus contradiction on a time axis</title>
+      <defs>
+        <marker id="c10arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <line class="d-line faint" x1="140" y1="270" x2="660" y2="270"/>
+      <text class="d-text small" x="140" y="288" text-anchor="middle">2021</text>
+      <text class="d-text small" x="225" y="288" text-anchor="middle">2022</text>
+      <text class="d-text small" x="310" y="288" text-anchor="middle">2023</text>
+      <text class="d-text small" x="395" y="288" text-anchor="middle">2024</text>
+      <text class="d-text small" x="480" y="288" text-anchor="middle">2025</text>
+      <text class="d-text small" x="565" y="288" text-anchor="middle">2026</text>
+      <text class="d-text small" x="650" y="288" text-anchor="middle">2027</text>
+      <line class="d-line faint dash" x1="579" y1="20" x2="579" y2="270"/>
+      <text class="d-text bold" x="10" y="36">Change</text>
+      <text class="d-text small" x="10" y="52">over time</text>
+      <rect class="d-box node" x="140" y="22" width="439" height="18" rx="3"/>
+      <text class="d-text small" x="148" y="35">Vehl CTO_OF Kestrel Labs</text>
+      <rect class="d-box node" x="579" y="46" width="70" height="18" rx="3"/>
+      <text class="d-text small" x="500" y="59" text-anchor="end">Nair CTO_OF Kestrel Labs</text>
+      <line class="d-line faint" x1="504" y1="55" x2="577" y2="55"/>
+      <text class="d-text small" x="140" y="82">Intervals meet but do not overlap: both facts are true, one after the other.</text>
+      <text class="d-text bold" x="10" y="126">Contradiction</text>
+      <rect class="d-box bad" x="140" y="112" width="439" height="18" rx="3"/>
+      <text class="d-text small" x="148" y="125">Source A: Vehl CTO_OF Kestrel Labs, 2021 to 2026-03</text>
+      <rect class="d-box bad" x="480" y="136" width="170" height="18" rx="3"/>
+      <text class="d-text small" x="472" y="149" text-anchor="end">Source B (hypothetical): Nair CTO since 2025-01</text>
+      <text class="d-text small" x="140" y="172">A functional role with overlapping intervals from two sources: at most one can be right.</text>
+      <text class="d-text bold" x="10" y="214">Precision</text>
+      <text class="d-text small" x="10" y="230">difference</text>
+      <rect class="d-box edge" x="480" y="200" width="85" height="18" rx="3"/>
+      <text class="d-text small" x="472" y="213" text-anchor="end">Podcast: Marlow bought Deepcast “last year” (2025)</text>
+      <path class="d-node warm" d="M505,226 l7,7 l-7,7 l-7,-7 z"/>
+      <text class="d-text small" x="496" y="238" text-anchor="end">Journal: announced 2025-04-15</text>
+      <text class="d-text small" x="140" y="258">The point lies inside the range: consistent, just more precise.</text>
+    </svg>
+  </div>
+  <figcaption>Three patterns. Non-overlapping intervals for a functional relation are a change, overlapping ones are a contradiction, and a precise date inside a coarse range is just a difference in precision. The dashed line marks March 2026.</figcaption>
+</figure>
+
+<h3>A decision procedure</h3>
+<p>When two facts about the same subject and relation disagree, walk through these questions in order:</p>
+<ol>
+  <li><strong>Do their validity intervals overlap?</strong> If not, it is a change. “Kestrel's CTO Jonas Vehl” in a 2022 article and “Priya Nair, CTO” in a 2026 podcast are both right.</li>
+  <li><strong>Is the relation functional?</strong> Two board members at the same time is fine; two CTOs at the same time is not (unless the company says “co-CTO”). Only functional relations can contradict through overlap alone.</li>
+  <li><strong>Is one fact just less precise?</strong> A date inside another claim's range, or a rounded number (“about 140 employees” in 2022, “roughly 150” in 2025) is not a contradiction. The Deepcast headcount is in fact a change, since the two numbers are three years apart.</li>
+  <li><strong>Is one statement a plan and the other an outcome?</strong> “Expected to close in May” (SUSPECTED, planned) does not contradict a later “closed in May” or even “closed in June”: the plan was just revised.</li>
+  <li><strong>Only then</strong> is it a real contradiction. Keep both claims with their sources, prefer the more authoritative or more recent <em>report</em> for display, and surface the disagreement in the answer rather than hiding it.</li>
+</ol>
+<p>This is where the summarization prompt's instruction from Chapter 9, “prefer the most recent dated information”, is a blunt instrument: it gets changes over time right and silently discards genuine contradictions. Structured validity intervals let you do better, because they make the difference computable.</p>
+
+<div class="callout note">
+  <span class="callout-title">Valid time is only half the story</span>
+  <p>So far every date has been <strong>valid time</strong>: when a fact was true in the world. There is a second timeline, <strong>transaction time</strong>: when your system learned or recorded the fact. If a 2026 article reveals that a deal actually closed in 2024, the valid time is 2024 and the transaction time is 2026. Graphs that track both are called <em>bi-temporal</em>, and they can answer “what did we believe on 1 January 2025 about who supplied Kestrel?”. Zep and its open-source Graphiti engine put both timelines on every edge. You will build one in <a href="27-incremental-temporal.html">Chapter 27</a> and use it for agent memory in <a href="c3-temporal-memory.html">Capstone 3</a>.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Rasmussen et al., Zep: A Temporal Knowledge Graph Architecture for Agent Memory (2025)</span>
+  <p>Zep's Graphiti engine stores episodes (raw inputs) and extracted entity edges with a bi-temporal model: each fact has a valid interval in the world and a separate record of when the system created and expired it. When new information contradicts an existing edge, the old edge is invalidated by setting its end time rather than being deleted, so historical queries still work. The exclusive-relation rule in <code>add_fact</code> above, with its <code>recorded_at</code> and <code>invalidated_at</code> fields, is a minimal version of that idea.</p>
+</div>
+
+<h2>Using claims and time downstream</h2>
+<p>Claims and temporal edges pay off in three places later in the course:</p>
+<ul>
+  <li><strong>Community reports</strong> (<a href="12-community-reports.html">Chapter 12</a>). GraphRAG's report context can include a Claims table next to the Entities and Relationships tables, and the report prompt cites claim ids in its data references. Events and allegations are exactly what makes a report about “supply chain risk” specific rather than generic.</li>
+  <li><strong>Local search</strong> (<a href="14-local-search.html">Chapter 14</a>). Claims whose subject is a retrieved entity go into the context as their own table, with status and dates visible to the model.</li>
+  <li><strong>Temporal retrieval</strong> (<a href="21-hybrid-design-patterns.html">Chapter 21</a>). A “temporal window” pattern restricts traversal to edges valid in the time range the question asks about, which is <code>as_of</code> generalized from a point to a range.</li>
+</ul>
+
+<table>
+  <thead><tr><th>Approach</th><th>Answers “who is CTO now?”</th><th>Answers “who was CTO in 2024?”</th><th>Handles allegations</th><th>Extra cost</th></tr></thead>
+  <tbody>
+    <tr><td>Summarized descriptions only</td><td>Sometimes, if the summary kept “since March 2026”</td><td>Rarely</td><td>No</td><td>None</td></tr>
+    <tr><td>Claims table (GraphRAG covariates)</td><td>Yes, if the model reads dates in context</td><td>Yes, same caveat</td><td>Yes, via status</td><td>A second extraction pass</td></tr>
+    <tr><td>Validity intervals on edges</td><td>Yes, by filter</td><td>Yes, by filter</td><td>Only with a status attribute</td><td>Date normalization plus a promotion step</td></tr>
+    <tr><td>Bi-temporal edges (Chapter 27)</td><td>Yes</td><td>Yes</td><td>Yes</td><td>Invalidation logic on every update</td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 10.1 <span class="level">Warm-up</span></h4>
+  <p>Normalize each expression to an inclusive date range and a granularity, using the given document date. (a) “last quarter” in the council minutes of 18 November 2025. (b) “later this year” in the Series A press release of 15 March 2022. (c) “on Tuesday” in the Maritime Industry Journal article of Thursday 17 April 2025. (d) “Q2 to Q4 2026” in the Tern blog of 30 June 2025. (e) “last summer” in a hypothetical memo dated 1 March 2024.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ol type="a">
+      <li>November is in Q4, so last quarter is Q3 2025: <strong>2025-07-01 to 2025-09-30</strong>, quarter.</li>
+      <li><strong>2022-03-15 to 2022-12-31</strong>, year granularity bounded below by the document date. It is also a plan, so store it as SUSPECTED or PLANNED.</li>
+      <li>The most recent Tuesday before Thursday 17 April is two days earlier: <strong>2025-04-15</strong>, day.</li>
+      <li>A range of quarters: Q2 starts 2026-04-01 and Q4 ends 2026-12-31, so <strong>2026-04-01 to 2026-12-31</strong>, quarter. The rules in <code>normalize_time_expression</code> don't handle “Qa to Qb yyyy”; resolve each end separately and take the outer bounds. Also a plan.</li>
+      <li>Summer (June to August) has not happened yet in March 2024, so “last summer” is 2023: <strong>2023-06-01 to 2023-08-31</strong>, season (northern hemisphere).</li>
+    </ol>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 10.2 <span class="level">Core</span></h4>
+  <p>Write the claim tuples a careful extractor should return for this passage from the Maritime Industry Journal (17 April 2025), with statuses and dates: <em>“Marlow Dynamics … has acquired sonar hardware supplier Deepcast in an all-cash deal, the companies announced on Tuesday. Terms were not disclosed, but two people familiar with the transaction put the price at between $180 million and $220 million. … Deepcast said it would ‘honour existing purchase orders through the end of the second quarter’ but would not renew or sign outside supply contracts after the acquisition closes. … The acquisition is expected to close in May, subject to regulatory approval.”</em></p>
+  <details class="hint"><summary>Hint</summary><p>There are at least four claims. Ask of each: is it confirmed, reported by unnamed sources, or a forecast? And is its date the announcement, the plan, or the event?</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code>(MARLOW DYNAMICS&lt;|&gt;DEEPCAST&lt;|&gt;ACQUISITION&lt;|&gt;TRUE&lt;|&gt;2025-04-15&lt;|&gt;2025-04-15&lt;|&gt;Marlow Dynamics and Deepcast announced on Tuesday 15 April 2025 that Marlow Dynamics has acquired Deepcast in an all-cash deal&lt;|&gt;Marlow Dynamics ... has acquired sonar hardware supplier Deepcast in an all-cash deal, the companies announced on Tuesday.)
+##
+(MARLOW DYNAMICS&lt;|&gt;DEEPCAST&lt;|&gt;ACQUISITION_PRICE&lt;|&gt;SUSPECTED&lt;|&gt;2025-04-15&lt;|&gt;2025-04-15&lt;|&gt;Two unnamed people familiar with the deal put the price between $180 million and $220 million; terms were not disclosed&lt;|&gt;Terms were not disclosed, but two people familiar with the transaction put the price at between $180 million and $220 million.)
+##
+(DEEPCAST&lt;|&gt;NONE&lt;|&gt;END_OF_OUTSIDE_SUPPLY&lt;|&gt;TRUE&lt;|&gt;2025-04-17&lt;|&gt;2025-06-30&lt;|&gt;Deepcast told customers it will honour existing purchase orders through the end of the second quarter of 2025 and will not renew or sign outside supply contracts after the acquisition closes&lt;|&gt;honour existing purchase orders through the end of the second quarter ... would not renew or sign outside supply contracts after the acquisition closes)
+##
+(MARLOW DYNAMICS&lt;|&gt;DEEPCAST&lt;|&gt;ACQUISITION_CLOSING&lt;|&gt;SUSPECTED&lt;|&gt;2025-05-01&lt;|&gt;2025-05-31&lt;|&gt;The acquisition is expected to close in May 2025, subject to regulatory approval&lt;|&gt;The acquisition is expected to close in May, subject to regulatory approval.)
+&lt;|COMPLETE|&gt;</code></pre>
+    <p>Reasoning: the acquisition itself is announced by both companies, so TRUE, dated to the announcement (the text says “announced on Tuesday”, resolved against the article date). The price comes from unnamed sources: SUSPECTED. Deepcast's letter is a confirmed statement of policy (TRUE that Deepcast said it), with an interval from the report date to the stated end of Q2. The closing date is a forecast subject to approval: SUSPECTED with a month range. The first and fourth claims do not contradict each other: “has acquired” describes the signed deal, “expected to close” describes completion. Kestrel Labs does not appear in this passage, so no claim should mention it, however tempting.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 10.3 <span class="level">Core</span></h4>
+  <p>Using <code>add_fact</code> and <code>as_of</code>, load all the interval facts from the table in “Intervals and points” (use the first day of the month when only a month is known, and 1 January when only a year is known). Then write <code>holders_between(G, relation, target, start, end)</code> that returns everyone who held a relation at any time in a date range, and use it to answer: who was CTO of Kestrel Labs at any point in 2026? Who supplied Kestrel's sonar at any point in the second half of 2025?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from datetime import date
+import networkx as nx
+from minigraphrag.temporal import add_fact
+
+G = nx.MultiDiGraph()
+K = "KESTREL LABS"
+add_fact(G, "JONAS VEHL", "CTO_OF", K, date(2021, 1, 1))
+add_fact(G, "PRIYA NAIR", "CTO_OF", K, date(2026, 3, 1))            # closes Vehl at 2026-03-01
+add_fact(G, "DR. MIRA OKAFOR", "FORMERLY_WORKED_AT", "TIDEWATER INSTITUTE", date(2015, 1, 1), date(2021, 4, 1))
+add_fact(G, "DEEPCAST", "SUPPLIED", K, date(2022, 8, 1), date(2025, 7, 1))   # through 2025-06-30, half-open
+add_fact(G, "LENA PARK", "BOARD_MEMBER_OF", K, date(2022, 3, 1))
+add_fact(G, "PORT AVALON CITY COUNCIL", "CONTRACTED", K, date(2025, 11, 18), date(2028, 11, 18))
+
+def overlaps(d, start, end):
+    """Half-open validity [from, to) overlaps the inclusive query range [start, end]."""
+    lo, hi = d.get("valid_from"), d.get("valid_to")
+    return (lo is None or lo &lt;= end) and (hi is None or hi &gt; start)
+
+def holders_between(G, relation, target, start, end):
+    return sorted({u for u, _, d in G.in_edges(target, data=True)
+                   if d["relation"] == relation and overlaps(d, start, end)})
+
+print(holders_between(G, "CTO_OF", K, date(2026, 1, 1), date(2026, 12, 31)))
+# ['JONAS VEHL', 'PRIYA NAIR']
+print(holders_between(G, "SUPPLIED", K, date(2025, 7, 1), date(2025, 12, 31)))
+# []</code></pre>
+    <p>In 2026 both held the role: Vehl until 1 March, Nair from 1 March. For the second half of 2025 the answer is nobody: Deepcast's interval ends at 2025-07-01 (exclusive), so it does not overlap a range starting on 2025-07-01. If you had stored the end as 2025-06-30 with an inclusive interpretation, you would need a different overlap test. Pick one convention (half-open is the usual choice) and apply it everywhere, including when converting “through the end of the second quarter” into <code>valid_to</code>.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 10.4 <span class="level">Core</span></h4>
+  <p>Write <code>find_conflicts(G, functional)</code> that returns pairs of edges with the same relation and target, different sources, a relation in <code>functional</code>, and overlapping validity intervals. Test it on a graph where one source says Vehl was CTO 2021 to 2026-03 and another (wrong) source says Nair has been CTO since 2025-01. Why must you add these facts with <code>add_fact(..., exclusive=False)</code> (or directly with <code>G.add_edge</code>) for this test to find anything?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from datetime import date
+from itertools import combinations
+import networkx as nx
+
+def overlap(a, b):
+    a0, a1 = a["valid_from"] or date.min, a["valid_to"] or date.max
+    b0, b1 = b["valid_from"] or date.min, b["valid_to"] or date.max
+    return a0 &lt; b1 and b0 &lt; a1                      # half-open intervals
+
+def find_conflicts(G, functional):
+    by_key = {}
+    for u, v, k, d in G.edges(keys=True, data=True):
+        if d["relation"] in functional:
+            by_key.setdefault((d["relation"], v), []).append((u, k, d))
+    conflicts = []
+    for (rel, target), edges in by_key.items():
+        for (u1, k1, d1), (u2, k2, d2) in combinations(edges, 2):
+            if u1 != u2 and overlap(d1, d2):
+                conflicts.append((rel, target, (u1, d1["source_id"]), (u2, d2["source_id"])))
+    return conflicts
+
+G = nx.MultiDiGraph()
+G.add_edge("JONAS VEHL", "KESTREL LABS", key="a", relation="CTO_OF",
+           valid_from=date(2021, 1, 1), valid_to=date(2026, 3, 1), source_id="12-0")
+G.add_edge("PRIYA NAIR", "KESTREL LABS", key="b", relation="CTO_OF",
+           valid_from=date(2025, 1, 1), valid_to=None, source_id="bad-doc")
+print(find_conflicts(G, {"CTO_OF"}))
+# [('CTO_OF', 'KESTREL LABS', ('JONAS VEHL', '12-0'), ('PRIYA NAIR', 'bad-doc'))]</code></pre>
+    <p>With the default <code>exclusive=None</code>, <code>add_fact</code> treats CTO_OF as exclusive and resolves every overlap in favor of the fact added last: adding Nair from 2025-01 would close Vehl's interval at 2025-01, stamp <code>invalidated_at</code>, and the conflict would vanish. That is the right behavior when a newer source reports a change, and the wrong behavior when a source is simply mistaken. A production pipeline runs conflict detection on the raw claims first, and only lets the closing rule apply when the new fact is not contradicted by a closed, sourced interval like Vehl's.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 10.5 <span class="level">Stretch</span></h4>
+  <p>Claims about the same event arrive from many chunks: “Marlow acquired Deepcast” appears in the trade journal (April 2025), the board memo (as “change of ownership last month”), the Tern blog (implicitly), the Series B release and the podcast (“last year”). Design and implement <code>merge_claims(claims)</code> that groups claims into events and produces one merged record per event with: the tightest consistent date range, a status, all source ids, and a flag when the dates are inconsistent. State your grouping key and your status rule.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Grouping key.</strong> (resolved subject, resolved object, claim type), then split a group into separate events if date ranges are disjoint by more than a tolerance (two funding rounds by the same investor are two events). Normalize types with a small synonym map first (ACQUIRED, BUYOUT → ACQUISITION).</p>
+    <p><strong>Dates.</strong> Intersect ranges: the event must lie in every source's range if all are right. If the intersection is empty, keep the range from the most precise source (narrowest range) and flag an inconsistency.</p>
+    <p><strong>Status.</strong> TRUE if any source asserts TRUE and none asserts FALSE; FALSE if any source asserts FALSE and none TRUE; otherwise SUSPECTED, and a TRUE/FALSE split is flagged as a contradiction.</p>
+    <pre><code class="language-python">from collections import defaultdict
+from datetime import date
+
+TYPE_SYNONYMS = {"ACQUIRED": "ACQUISITION", "BUYOUT": "ACQUISITION", "PURCHASE": "ACQUISITION"}
+
+def _d(s, default):
+    return date.fromisoformat(s[:10]) if s else default
+
+def merge_claims(claims, tolerance_days=45):
+    groups = defaultdict(list)
+    for c in claims:
+        groups[(c.subject, c.object, TYPE_SYNONYMS.get(c.type, c.type))].append(c)
+    merged = []
+    for key, items in groups.items():
+        items.sort(key=lambda c: _d(c.start_date, date.min))
+        events, current = [], [items[0]]
+        for c in items[1:]:
+            prev_end = max(_d(x.end_date, date.max) for x in current)
+            if (_d(c.start_date, date.min) - prev_end).days &gt; tolerance_days:
+                events.append(current)
+                current = [c]
+            else:
+                current.append(c)
+        events.append(current)
+        for ev in events:
+            lo = max(_d(c.start_date, date.min) for c in ev)
+            hi = min(_d(c.end_date, date.max) for c in ev)
+            inconsistent = lo &gt; hi
+            if inconsistent:                     # fall back to the most precise source
+                best = min(ev, key=lambda c: (_d(c.end_date, date.max) - _d(c.start_date, date.min)).days)
+                lo, hi = _d(best.start_date, date.min), _d(best.end_date, date.max)
+            statuses = {c.status for c in ev}
+            status = ("TRUE" if "TRUE" in statuses and "FALSE" not in statuses else
+                      "FALSE" if "FALSE" in statuses and "TRUE" not in statuses else "SUSPECTED")
+            merged.append({"subject": key[0], "object": key[1], "type": key[2], "status": status,
+                           "start": lo, "end": hi, "sources": sorted({c.source_id for c in ev}),
+                           "inconsistent_dates": inconsistent,
+                           "contradiction": {"TRUE", "FALSE"} &lt;= statuses})
+    return merged</code></pre>
+    <p>On the acquisition: the journal gives 2025-04-15, the memo gives April 2025 (2025-04-01 to 04-30) and the podcast gives 2025. The intersection is 2025-04-15, status TRUE, with three sources. The SUSPECTED closing claim (“expected to close in May”) has a different type (ACQUISITION_CLOSING) and stays separate, which is correct: it is a forecast about a different moment. One weakness remains: the gap-based event splitting sorts by start date, so a wide range like “2025” can swallow two nearby events. Splitting on precise sources first, then attaching coarse ones to the event they contain, is more reliable.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why do summarized entity descriptions answer “Who is the CTO of Kestrel Labs?” unreliably?</p>
+  <ol>
+    <li>Because the summarizer is not allowed to mention job titles</li>
+    <li data-correct>Because merging descriptions from different dates keeps the facts but loses their order and validity periods</li>
+    <li>Because CTO is not one of the entity types</li>
+    <li>Because descriptions are embedded, and embeddings cannot represent roles</li>
+  </ol>
+  <div class="explain">“Vehl was CTO” and “Nair became CTO” both survive summarization, but without dates the reader cannot tell which is current. Claims and validity intervals keep time explicit.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A chunk says “two people familiar with the transaction put the price at between $180 million and $220 million.” Which status fits best?</p>
+  <ol>
+    <li>TRUE, because a journal published it</li>
+    <li>FALSE, because terms were not disclosed</li>
+    <li data-correct>SUSPECTED, because it comes from unnamed sources and is not confirmed</li>
+    <li>NONE, because prices are not claims</li>
+  </ol>
+  <div class="explain">SUSPECTED means “not verified”. Non-disclosure does not make the estimate false; it makes it unconfirmed.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A board memo dated 14 May 2025 mentions “Deepcast's change of ownership last month”. What should the normalized date range be?</p>
+  <ol>
+    <li>2025-05-14 to 2025-05-14</li>
+    <li>The date the extraction job ran, minus one month</li>
+    <li>2025-04-14 to 2025-05-14</li>
+    <li data-correct>2025-04-01 to 2025-04-30</li>
+  </ol>
+  <div class="explain">“Last month” is the calendar month before the document date's month, with month granularity. Anchoring on the run date is the classic bug; a rolling 30-day window is a different expression.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Vehl's CTO_OF edge has validity [2021-01-01, 2026-03-01) and Nair's has [2026-03-01, open). Which statement is correct?</p>
+  <ol>
+    <li>The edges contradict each other because CTO_OF is functional</li>
+    <li data-correct>They describe a change over time: on 2026-03-01 only Nair's edge is valid</li>
+    <li>Both edges are valid on 2026-03-01</li>
+    <li>Vehl's edge should be deleted once Nair's is added</li>
+  </ol>
+  <div class="explain">Half-open intervals meet without overlapping. Deleting the old edge would make “who was CTO in 2024?” unanswerable; closing it keeps history.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A podcast from March 2026 says Marlow bought Deepcast “last year”; a journal article gives 15 April 2025. How should a merger of claims treat these?</p>
+  <ol>
+    <li>As a contradiction, because the dates differ</li>
+    <li>Keep only the podcast, because it is more recent</li>
+    <li data-correct>As consistent: the precise date lies inside the coarse range, so the intersection is 2025-04-15</li>
+    <li>Average the two dates</li>
+  </ol>
+  <div class="explain">“Last year” normalizes to all of 2025. A precise date inside a coarse range is a precision difference, and intersecting ranges keeps the most specific consistent answer.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What does transaction time record in a bi-temporal graph?</p>
+  <ol>
+    <li>When the fact was true in the world</li>
+    <li>When the document describing the fact was written</li>
+    <li>How long the LLM call took</li>
+    <li data-correct>When the system recorded or invalidated the fact</li>
+  </ol>
+  <div class="explain">Valid time is about the world; transaction time is about the database. Tracking both lets you ask what the system believed at a past moment, which matters for audits and for agents that learn facts late.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Can I put dates into relationship descriptions and let the LLM read them?</summary>
+  <div><p>Do that too, since the extraction prompt already asks for “dates when stated”. But text dates only help once an edge is in the context window. They don't help retrieval choose edges, they get mangled by summarization, and they can't be filtered or compared. Structured <code>valid_from</code> and <code>valid_to</code> make time usable before generation as well as during it.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should claims become edges in the graph?</summary>
+  <div><p>Dated state claims with two entities (SUPPLIED, CTO_OF) are good candidates to promote into relationships with validity intervals. Allegations, estimates and single-entity claims (“Kestrel faces execution risk on Tern”) usually fit better as covariates attached to the subject node: turning a SUSPECTED price estimate into an edge makes it look as solid as a confirmed fact to any traversal that ignores attributes. GraphRAG keeps claims in their own table for exactly that reason.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What if a document has no date?</summary>
+  <div><p>Try metadata first (file timestamps, URL paths, headers), then the latest absolute date mentioned in the document as a lower bound. If nothing works, leave relative expressions unresolved and keep the phrase. Never silently anchor on today's date: a 2021 article read in 2026 would place “next year” in 2027.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does claim extraction replace entity extraction?</summary>
+  <div><p>No. Claims hang off entities, so you need the entity graph first, and GraphRAG runs claims as an optional extra workflow. The claim prompt does extract entity names as subjects and objects, and those names must pass through the same resolution map from Chapter 9, or claims will attach to unresolved aliases.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I evaluate claim extraction?</summary>
+  <div><p>Hand-label claims for a dozen chunks, then score three things separately: whether each gold claim was found (matching on subject, object and type), whether its status matches, and whether its date range contains the gold date and is not wildly wider. Status and date accuracy are usually much lower than detection, and they are what temporal questions depend on. Keep the canonical temporal questions 6 and 7 as end-to-end tests.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a temporal layer for the Kestrel graph</h3>
+  <p>Add claims and validity intervals to your minigraphrag index so that temporal questions are answered by filtering, not by hoping the model reads dates correctly.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>Claim extraction over all twelve documents with the document date injected into the prompt, written to <code>claims.jsonl</code> with source ids</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A validation report: invalid statuses, unparseable or inverted dates, and source quotes not found in the chunk</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A date normalizer with unit tests for every expression in the table in this chapter, plus five more from the corpus</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A promotion step that turns dated CTO_OF, CEO_OF, SUPPLIED and BOARD_MEMBER_OF claims into edges with <code>valid_from</code> and <code>valid_to</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A command <code>asof YYYY-MM-DD "question"</code> that filters the graph with <code>as_of</code> before retrieval, and a conflict report from <code>find_conflicts</code></span></li>
+  </ul>
+  <p><strong>Done when</strong> canonical questions 6 and 7 are answered correctly for the dates 2024-06-01 and 2026-09-16, and the conflict report on the real corpus is empty or every entry is explained.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Summarized descriptions merge facts across time and lose order; claims keep events, dated states and uncertain assertions separate and attributable.</li>
+    <li>A GraphRAG claim has subject, object, type, status (TRUE, FALSE, SUSPECTED), start and end dates, description and source text. Status is relative to the chunk.</li>
+    <li>Resolve relative time expressions against the document date, and store range, granularity and original phrase. Plans and forecasts are not facts.</li>
+    <li>Put half-open validity intervals on state relationships and single dates on events; an as-of query is then a filter.</li>
+    <li>Non-overlapping intervals are change, overlapping intervals on a functional relation are contradiction, and a precise date inside a coarse one is just precision.</li>
+    <li>Valid time is when a fact was true; transaction time is when you learned it. Bi-temporal graphs (Chapter 27) track both.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: claim extraction prompt and <code>extract_claims</code> configuration. <span class="venue">GitHub</span></li>
+  <li>Rasmussen et al. <a href="https://arxiv.org/abs/2501.13956">Zep: A Temporal Knowledge Graph Architecture for Agent Memory</a>. <span class="venue">arXiv 2501.13956, 2025</span></li>
+  <li>Zep. <a href="https://github.com/getzep/graphiti">Graphiti</a>: real-time, bi-temporal knowledge graphs for agents. <span class="venue">GitHub</span></li>
+  <li>Strötgen and Gertz. <a href="https://aclanthology.org/S10-1071/">HeidelTime: High Quality Rule-Based Extraction and Normalization of Temporal Expressions</a>. <span class="venue">SemEval, 2010</span></li>
+  <li>Allen. <a href="https://doi.org/10.1145/182.358434">Maintaining Knowledge about Temporal Intervals</a>. <span class="venue">Communications of the ACM, 1983</span></li>
+  <li>Scrapinghub. <a href="https://github.com/scrapinghub/dateparser">dateparser</a>: parsing human-readable dates with a relative base. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch10-timeline", function (el, cfg, api) {
+  const toM = function (s) { const p = String(s).split("-"); return (+p[0]) * 12 + ((+p[1] || 1) - 1); };
+  const fromM = function (m) { const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]; return names[m % 12] + " " + Math.floor(m / 12); };
+  const facts = cfg.facts || [];
+  const m0 = toM(cfg.start), m1 = toM(cfg.end) + 1;
+  const rowH = 23, top = 30, left = 250, right = 704;
+  const W = 720, H = top + facts.length * rowH + 16;
+  const x = function (m) { return left + (m - m0) / (m1 - m0) * (right - left); };
+  const { stage } = api.frame(el, cfg);
+  const svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Timeline" }, stage);
+  svg.style.touchAction = "none";
+  for (let y = Math.ceil(m0 / 12); y * 12 < m1; y++) {
+    const xx = x(y * 12);
+    api.svgEl("line", { x1: xx, y1: top - 6, x2: xx, y2: H - 10, class: "d-line faint" }, svg);
+    if (y % 2 === 1) { const t = api.svgEl("text", { x: xx, y: top - 12, "text-anchor": "middle", class: "d-text small" }, svg); t.textContent = y; }
+  }
+  const rows = facts.map(function (f, i) {
+    const cy = top + i * rowH + rowH / 2;
+    const g = api.svgEl("g", {}, svg);
+    const col = api.groupColor(f.group || 1);
+    const lab = api.svgEl("text", { x: left - 10, y: cy + 4, "text-anchor": "end", class: "d-text small" }, g);
+    lab.textContent = f.label;
+    let shape;
+    if (f.at) {
+      const cx = x(toM(f.at) + 0.5);
+      shape = api.svgEl("path", { d: "M" + cx + "," + (cy - 7) + " l7,7 l-7,7 l-7,-7 z" }, g);
+      shape.style.stroke = col; shape.style.strokeWidth = 2;
+    } else {
+      const a = x(toM(f.from)), b = f.to ? x(toM(f.to)) : right;
+      shape = api.svgEl("rect", { x: a, y: cy - 6, width: Math.max(3, b - a), height: 12, rx: 3 }, g);
+      shape.style.stroke = col; shape.style.strokeWidth = 1.5;
+      if (f.approx) shape.style.strokeDasharray = "4 3";
+      if (!f.to) { const arr = api.svgEl("path", { d: "M" + (right - 1) + "," + (cy - 6) + " l6,6 l-6,6 z" }, g); arr.style.fill = col; }
+    }
+    return { f: f, g: g, shape: shape, col: col, lab: lab };
+  });
+  const line = api.svgEl("line", { y1: top - 8, y2: H - 8, class: "d-line hot" }, svg);
+  const handle = api.svgEl("circle", { r: 7, cy: top - 8, tabindex: 0, style: "fill:var(--edge);cursor:ew-resize" }, svg);
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const bar = api.controls(el);
+  const sL = api.h("label", {}, bar, "As of ");
+  const slider = api.h("input", { type: "range", min: m0, max: m1 - 1, step: 1, value: toM(cfg.asOf || cfg.start) }, sL);
+  slider.style.width = "260px";
+  const sV = api.h("b", {}, sL);
+  api.h("span", { class: "grow" }, bar);
+  api.h("span", { class: "stepno" }, bar, "Interval [from, to): valid while from ≤ date < to");
+  function valid(f, m) { if (f.at) return toM(f.at) <= m; return toM(f.from) <= m && (!f.to || m < toM(f.to)); }
+  function render() {
+    const m = +slider.value;
+    sV.textContent = fromM(m);
+    const xx = x(m + 0.5);
+    line.setAttribute("x1", xx); line.setAttribute("x2", xx); handle.setAttribute("cx", xx);
+    let n = 0;
+    rows.forEach(function (r) {
+      const on = valid(r.f, m);
+      if (on && !r.f.at) n++;
+      r.shape.style.fill = on ? "color-mix(in srgb, " + r.col + " 60%, var(--panel))" : (r.f.at ? "var(--panel)" : "color-mix(in srgb, " + r.col + " 12%, var(--panel))");
+      r.g.style.opacity = on ? 1 : 0.45;
+      r.lab.style.fontWeight = on ? 650 : 400;
+    });
+    const who = function (role) {
+      const hs = facts.filter(function (f) { return f.role === role && f.holder && valid(f, m); }).map(function (f) { return f.holder; });
+      return hs.length ? hs.map(function (h) { return '<span class="viz-chip node">' + api.escapeHtml(h) + "</span>"; }).join(" ") : '<span class="viz-chip">nobody</span>';
+    };
+    const past = facts.filter(function (f) { return f.at && toM(f.at) <= m; });
+    const last = past.length ? past[past.length - 1].label + " (" + fromM(toM(past[past.length - 1].at)) + ")" : "none yet";
+    cap.innerHTML = "<strong>As of " + fromM(m) + ".</strong> CTO of Kestrel Labs: " + who("CTO") + " Sonar supplier: " + who("SUPPLIER") + "<br>" + n + " interval facts valid; most recent event: " + api.escapeHtml(last) + ".";
+  }
+  function fromClient(ev) {
+    const r = svg.getBoundingClientRect();
+    const px = (ev.clientX - r.left) / r.width * W;
+    const m = Math.round(m0 + (px - left) / (right - left) * (m1 - m0) - 0.5);
+    slider.value = Math.max(m0, Math.min(m1 - 1, m));
+    render();
+  }
+  let dragging = false;
+  svg.addEventListener("pointerdown", function (ev) { const r = svg.getBoundingClientRect(); if ((ev.clientX - r.left) / r.width * W < left) return; dragging = true; svg.setPointerCapture(ev.pointerId); fromClient(ev); });
+  svg.addEventListener("pointermove", function (ev) { if (dragging) fromClient(ev); });
+  svg.addEventListener("pointerup", function () { dragging = false; });
+  handle.addEventListener("keydown", function (ev) {
+    if (ev.key === "ArrowLeft") slider.value = +slider.value - 1; else if (ev.key === "ArrowRight") slider.value = +slider.value + 1; else return;
+    ev.preventDefault(); render();
+  });
+  slider.addEventListener("input", render);
+  render();
+});
+</script>
+</body>
+</html>

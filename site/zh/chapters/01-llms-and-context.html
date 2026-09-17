@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Why LLMs need retrieval | Graph RAG from Scratch</title>
+<meta name="description" content="What a language model knows, what it cannot know, why context windows cost money and attention, and how retrieve-then-generate grounds answers in your documents.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/01-llms-and-context.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/01-llms-and-context.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/01-llms-and-context.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="01-llms-and-context" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Why LLMs need retrieval</h1>
+  <p class="lede">A language model answers from what it absorbed during training, and it will answer confidently even when that is not enough. This chapter explains what a model can and cannot know, what it costs to paste your documents into its context, and why “retrieve, then generate” became the default way to ground answers in your own data.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain next-token prediction and why it produces fluent answers whether or not the model knows the facts</li>
+      <li>Distinguish parametric knowledge (in the weights) from non-parametric knowledge (in documents you supply)</li>
+      <li>Estimate the token count, cost and fit of a prompt, and decide when “stuff the whole corpus” stops working</li>
+      <li>Describe the lost-in-the-middle effect and what it implies for how you order context</li>
+      <li>Call an LLM through the <code>minigraphrag</code> interface and build a stuffed-context baseline with citations</li>
+      <li>Argue the trade-off between long-context prompting and retrieval-augmented generation for a given workload</li>
+    </ul>
+  </div>
+</header>
+
+<h2>What a language model does</h2>
+<p>Every chat model you will use in this course is, at its core, a function that takes a sequence of <strong>tokens</strong> and returns a probability distribution over the next token. A token is a chunk of text from a fixed vocabulary: often a whole common word, sometimes a word piece, a space plus a word, or punctuation. Generation is a loop: pick a token from the distribution, append it, run the function again.</p>
+
+<p>Formally, a model with parameters θ defines</p>
+<p style="text-align:center"><em>P</em>(<em>x</em><sub>t</sub> | <em>x</em><sub>1</sub>, …, <em>x</em><sub>t−1</sub>; θ)</p>
+<p>and the probability of a whole answer is the product of those per-step probabilities. Training adjusts θ so that real text from the training corpus gets high probability. Nothing in that objective says “only emit true statements”. It says “emit what text like this usually continues with”. Instruction tuning and preference training make the model more helpful and more willing to say “I don't know”, but they sit on top of the same next-token machinery.</p>
+
+<div class="viz" data-viz="ch01-next-token">
+<script type="application/json">
+{
+  "title": "Next-token prediction, one step at a time",
+  "subtitle": "Illustrative probabilities, not measured from a real model",
+  "prompt": "Q: Who is the CTO of Kestrel Labs? A:",
+  "steps": [
+    {"candidates": [[" The", 0.31], [" Kestrel", 0.22], [" Jonas", 0.14], [" I", 0.11], [" Dr", 0.09]], "chosen": " The",
+     "caption": "The model has never seen Kestrel Labs (it is fictional), yet the distribution is confident about <em>how</em> an answer starts. Fluency comes first."},
+    {"candidates": [[" CTO", 0.48], [" current", 0.19], [" chief", 0.13], [" company", 0.08], [" founder", 0.05]], "chosen": " CTO",
+     "caption": "Each token is conditioned on everything before it, including the tokens the model itself just produced."},
+    {"candidates": [[" of", 0.62], [" is", 0.21], [" at", 0.07], [",", 0.04], [" was", 0.03]], "chosen": " of",
+     "caption": "Grammar is easy to predict. The hard part is coming: a name."},
+    {"candidates": [[" Kestrel", 0.83], [" the", 0.07], [" this", 0.04], [" Kest", 0.02], [" that", 0.01]], "chosen": " Kestrel",
+     "caption": "Copying from the prompt is a strong pattern, so the company name comes back with high probability."},
+    {"candidates": [[" Labs", 0.91], [" Lab", 0.04], [" Labs,", 0.02], [" Technologies", 0.01], [" Inc", 0.01]], "chosen": " Labs",
+     "caption": "Still copying. Nothing so far required knowing a fact."},
+    {"candidates": [[" is", 0.88], [" was", 0.06], [" has", 0.02], [" remains", 0.01], [",", 0.01]], "chosen": " is",
+     "caption": "Now the model must name a person. Without the documents, there is no correct fact in its weights to draw on."},
+    {"candidates": [[" John", 0.12], [" Michael", 0.10], [" David", 0.09], [" not", 0.08], [" Sarah", 0.07]], "chosen": " John",
+     "caption": "A flat distribution over plausible names. Sampling still picks one, and the sentence continues fluently. This is what a hallucination looks like from the inside: low confidence at one step, hidden inside a confident-sounding sentence."}
+  ]
+}
+</script>
+</div>
+
+<p>The walk-through above is illustrative, but the shape is real: the tokens that carry facts are often the ones with the flattest distributions, and the output text does not show you that. The correct answer, from the corpus, is Priya Nair (since March 2026), with Jonas Vehl before her. No amount of sampling tricks can recover a fact the model never saw.</p>
+
+<h3>Parametric and non-parametric knowledge</h3>
+<p>Researchers call what a model absorbed during training its <strong>parametric knowledge</strong>: facts stored implicitly in the weights. Petroni et al. showed in 2019 that pretrained language models can answer many fill-in-the-blank factual queries without any retrieval, which is why chat models seem to “know” things. The same line of work also showed the limits: recall is uneven, rare facts are unreliable, and you cannot tell which facts the model has from the outside.</p>
+<p><strong>Non-parametric knowledge</strong> is knowledge you supply at inference time: documents, database rows, graph facts, pasted into the prompt. It can be updated by editing a file, it can be private, and it can be cited.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 270" role="img" aria-labelledby="pnp-title">
+      <title id="pnp-title">Parametric knowledge lives in model weights; non-parametric knowledge is supplied in the prompt; both meet at generation time</title>
+      <defs><marker id="pnp-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box comm" x="10" y="14" width="290" height="104" rx="8"/>
+      <text class="d-text bold" x="26" y="40">Parametric (in the weights)</text>
+      <text class="d-text small" x="26" y="62">Learned once, during training</text>
+      <text class="d-text small" x="26" y="80">Frozen at a knowledge cutoff</text>
+      <text class="d-text small" x="26" y="98">Cannot cite where a fact came from</text>
+      <rect class="d-box node" x="10" y="148" width="290" height="104" rx="8"/>
+      <text class="d-text bold" x="26" y="174">Non-parametric (in the prompt)</text>
+      <text class="d-text small" x="26" y="196">Retrieved per question from your data</text>
+      <text class="d-text small" x="26" y="214">Updated by editing documents</text>
+      <text class="d-text small" x="26" y="232">Each fact has a source id to cite</text>
+      <line class="d-line" x1="300" y1="66" x2="386" y2="118" marker-end="url(#pnp-arr)"/>
+      <line class="d-line hot" x1="300" y1="200" x2="386" y2="150" marker-end="url(#pnp-arr)"/>
+      <rect class="d-box edge" x="392" y="104" width="120" height="60" rx="8"/>
+      <text class="d-text bold" x="452" y="130" text-anchor="middle">LLM</text>
+      <text class="d-text small" x="452" y="150" text-anchor="middle">next-token loop</text>
+      <line class="d-line" x1="512" y1="134" x2="560" y2="134" marker-end="url(#pnp-arr)"/>
+      <rect class="d-box good" x="566" y="104" width="104" height="60" rx="8"/>
+      <text class="d-text bold" x="618" y="130" text-anchor="middle">Answer</text>
+      <text class="d-text small" x="618" y="150" text-anchor="middle">with citations</text>
+    </svg>
+  </div>
+  <figcaption>Two sources of knowledge meet in the prompt. Retrieval-augmented generation deliberately leans on the lower path for facts, and uses the upper path for language, reasoning and general background.</figcaption>
+</figure>
+
+<h3>Three things the weights cannot give you</h3>
+<ul>
+  <li><strong>Anything after the knowledge cutoff.</strong> Training data stops at some date. The Kestrel leadership change happened in March 2026; a model trained before that would, at best, name Jonas Vehl.</li>
+  <li><strong>Private data.</strong> Kestrel's confidential board memo about the sonar supply disruption was never on the public web. No model has it in its weights, however large.</li>
+  <li><strong>Provenance.</strong> Even when the weights hold a fact, the model cannot point to the document it came from. In most business settings an answer without a source is not usable.</li>
+</ul>
+
+<div class="callout example">
+  <span class="callout-title">The Kestrel test</span>
+  <p>The running example is fictional so that parametric knowledge cannot help. When a model answers a Kestrel question correctly in this course, it is because your retrieval put the evidence in front of it. When it answers incorrectly, you can trace the failure to what was or was not retrieved.</p>
+</div>
+
+<h2>Hallucination and grounding</h2>
+<p>A <strong>hallucination</strong> is generated content that is fluent but not supported by the source or by reality. The survey by Ji et al. distinguishes <em>intrinsic</em> hallucinations, which contradict the provided source, from <em>extrinsic</em> ones, which add claims the source cannot verify. Both matter for RAG:</p>
+<ul>
+  <li><strong>Extrinsic</strong>: the context mentions that Kestrel lost its sonar supplier, and the model adds “because Deepcast went bankrupt”. Nothing in the context says that. The real reason, Marlow Dynamics' acquisition of Deepcast, is in a different document.</li>
+  <li><strong>Intrinsic</strong>: the context says Brightwater Capital led a $12 million Series A, and the answer says $40 million, mixing it up with the Series B figure from another sentence.</li>
+</ul>
+<p><strong>Grounding</strong> means constraining the answer to evidence that is present in the prompt and making that link checkable. In practice it has three parts, and you will build all three:</p>
+<ol>
+  <li>Put the relevant evidence in the context (retrieval; most of this course).</li>
+  <li>Instruct the model to answer only from that evidence and to say when it does not know.</li>
+  <li>Require citations to evidence ids, so a person or a program can check each claim.</li>
+</ol>
+<p>Grounding reduces hallucination; it does not eliminate it. Models still misread context, merge two facts into one, or cite the wrong id. That is why evaluation (<a href="25-evaluation.html">Chapter 25</a>) checks faithfulness as well as correctness.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Missing evidence is the most common cause</span>
+  <p>When a RAG answer is wrong, the first question to ask is “was the evidence in the context?” If it was not, no prompt wording will fix it. Most of the failures in <a href="03-where-rag-breaks.html">Chapter 3</a> are of this kind, and they are what graph-based retrieval is designed to address.</p>
+</div>
+
+<h2>Context windows, tokens and cost</h2>
+<p>If the model needs evidence in its prompt, the obvious move is to paste in everything. Whether that works depends on three budgets: the <strong>context window</strong> (the maximum number of tokens a model can take as input plus output), <strong>money</strong> (providers bill per input and output token), and <strong>latency</strong> (the model must process every input token before producing the first output token).</p>
+
+<h3>Token math you can do in your head</h3>
+<p>For English prose with common tokenizers, a useful rule of thumb is that one token is about four characters, or about three quarters of a word. <code>minigraphrag</code> uses the same idea when <code>tiktoken</code> is not installed: it estimates 4 tokens for every 3 words.</p>
+<table>
+  <thead><tr><th>Item</th><th>Words</th><th>Approximate tokens</th></tr></thead>
+  <tbody>
+    <tr><td>A canonical question (“Who supplied Kestrel's sonar in 2024?”)</td><td>6</td><td>8</td></tr>
+    <tr><td>One Kestrel document (the Series B press release)</td><td>453</td><td>≈ 600</td></tr>
+    <tr><td>The whole Kestrel corpus (12 documents)</td><td>5,427</td><td>≈ 7,200</td></tr>
+    <tr><td>A 50,000-document company wiki at 600 tokens per page</td><td>≈ 22.5 million</td><td>≈ 30 million</td></tr>
+  </tbody>
+</table>
+<p>The Kestrel corpus fits comfortably in any modern context window. A company wiki does not fit in any of them: current long-context models accept inputs on the order of hundreds of thousands to about a million tokens, which is still 30 times too small for 30 million tokens.</p>
+
+<h3>What a prompt costs</h3>
+<p>Cost per question is roughly</p>
+<p style="text-align:center">cost = <em>T</em><sub>in</sub> × <em>p</em><sub>in</sub> + <em>T</em><sub>out</sub> × <em>p</em><sub>out</sub></p>
+<p>where <em>T</em> are token counts and <em>p</em> are per-token prices. Output tokens are usually priced several times higher than input tokens, but in RAG the input dominates because the context is long and the answer is short. Prices change constantly, so this course uses an illustrative input price of $3 per million tokens. Plug in your provider's current numbers.</p>
+<p>Stuffing the Kestrel corpus: 7,236 corpus tokens plus about 150 tokens of instructions and question gives about 7,390 input tokens per question. At 1,000 questions a day that is 7.39 million input tokens, about $22 a day. Retrieving five chunks of about 400 tokens each instead gives about 2,150 input tokens per question and about $6.45 a day. For a 12-document corpus both numbers are small. The gap is what grows: the stuffed prompt scales with the corpus, the retrieved prompt scales with <em>k</em>.</p>
+
+<div class="viz" data-viz="ch01-cost">
+<script type="application/json">
+{
+  "title": "Stuff everything or retrieve?",
+  "subtitle": "Drag the sliders; prices are illustrative",
+  "window": 1000000,
+  "retrieved": 2000,
+  "overhead": 150
+}
+</script>
+</div>
+
+<p>Two more costs do not show up on the invoice. <strong>Latency</strong>: the model processes the whole prompt before the first answer token, so time-to-first-token grows with prompt length. In a standard transformer, self-attention compares every token with every other token, so that prefill compute grows faster than linearly with length. <strong>Prompt caching</strong>, which most providers now offer, cuts the price and latency of a repeated prompt prefix. It helps when the same long corpus prefix is reused across many questions, and it does nothing when every question needs different documents.</p>
+
+<h3>Budgeting the window</h3>
+<p>Even when you retrieve, the context window is a shared budget. Instructions, conversation history, retrieved evidence, the question and room for the answer all compete for it. Every GraphRAG method in this course ends with a budgeting step that decides how many tokens each kind of evidence gets. <a href="14-local-search.html">Local search</a>, for example, splits its budget between text chunks, community reports and entity and relationship tables.</p>
+
+<div class="viz" data-viz="token-budget">
+<script type="application/json">
+{
+  "title": "An 8,000-token RAG prompt",
+  "total": 8000,
+  "parts": [
+    {"label": "Instructions", "share": 0.05},
+    {"label": "History", "share": 0.12},
+    {"label": "Evidence", "share": 0.6},
+    {"label": "Question", "share": 0.03},
+    {"label": "Answer room", "share": 0.2}
+  ],
+  "note": "Give evidence more room and something else must shrink. Leaving too little answer room truncates the output mid-sentence."
+}
+</script>
+</div>
+
+<h2>More context is not always better: lost in the middle</h2>
+<p>Suppose money were no object and your corpus fit in the window. Pasting everything in would still not reliably give the best answers. Liu et al. (“Lost in the Middle”, 2023) placed the one document that contained the answer at different positions among many distractor documents. Models did best when the relevant document was at the beginning or the end of the context, and noticeably worse when it sat in the middle, producing a U-shaped curve. Adding more distractor documents also tended to hurt.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="litm-title">
+      <title id="litm-title">Illustrative U-shaped curve: accuracy is highest when evidence is at the start or end of the context and lowest in the middle</title>
+      <line class="d-line" x1="80" y1="30" x2="80" y2="190"/>
+      <line class="d-line" x1="80" y1="190" x2="620" y2="190"/>
+      <path class="d-line hot" d="M100,62 C220,150 300,166 350,166 C400,166 500,150 600,82"/>
+      <circle class="d-node warm" cx="100" cy="62" r="6"/>
+      <circle class="d-node warm" cx="350" cy="166" r="6"/>
+      <circle class="d-node warm" cx="600" cy="82" r="6"/>
+      <text class="d-text small" x="112" y="56">evidence first: best</text>
+      <text class="d-text small" x="350" y="128" text-anchor="middle">evidence in the middle: worst</text>
+      <text class="d-text small" x="588" y="72" text-anchor="end">evidence last: good</text>
+      <text class="d-text small" x="70" y="40" text-anchor="end">higher</text>
+      <text class="d-text small" x="70" y="186" text-anchor="end">lower</text>
+      <text class="d-text small" x="24" y="115" transform="rotate(-90 24 115)" text-anchor="middle">answer accuracy</text>
+      <text class="d-text small" x="100" y="210" text-anchor="middle">start</text>
+      <text class="d-text small" x="600" y="210" text-anchor="middle">end</text>
+      <text class="d-text small" x="350" y="210" text-anchor="middle">position of the relevant document in the context</text>
+      <text class="d-text small" x="350" y="236" text-anchor="middle">Qualitative shape only. See Liu et al. for measured curves per model.</text>
+    </svg>
+  </div>
+  <figcaption>The shape reported by Liu et al.: evidence at the edges of a long context is used more reliably than evidence in the middle. How deep the dip is varies by model and has not been measured for every model you might use, so treat it as a risk to test for: fewer, better-ordered documents are the safer default.</figcaption>
+</figure>
+
+<p>Three practical consequences follow, and they recur throughout the course:</p>
+<ul>
+  <li><strong>Rank, then order.</strong> Put the strongest evidence first (or first and last), not in retrieval-index order.</li>
+  <li><strong>Precision matters.</strong> A retriever that returns the answer plus forty distractors can do worse than one that returns the answer plus four.</li>
+  <li><strong>Structure helps.</strong> Tables with ids, short summaries and explicit relationships, which GraphRAG produces, are easier for a model to use than a wall of raw chunks.</li>
+</ul>
+
+<div class="callout paper">
+  <span class="callout-title">Liu et al., Lost in the Middle (2023)</span>
+  <p>Using multi-document question answering and a synthetic key-value retrieval task, the authors found that performance was highest when relevant information appeared at the start or end of the input and degraded when it appeared in the middle, including for models built for long contexts. The effect motivates careful ordering and aggressive filtering of retrieved context.</p>
+</div>
+
+<h2>Retrieve, then generate</h2>
+<p>The pattern that fixes the knowledge problem without paying for the whole corpus on every question is <strong>retrieval-augmented generation</strong> (RAG). Lewis et al. introduced the name in 2020: a neural retriever (Dense Passage Retrieval over Wikipedia) selects passages for a question, and a sequence-to-sequence generator (BART) conditions on them to write the answer. They trained the retriever's query encoder and the generator together, and showed strong results on open-domain question answering and more specific, more factual generations than a comparable model without retrieval. The same year, REALM (Guu et al.) built retrieval into language model pre-training.</p>
+<p>Modern RAG systems rarely train anything end to end. They keep the idea and swap the parts: an off-the-shelf embedding model, a vector index, and a general-purpose LLM steered by a prompt. The loop is retrieve, augment, generate, with an optional check at the end.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "Retrieve, augment, generate",
+  "perRow": 3,
+  "stages": [
+    {"label": "Question", "detail": "“Who supplied Kestrel's sonar in 2024?” arrives from the user."},
+    {"label": "Retrieve", "detail": "Search an index built ahead of time over the corpus. Return the k most relevant pieces with their ids: for example the Deepcast supply agreement and the board memo."},
+    {"label": "Augment", "detail": "Assemble a prompt: instructions to answer only from the sources and cite them, the sources with their ids, then the question. Respect the token budget."},
+    {"label": "Generate", "detail": "The LLM writes the answer, citing source ids: “Deepcast supplied every sonar module from 2022 [Data: Sources (08_kestrel_board_memo_supply-000)].”"},
+    {"label": "Check", "detail": "Optional but valuable: verify that every cited id was in the context and that the answer does not assert facts the sources lack."}
+  ]
+}
+</script>
+</div>
+
+<p>What goes in the “Retrieve” box is the subject of the rest of this course. <a href="02-vector-rag.html">Chapter 2</a> builds the classic version: chunks, embeddings, nearest-neighbor search. <a href="03-where-rag-breaks.html">Chapter 3</a> shows the questions it cannot answer. Parts 2 and 3 replace the box with a knowledge graph, community summaries and graph traversal.</p>
+
+<h3>Calling an LLM through minigraphrag</h3>
+<p>Everything in <code>minigraphrag</code> talks to language models through one method. That is the whole interface:</p>
+
+<pre data-file="minigraphrag/llm.py"><code class="language-python">from typing import Protocol
+
+class LLM(Protocol):
+    def complete(self, prompt: str, system: str | None = None, json: bool = False) -&gt; str: ...</code></pre>
+
+<p>Any object with that method works: <code>OpenAICompatibleLLM</code> (OpenAI, Ollama, vLLM and other OpenAI-compatible servers), <code>AnthropicLLM</code>, <code>MockLLM</code> for offline runs, and <code>CachedLLM</code>, which wraps any of them with a disk cache. <code>get_llm</code> builds one from a short name and environment variables.</p>
+
+<pre data-file="examples/ch01_call_llm.py"><code class="language-python">import os
+from minigraphrag.llm import get_llm
+
+# "mock" runs offline. Set OPENAI_API_KEY and use "openai", ANTHROPIC_API_KEY and
+# "anthropic", or run Ollama locally and use "ollama" (OLLAMA_MODEL picks the model).
+llm = get_llm(os.getenv("LLM", "mock"), cache_dir=".cache/llm")
+
+closed_book = llm.complete(
+    "Who is the CTO of Kestrel Labs?",
+    system="Answer in one sentence. If you do not know, say so.",
+)
+print(closed_book)</code></pre>
+
+<p>With a real model, the closed-book answer should be some form of “I don't know”, or a made-up name. With <code>MockLLM</code> you will see <code>OK</code>: the mock recognizes each of the course's prompt templates by a marker sentence and returns a deterministic answer for it, and a free-form prompt matches none of them. That is intentional. The mock has no world knowledge to fall back on, so everything it says in later chapters comes from context you retrieved.</p>
+
+<h3>Counting tokens</h3>
+<pre data-file="examples/ch01_tokens.py"><code class="language-python">from minigraphrag.chunking import load_documents
+from minigraphrag.tokens import count_tokens
+
+docs = load_documents("data/corpus")                 # {doc_id: text}, 12 documents
+per_doc = {doc_id: count_tokens(text) for doc_id, text in docs.items()}
+total = sum(per_doc.values())
+
+for doc_id, n in sorted(per_doc.items(), key=lambda kv: -kv[1])[:3]:
+    print(f"{doc_id:40s} {n:5d}")
+print("corpus total:", total)                         # about 7,200 with the 4/3 estimate</code></pre>
+
+<p><code>count_tokens</code> uses <code>tiktoken</code>'s <code>cl100k_base</code> encoding when it is installed (<code>pip install -e ".[tokens]"</code>) and falls back to the 4-tokens-per-3-words estimate otherwise. Expect the two to differ by a few percent; the estimate exists for budgeting, and no budget in this course is tight enough for that to matter. Different providers use different tokenizers, so treat any count as an estimate and leave headroom.</p>
+
+<h3>A “stuff the whole corpus” baseline</h3>
+<p>Before building retrieval, build the thing retrieval must beat. The baseline below puts every document into the same grounded prompt that later search methods use, as a table of sources with ids, and refuses to run when the prompt would not fit.</p>
+
+<pre data-file="examples/ch01_stuffed_baseline.py"><code class="language-python">from minigraphrag.chunking import load_documents
+from minigraphrag.context import format_table
+from minigraphrag.llm import get_llm
+from minigraphrag.search.common import generate_answer
+from minigraphrag.tokens import count_tokens
+
+class ContextTooLarge(Exception):
+    pass
+
+def stuffed_answer(llm, docs: dict[str, str], question: str,
+                   max_context_tokens: int = 100_000, price_per_million: float = 3.0):
+    rows = [[doc_id, text] for doc_id, text in docs.items()]
+    context = format_table("Sources", ["id", "text"], rows)   # -----Sources----- / id|text / ...
+    n = count_tokens(context)
+    if n &gt; max_context_tokens:
+        raise ContextTooLarge(f"{n} tokens &gt; budget {max_context_tokens}; you need retrieval")
+    answer = generate_answer(llm, question, context)          # context goes in the system prompt
+    cost = n / 1_000_000 * price_per_million                  # input side only, illustrative price
+    return answer, n, cost
+
+docs = load_documents("data/corpus")
+llm = get_llm("mock")
+answer, n, cost = stuffed_answer(llm, docs, "Who supplied Kestrel's sonar in 2024?")
+print(f"{n} context tokens, about ${cost:.4f} per question")
+print(answer)</code></pre>
+
+<p><code>generate_answer</code> formats <code>LOCAL_SEARCH_SYSTEM_PROMPT</code> from <code>minigraphrag/prompts.py</code>. It tells the model to answer from the data tables, say when it does not know, and cite records as <code>[Data: Sources (id)]</code>. The mock answers by picking sentences that overlap the question and citing their rows, so the output is extractive but has the same citation format a real model will use.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Keep the baseline around</span>
+  <p>For a corpus this small, a strong model with the whole corpus in context is a hard baseline to beat on many questions. That is useful information, not an embarrassment. Every later chapter compares against it, and <a href="c1-minigraphrag.html">Capstone 1</a> asks you to show where GraphRAG wins and at what cost.</p>
+</div>
+
+<h2>Long context or retrieval?</h2>
+<p>Context windows grew dramatically between 2023 and 2026, and every increase prompted the question “is RAG dead?” The answer so far has been that the two are complementary. Xu et al. (2023) compared the approaches directly and found that a model with a 4K window plus simple retrieval could perform comparably to a version fine-tuned for a 16K window, and that retrieval also improved the long-context model. The trade-offs are practical:</p>
+
+<table>
+  <thead><tr><th>Concern</th><th>Stuff everything into a long context</th><th>Retrieve, then generate</th></tr></thead>
+  <tbody>
+    <tr><td>Corpus size</td><td>Must fit in the window; hard ceiling</td><td>Unbounded; the index grows, the prompt does not</td></tr>
+    <tr><td>Cost per question</td><td>Grows with the corpus (prompt caching helps for a fixed corpus)</td><td>Grows with <em>k</em> and chunk size</td></tr>
+    <tr><td>Latency</td><td>Long prefill on every uncached call</td><td>Retrieval step plus a short prompt</td></tr>
+    <tr><td>Recall</td><td>Everything is present, though the model may not use it (lost in the middle)</td><td>Only what the retriever finds; misses are silent</td></tr>
+    <tr><td>Cross-document reasoning</td><td>Possible in principle, since all documents are visible</td><td>Only across what was retrieved together</td></tr>
+    <tr><td>Freshness and access control</td><td>Rebuild the prompt; hard to filter per user</td><td>Update the index; filter results per user</td></tr>
+    <tr><td>Citations</td><td>Possible, with ids on every document</td><td>Natural: every retrieved piece has an id</td></tr>
+    <tr><td>Engineering effort</td><td>Minimal</td><td>Chunking, embeddings, index, tuning, evaluation</td></tr>
+  </tbody>
+</table>
+
+<p>A reasonable rule in 2026: if your corpus fits well within the window, changes rarely, serves few questions and does not need per-user filtering, try long context first and measure. Otherwise retrieve. Most real systems do both: retrieve to narrow down, then use a generous context for the survivors.</p>
+
+<div class="callout note">
+  <span class="callout-title">Where graphs come in</span>
+  <p>Retrieval's weakness sits in the row labeled “cross-document reasoning”. A retriever that scores chunks one at a time cannot see that the chunk about Deepcast's acquisition explains the chunk about Project Tern. GraphRAG keeps the retrieve-then-generate loop and changes what is indexed and retrieved: entities, relationships, paths and community summaries instead of isolated chunks.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 1.1 <span class="level">Warm-up</span></h4>
+  <p>By hand, using 4 tokens per 3 words and an input price of $3 per million tokens: (a) estimate the input tokens and daily input cost of answering 1,000 questions a day by stuffing the 5,427-word Kestrel corpus plus 150 tokens of instructions and question; (b) do the same for retrieving five chunks of 300 words each plus the same 150 tokens; (c) repeat (a) for a 50,000-document wiki with 600 tokens per document, and say whether it fits in a 1,000,000-token window.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) 5,427 × 4/3 = 7,236 tokens. Plus 150 gives 7,386 tokens per question. Per day: 7,386 × 1,000 = 7.386 million tokens, times $3 = <strong>$22.16 a day</strong>.</p>
+    <p>(b) Five chunks of 300 words = 1,500 words = 2,000 tokens. Plus 150 gives 2,150 tokens per question, 2.15 million a day, <strong>$6.45 a day</strong>. That is about 3.4 times cheaper.</p>
+    <p>(c) 50,000 × 600 = 30,000,000 tokens per question. It does not fit in a 1,000,000-token window: it is 30 times too large. Even if it did, one question would cost 30 × $3 = $90 in input alone, and 1,000 a day would cost $90,000. Retrieval (b) stays at $6.45 a day regardless of corpus size, as long as <em>k</em> and chunk size stay fixed.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 1.2 <span class="level">Core</span></h4>
+  <p>Answers that cite sources are only checkable if the citations are real. Write <code>check_citations(answer: str, context: str) -&gt; dict</code> that extracts every id cited as <code>[Data: Sources (a, b)]</code> in the answer, compares them to the ids present in the <code>Sources</code> table of the context, and returns the cited ids, the ids that do not exist in the context, and whether the answer cites anything at all. Test it on the output of the stuffed baseline.</p>
+  <details class="hint"><summary>Hint</summary><p><code>minigraphrag.context.parse_tables</code> turns the context back into <code>{"Sources": [{"id": ..., "text": ...}]}</code>. A single <code>[Data: ...]</code> block can cite several datasets separated by semicolons.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import re
+from minigraphrag.context import parse_tables
+
+CITE = re.compile(r"\[Data:([^\]]*)\]")
+DATASET = re.compile(r"(\w+)\s*\(([^)]*)\)")
+
+def check_citations(answer: str, context: str) -&gt; dict:
+    known = {row["id"] for row in parse_tables(context).get("Sources", [])}
+    cited = []
+    for block in CITE.findall(answer):
+        for dataset, ids in DATASET.findall(block):
+            if dataset != "Sources":
+                continue
+            cited += [i.strip() for i in ids.split(",") if i.strip() and i.strip() != "+more"]
+    return {
+        "cited": sorted(set(cited)),
+        "unknown": sorted(set(cited) - known),
+        "has_citations": bool(cited),
+    }
+
+# Tests
+ctx = "-----Sources-----\nid|text\n03_deepcast_supply_agreement|Deepcast signs...\n08_kestrel_board_memo_supply|Memo..."
+ok = "Deepcast supplied Kestrel. [Data: Sources (03_deepcast_supply_agreement, 08_kestrel_board_memo_supply)]"
+bad = "Deepcast supplied Kestrel. [Data: Sources (99_made_up)]"
+assert check_citations(ok, ctx)["unknown"] == []
+assert check_citations(bad, ctx)["unknown"] == ["99_made_up"]
+assert check_citations("No citations here.", ctx)["has_citations"] is False</code></pre>
+    <p>Microsoft GraphRAG's prompts let the model write <code>+more</code> when a claim has more sources than it lists; <code>minigraphrag</code>'s prompt does not ask for it, but the parser skips it so the checker works on either output. A check like this catches invented ids cheaply. It cannot tell whether a real cited source actually supports the claim; that needs an entailment check or an LLM judge (Chapter 25).</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 1.3 <span class="level">Core</span></h4>
+  <p>For each of the seven canonical questions in the running example, answer: (a) could a general-purpose model answer it closed-book? (b) would the stuffed baseline give it everything it needs? (c) what is the main risk even when the evidence is in the context?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <table>
+      <thead><tr><th>Question</th><th>(a) Closed-book</th><th>(b) Stuffed has the evidence</th><th>(c) Main risk with evidence present</th></tr></thead>
+      <tbody>
+        <tr><td>1. Why did Kestrel start Project Tern?</td><td>No, fictional and private</td><td>Yes (docs 07, 08, 09)</td><td>Stopping at “to reduce supplier dependence” without linking Marlow's acquisition, because the memo never names Marlow</td></tr>
+        <tr><td>2. Which investor's board member oversees the company whose drones detected the bleaching?</td><td>No</td><td>Yes (docs 06, 04, 02)</td><td>Three hops across documents; the research note says “Sentinel program”, not “Kestrel Labs”</td></tr>
+        <tr><td>3. What connects Priya Nair to Deepcast?</td><td>No</td><td>Yes (docs 05, 07, 09, 12)</td><td>Listing facts without the connecting chain; confusing “Priya worked at Marlow” with “Priya worked at Deepcast”</td></tr>
+        <tr><td>4. Main themes</td><td>No</td><td>Yes, all documents</td><td>Over-weighting whatever is first or last in the context; missing a theme buried in the middle</td></tr>
+        <tr><td>5. Risks Kestrel faces</td><td>No</td><td>Yes (docs 03, 07, 08, 12)</td><td>Echoing only the risks listed explicitly in the 2026 interview and missing the single-supplier analysis from 2022</td></tr>
+        <tr><td>6. Who is the CTO?</td><td>No</td><td>Yes (docs 01, 12)</td><td>Stale answer: “Jonas Vehl” appears as CTO in several older documents, “Priya Nair” in one newer one</td></tr>
+        <tr><td>7. Sonar supplier in 2024?</td><td>No</td><td>Yes (docs 03, 08)</td><td>Low: the answer is stated directly. The risk is date reasoning if the model latches onto “no longer available” from 2025</td></tr>
+      </tbody>
+    </table>
+    <p>The pattern: for a small corpus, stuffing solves the <em>presence</em> problem for every question, but not the <em>use</em> problem. Questions 1–3 need chains across documents, 4–5 need synthesis across all of them, and 6–7 need time awareness. Later chapters address those three problems with graphs, community summaries and temporal facts.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 1.4 <span class="level">Stretch</span></h4>
+  <p>Reproduce a small lost-in-the-middle experiment on Kestrel with a real model. Ask “Who is the CTO of Kestrel Labs as of April 2026?” with all 12 documents in context, moving document 12 (the only one with the answer) to each position 0–11 while keeping the others in a fixed order. Run each position several times and record accuracy. Then repeat with only three distractors. What do you expect, and what might make your results differ from the paper's?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import os
+from minigraphrag.chunking import load_documents
+from minigraphrag.context import format_table
+from minigraphrag.llm import get_llm
+from minigraphrag.search.common import generate_answer
+
+docs = load_documents("data/corpus")
+target_id = "12_interview_leadership_change_2026"
+others = [(d, t) for d, t in docs.items() if d != target_id]
+question = "Who is the CTO of Kestrel Labs as of April 2026? Answer with a name."
+llm = get_llm(os.getenv("LLM", "openai"))   # a real model; the mock cannot show position effects
+
+def run(distractors, trials=5):
+    results = {}
+    for pos in range(len(distractors) + 1):
+        ordered = distractors[:pos] + [(target_id, docs[target_id])] + distractors[pos:]
+        context = format_table("Sources", ["id", "text"], [list(p) for p in ordered])
+        hits = sum("priya" in generate_answer(llm, question, context).lower() for _ in range(trials))
+        results[pos] = hits / trials
+    return results
+
+print("11 distractors:", run(others))
+print(" 3 distractors:", run(others[:3]))</code></pre>
+    <p><code>CachedLLM</code> would return the same answer for every trial, so do not pass <code>cache_dir</code> here, and use a provider setting that allows some sampling variation, or vary the distractor order across trials instead.</p>
+    <p>What to expect: with only about 7,000 tokens of context, many 2026 models will answer correctly at every position, so you may see no dip at all. That is a legitimate finding: the effect in the paper appeared with longer contexts and more distractors, and newer models have been trained to reduce it. A more telling failure here is the <em>stale</em> answer “Jonas Vehl”, because documents 01, 03 and 08 call him CTO. If you see errors, check whether they cluster in middle positions (position effect) or are spread evenly (distractor effect). To make a dip more likely, pad the context with longer distractors, such as the corpus repeated with Kestrel names swapped out, until it reaches tens of thousands of tokens.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 1.5 <span class="level">Core</span></h4>
+  <p>A team runs an internal assistant over 4,000 policy documents averaging 1,500 tokens each. Documents change weekly, answers must respect each employee's access rights, and about 20,000 questions arrive per day. A colleague proposes a 1-million-token-context model with the whole corpus in the prompt. Write a short recommendation with numbers.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Corpus size: 4,000 × 1,500 = 6,000,000 tokens. It does not fit in a 1M-token window: it is six times too large, so the proposal fails before cost is even considered. Suppose you split it into six 1M-token shards and queried each: that is 6M input tokens per question, 120 billion tokens a day at 20,000 questions, $360,000 a day at $3 per million before any caching discount. Access control is the second blocker: one shared prompt cannot hide documents from users who are not allowed to see them, so you would need a different prompt per permission group, which breaks prompt caching.</p>
+    <p>Recommendation: retrieval with per-user filtering at query time. With, say, eight 500-token chunks plus 500 tokens of overhead, that is 4,500 tokens per question, 90 million tokens a day, about $270 a day at the same price. Weekly updates become index upserts. Keep a long-context model for the final generation step so you can afford generous <em>k</em> for hard questions.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">A model trained before March 2026 is asked “Who is the CTO of Kestrel Labs?” with no context. What is the best description of the problem?</p>
+  <ol>
+    <li>The context window is too small</li>
+    <li>The model is lost in the middle</li>
+    <li data-correct>The fact is non-parametric for this model: it is private, fictional and after its cutoff, so only supplied context can provide it</li>
+    <li>The tokenizer cannot represent the name “Priya Nair”</li>
+  </ol>
+  <div class="explain">No weights contain this fact. The only fix is to supply the evidence in the prompt, which is what retrieval does.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does next-token prediction produce confident-sounding hallucinations?</p>
+  <ol>
+    <li data-correct>The objective rewards plausible continuations; a flat distribution at a fact-bearing token still yields a fluent sentence once a token is sampled</li>
+    <li>Models are trained to avoid saying “I don't know”</li>
+    <li>Sampling temperature is always too high</li>
+    <li>Hallucinations only happen when the context is too long</li>
+  </ol>
+  <div class="explain">Uncertainty lives in individual token distributions, which the final text hides. Temperature 0 makes the choice deterministic, not correct.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">With a price of $3 per million input tokens, a prompt of 2,150 tokens and 1,000 questions a day, what is the daily input cost?</p>
+  <ol>
+    <li>$0.65</li>
+    <li>$2.15</li>
+    <li>$21.50</li>
+    <li data-correct>$6.45</li>
+  </ol>
+  <div class="explain">2,150 × 1,000 = 2.15 million tokens; 2.15 × $3 = $6.45.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What did Liu et al. find about where relevant information sits in a long context?</p>
+  <ol>
+    <li>Position does not matter for modern models</li>
+    <li>Models use information best when it is in the middle</li>
+    <li data-correct>Models tended to use it best at the beginning or end, and worse in the middle</li>
+    <li>Only the last document in the context is ever used</li>
+  </ol>
+  <div class="explain">The U-shaped curve motivates putting the best evidence first and keeping retrieved context short and precise.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In Lewis et al.'s original RAG, what were the two main components?</p>
+  <ol>
+    <li>A BM25 index and GPT-3</li>
+    <li data-correct>A dense passage retriever over Wikipedia and a BART sequence-to-sequence generator</li>
+    <li>A knowledge graph and a graph neural network</li>
+    <li>A long-context transformer and a reranker</li>
+  </ol>
+  <div class="explain">RAG combined DPR-style retrieval with BART generation and fine-tuned the query encoder and generator together.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which workload most favors pasting the whole corpus into a long context over building retrieval?</p>
+  <ol>
+    <li>Millions of documents, updated hourly, with per-user permissions</li>
+    <li>A support bot answering 100,000 questions a day over a product wiki</li>
+    <li>A multi-tenant SaaS search over each customer's files</li>
+    <li data-correct>A one-off analysis of a 40-page contract that fits easily in the window, asked a handful of questions</li>
+  </ol>
+  <div class="explain">Small, static, few questions, no access control: the engineering cost of retrieval is not worth it. Measure quality anyway.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>If context windows keep growing, will RAG become unnecessary?</summary>
+  <div><p>For small, static corpora it already is sometimes unnecessary. For large, changing or access-controlled data it is not, for three reasons that bigger windows do not remove: cost and latency grow with prompt length, models do not use every part of a long context equally well, and access control and freshness are easier to enforce in an index than in a giant prompt. What is changing is the balance: retrieval can afford to be less precise because the generator can read more.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why not fine-tune the model on our documents instead?</summary>
+  <div><p>Fine-tuning changes parametric knowledge, which brings back the problems retrieval avoids: you cannot cite where an answer came from, updating a fact means training again, deleting a document's influence is hard, and small fine-tunes are an unreliable way to inject new facts. Fine-tuning is better for style, format and task behavior, such as teaching a small model to follow your extraction format. Chapter 24 covers training with graphs.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does temperature 0 stop hallucinations?</summary>
+  <div><p>No. Temperature 0 makes the model pick the most likely token at each step, which makes outputs more reproducible. If the most likely name is wrong because the evidence is missing, you get the same wrong name every time. Use low temperature for reproducibility and caching, and grounding for correctness. The reference code's <code>AnthropicLLM</code> sends no temperature at all, because the Claude models it was written against reject sampling parameters; providers change these rules, so check the current API documentation rather than assuming the knob exists.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why does the course put the context in the system prompt and the question in the user message?</summary>
+  <div><p>It mirrors Microsoft GraphRAG's search prompts, which <code>minigraphrag</code> follows: the system prompt carries the role, rules and data tables, and the user turn carries only the question. That keeps the question easy to find for logging and caching. Putting everything in one user message also works. What matters is that instructions, evidence with ids, and the question are clearly separated.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why does the mock LLM answer “OK” to my own prompt?</summary>
+  <div><p><code>MockLLM</code> is not a language model. It recognizes the course's prompt templates by a marker sentence in each (listed in <code>prompts.MARKERS</code>) and runs a deterministic heuristic for that task, such as extracting entities with a gazetteer or picking overlapping sentences to answer from data tables. A free-form prompt matches no marker, so it returns <code>OK</code>. Use it to run pipelines offline and in tests; use a real model to judge answer quality.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a closed-book versus stuffed-context baseline report</h3>
+  <p>Measure the starting point every later chapter will be compared against, with a real model if you have access to one and the mock otherwise.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A script that answers all questions in <code>data/questions.jsonl</code> twice: closed-book, and with the whole corpus stuffed into the grounded prompt</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>For each run, the input tokens per question, total LLM calls and an estimated cost at a price you state</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The citation checker from Exercise 1.2 applied to every stuffed answer, with the count of answers that have no citations or invalid ids</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A hand-graded accuracy column (correct, partial, wrong) against the reference answers, broken down by question type</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A short paragraph naming the question types where the stuffed baseline struggles most, and your guess at why</span></li>
+  </ul>
+  <p><strong>Done when</strong> you have a table of accuracy and cost by question type that you would be willing to show a colleague as “the number to beat”.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>A language model predicts plausible next tokens. Fluency does not signal that a fact is known.</li>
+    <li>Parametric knowledge is frozen, public and uncitable. Private, recent and checkable facts must be supplied in the prompt.</li>
+    <li>Grounding means evidence in context, instructions to use only that evidence, and citations you can verify.</li>
+    <li>Stuffing the corpus works for small, static data; cost, latency and window limits grow with the corpus, while retrieval grows with <em>k</em>.</li>
+    <li>More context is not automatically better: models use evidence in the middle of long contexts less reliably, so rank, filter and order.</li>
+    <li>Retrieve-then-generate is the backbone of the course; GraphRAG changes what is retrieved, not the loop.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Lewis et al. <a href="https://arxiv.org/abs/2005.11401">Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</a>. <span class="venue">NeurIPS 2020; arXiv 2005.11401</span></li>
+  <li>Guu et al. <a href="https://arxiv.org/abs/2002.08909">REALM: Retrieval-Augmented Language Model Pre-Training</a>. <span class="venue">ICML 2020; arXiv 2002.08909</span></li>
+  <li>Petroni et al. <a href="https://arxiv.org/abs/1909.01066">Language Models as Knowledge Bases?</a> <span class="venue">EMNLP 2019; arXiv 1909.01066</span></li>
+  <li>Liu et al. <a href="https://arxiv.org/abs/2307.03172">Lost in the Middle: How Language Models Use Long Contexts</a>. <span class="venue">TACL 2024; arXiv 2307.03172</span></li>
+  <li>Ji et al. <a href="https://arxiv.org/abs/2202.03629">Survey of Hallucination in Natural Language Generation</a>. <span class="venue">ACM Computing Surveys 2023; arXiv 2202.03629</span></li>
+  <li>Xu et al. <a href="https://arxiv.org/abs/2310.03025">Retrieval meets Long Context Large Language Models</a>. <span class="venue">arXiv 2310.03025, 2023</span></li>
+  <li>Gao et al. <a href="https://arxiv.org/abs/2312.10997">Retrieval-Augmented Generation for Large Language Models: A Survey</a>. <span class="venue">arXiv 2312.10997, 2023</span></li>
+  <li>Karpukhin et al. <a href="https://arxiv.org/abs/2004.04906">Dense Passage Retrieval for Open-Domain Question Answering</a>. <span class="venue">EMNLP 2020; arXiv 2004.04906</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch01-next-token", function (el, cfg, api) {
+  const { stage } = api.frame(el, cfg);
+  const text = api.h("div", { class: "viz-text" }, stage);
+  const bars = api.h("div", { class: "viz-text" }, stage);
+  bars.style.borderTop = "1px solid var(--rule)";
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const steps = cfg.steps || [];
+  const show = (s) => api.escapeHtml(s).replace(/ /g, "&#9251;");
+  api.player(el, steps.length, function (i) {
+    let html = '<span style="color:var(--muted)">' + api.escapeHtml(cfg.prompt) + "</span>";
+    for (let k = 0; k <= i; k++) {
+      const hot = k === i;
+      html += '<span style="' + (hot ? "background:var(--edge-soft);outline:1px solid var(--edge);border-radius:3px;" : "") + '">' + api.escapeHtml(steps[k].chosen) + "</span>";
+    }
+    text.innerHTML = html;
+    bars.innerHTML = "";
+    const title = api.h("div", { class: "viz-sub" }, bars, "Candidates for token " + (i + 1) + " (top 5)");
+    title.style.marginBottom = "6px";
+    steps[i].candidates.forEach(function (c) {
+      const row = api.h("div", {}, bars);
+      row.style.cssText = "display:grid;grid-template-columns:7.5em 1fr 3.2em;gap:8px;align-items:center;margin:3px 0;font-family:var(--font-mono);font-size:.8rem";
+      const lab = api.h("span", {}, row); lab.innerHTML = show(c[0]);
+      const bg = api.h("div", {}, row); bg.style.cssText = "height:10px;background:var(--paper-2);border-radius:5px;overflow:hidden";
+      const fg = api.h("div", { class: "viz-bar" }, bg); fg.style.width = (c[1] * 100) + "%"; fg.style.height = "10px";
+      if (c[0] === steps[i].chosen) fg.style.background = "var(--edge)";
+      api.h("span", {}, row, api.fmt(c[1], 2));
+    });
+    cap.innerHTML = steps[i].caption || "";
+  }, { interval: 2600 });
+});
+
+GRFSViz.register("ch01-cost", function (el, cfg, api) {
+  const { stage } = api.frame(el, cfg);
+  const out = api.h("div", { class: "viz-text" }, stage);
+  const bar = api.controls(el);
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const sizes = [7200, 50000, 200000, 1000000, 5000000, 30000000];
+  function slider(label, attrs) {
+    const L = api.h("label", {}, bar, label + " ");
+    const s = api.h("input", Object.assign({ type: "range" }, attrs), L);
+    const v = api.h("b", {}, L);
+    s.addEventListener("input", render);
+    return { s, v };
+  }
+  const corpus = slider("Corpus", { min: 0, max: sizes.length - 1, step: 1, value: 0 });
+  const qpd = slider("Questions/day", { min: 100, max: 20000, step: 100, value: 1000 });
+  const price = slider("$ per M input", { min: 0.1, max: 15, step: 0.1, value: 3 });
+  const W = cfg.window || 1000000, R = cfg.retrieved || 2150, O = cfg.overhead || 150;
+  const money = (x) => "$" + (x >= 100 ? Math.round(x).toLocaleString() : x.toFixed(2));
+  function row(label, tokens, daily, maxDaily, color) {
+    const r = api.h("div", {}, out);
+    r.style.cssText = "margin:8px 0";
+    const t = api.h("div", {}, r);
+    t.innerHTML = "<strong>" + label + "</strong>: " + tokens.toLocaleString() + " input tokens per question, " + money(daily) + " per day";
+    const bg = api.h("div", {}, r); bg.style.cssText = "height:12px;background:var(--paper-2);border-radius:6px;overflow:hidden;margin-top:4px";
+    const fg = api.h("div", {}, bg); fg.style.cssText = "height:12px;border-radius:6px;background:" + color + ";width:" + Math.max(0.5, 100 * Math.sqrt(daily / maxDaily)) + "%";
+  }
+  function render() {
+    const C = sizes[+corpus.s.value], Q = +qpd.s.value, P = +price.s.value;
+    corpus.v.textContent = C.toLocaleString() + " tok";
+    qpd.v.textContent = Q.toLocaleString();
+    price.v.textContent = "$" + P.toFixed(1);
+    const stuffed = C + O, rag = R + O;
+    const dS = stuffed * Q * P / 1e6, dR = rag * Q * P / 1e6;
+    out.innerHTML = "";
+    row("Stuff everything", stuffed, dS, Math.max(dS, dR), stuffed > W ? "var(--bad)" : "var(--edge)");
+    row("Retrieve 5 chunks", rag, dR, Math.max(dS, dR), "var(--node)");
+    const fits = stuffed <= W;
+    cap.innerHTML = (fits ? "The stuffed prompt fits a " + W.toLocaleString() + "-token window." : "<strong>The stuffed prompt does not fit</strong> a " + W.toLocaleString() + "-token window, so this option is not available at any price.") +
+      " Retrieval is " + (stuffed / rag).toFixed(1) + "&times; cheaper per question. Bar length uses a square-root scale so both stay visible. The first setting is the Kestrel corpus.";
+  }
+  render();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Text units and document structure | Graph RAG from Scratch</title>
+<meta name="description" content="How to cut documents into text units for graph extraction: fixed windows with overlap, sentence and structure-aware splitting, stable provenance ids, document metadata and the cost math of chunk size.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/07-chunking-text-units.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="07-chunking-text-units" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Text units and document structure</h1>
+  <p class="lede">Every entity, relationship and citation in a GraphRAG index points back to a text unit, so the way you cut documents decides what the extractor can see, what the index costs, and whether re-indexing is repeatable. This chapter builds the chunking layer of <code>minigraphrag</code> and the provenance and metadata that ride along with it.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain why chunking for LLM extraction has different goals from chunking for vector search</li>
+      <li>Compute the number of chunks, duplicated tokens and extraction calls for a given size, overlap and gleaning setting</li>
+      <li>Use <code>chunk_fixed</code>, <code>chunk_by_sentences</code> and <code>chunk_documents</code>, and add structure-aware splitting on markdown headings</li>
+      <li>Design provenance ids that stay stable across re-indexing, and reason about what breaks them</li>
+      <li>Carry document metadata such as title, date and section into every unit's extraction prompt</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why chunking for extraction is different</h2>
+<p>You chunked documents in <a href="02-vector-rag.html">Chapter 2</a> for vector search. There, a chunk is a <em>retrieval target</em>: it gets one embedding, and the goal is that a question's embedding lands near the chunk that answers it. Chunks that mix topics blur their embeddings, so vector RAG prefers small, focused chunks.</p>
+<p>In GraphRAG the chunk has a second, more expensive job: it is the <em>input to an extraction call</em> (<a href="08-entity-relation-extraction.html">Chapter 8</a>). The LLM reads the text unit once and writes down every entity and relationship it can find. That changes what “good” means:</p>
+<table>
+  <thead><tr><th>Concern</th><th>Chunking for vector search</th><th>Chunking for graph extraction</th></tr></thead>
+  <tbody>
+    <tr><td>Unit's role</td><td>A retrieval target with one embedding</td><td>An LLM input that produces many records, and later a citation</td></tr>
+    <tr><td>Main failure</td><td>Diluted embedding: the chunk is about several things</td><td>Missed entities in long inputs; relationships split across a boundary; pronouns without antecedents</td></tr>
+    <tr><td>Size pressure</td><td>Small enough to be topically focused</td><td>Small enough for high recall, large enough to keep both ends of a relationship together</td></tr>
+    <tr><td>Cost per unit</td><td>One embedding, cheap</td><td>One or more LLM calls with long structured output</td></tr>
+    <tr><td>Context outside the chunk</td><td>Rarely needed at indexing time</td><td>Needed for title, date and section references such as “the company” and “last month”</td></tr>
+    <tr><td>Identity</td><td>Nice to have</td><td>Required: every entity and edge stores the ids of units it came from</td></tr>
+  </tbody>
+</table>
+<p>Here is the tension in one sentence from the Kestrel board memo (document 08): <em>“The notice follows Deepcast's change of ownership last month; the new owner intends to reserve its production for internal programs.”</em> The relationship “Deepcast stopped supplying Kestrel because of its new owner” needs the previous sentence (which says Deepcast will not renew <em>our</em> supply agreement), the memo's author (Kestrel's CEO) and its date (14 May 2025, so “last month” is April 2025). A chunk boundary in the wrong place, or a chunk stripped of its document header, loses the edge.</p>
+
+<h3>The chunk size and recall trade-off</h3>
+<p>Two forces pull in opposite directions.</p>
+<ul>
+  <li><strong>Smaller units raise recall.</strong> LLMs asked to list everything in a long passage tend to stop early and skip facts, especially toward the end. Each extra unit is another fresh look at the text.</li>
+  <li><strong>Larger units keep relationships together and cost less.</strong> A relationship can only be extracted if both entities and the sentence connecting them are in the same unit. Fewer units also means fewer calls and fewer repeated prompt tokens.</li>
+</ul>
+
+<div class="callout paper">
+  <span class="callout-title">Edge et al., From Local to Global (2024)</span>
+  <p>The GraphRAG paper examined this trade-off directly. On HotPotQA, GPT-4 extracted almost twice as many entity references from 600-token chunks as from 2400-token chunks in a single pass (Appendix A.2 of the paper), and the extra self-reflection passes the paper calls gleaning let the larger chunks catch up. Smaller chunks and gleaning are two ways to buy the same recall, and both cost LLM calls. The paper does not give a universal best size; you measure it on your corpus (Exercise 8.3 does exactly that).</p>
+</div>
+
+<p>Recall is not the only quality signal. Very small units produce many duplicate mentions that entity resolution must merge (<a href="09-entity-resolution.html">Chapter 9</a>), and they give each extraction so little context that descriptions become thin. In practice, a few hundred to about a thousand tokens is the common range for extraction, and <code>minigraphrag</code>'s default, 300 words with 50 words of overlap (roughly 400 tokens), sits at the small end because the Kestrel documents are short and fact-dense.</p>
+
+<h2>Fixed-size chunking with overlap</h2>
+<p>The simplest chunker slides a window of <em>S</em> units over the text and advances by the <strong>stride</strong> <em>S − O</em>, where <em>O</em> is the overlap. Consecutive windows share exactly <em>O</em> units, so a fact that straddles one boundary is fully contained in at least one window, as long as it is no longer than <em>O</em>.</p>
+<p><code>minigraphrag</code> measures windows in whitespace-delimited <em>words</em>, not tokenizer tokens. Words keep the code dependency-free and make <code>start</code> and <code>end</code> exact character offsets into the original document. Each unit still records its token count via <code>count_tokens</code>, which uses tiktoken when installed and otherwise estimates 4 tokens per 3 words. Microsoft GraphRAG counts in tokenizer tokens; the math is identical.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="win-title">
+      <title id="win-title">Sliding windows of size S with overlap O over a document of N words: windows start every S minus O words and the last window is cut short at the end of the document</title>
+      <defs>
+        <marker id="ch7-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box" x="40" y="30" width="600" height="26" rx="4"/>
+      <text class="d-text small" x="340" y="48" text-anchor="middle">document: N = 455 words (doc 07, the Marlow acquisition article)</text>
+      <text class="d-text small" x="40" y="22">word 0</text>
+      <text class="d-text small" x="640" y="22" text-anchor="end">word 455</text>
+
+      <rect class="d-box node" x="40" y="80" width="396" height="30" rx="4"/>
+      <text class="d-text bold" x="60" y="100">unit 000: words 0–299</text>
+      <rect class="d-box edge" x="370" y="124" width="270" height="30" rx="4"/>
+      <text class="d-text bold" x="450" y="144">unit 001: words 250–454</text>
+      <rect class="d-area" x="370" y="74" width="66" height="86" rx="4"/>
+      <text class="d-text small" x="403" y="176" text-anchor="middle">overlap O = 50</text>
+
+      <line class="d-line" x1="40" y1="196" x2="368" y2="196" marker-end="url(#ch7-arr)"/>
+      <text class="d-text small" x="204" y="214" text-anchor="middle">stride S − O = 250 words</text>
+      <line class="d-line" x1="40" y1="232" x2="434" y2="232" marker-end="url(#ch7-arr)"/>
+      <text class="d-text small" x="460" y="236">size S = 300 words</text>
+      <text class="d-text small" x="610" y="194" text-anchor="end">last unit is shorter:</text>
+      <text class="d-text small" x="610" y="208" text-anchor="end">205 words</text>
+    </svg>
+  </div>
+  <figcaption><code>chunk_fixed(text, size=300, overlap=50)</code> on a 455-word article. The second window reaches the end of the document, so the loop stops there. Word ranges are drawn to scale.</figcaption>
+</figure>
+
+<h3>How many chunks?</h3>
+<p>For a document of <em>N</em> words, window size <em>S</em> and overlap <em>O</em> (with <em>O &lt; S</em>), windows start at 0, <em>S − O</em>, <em>2(S − O)</em>, and so on, and the chunker stops at the first window that reaches the end. That window starts at <em>k(S − O)</em> with <em>k(S − O) + S ≥ N</em>, so:</p>
+<p style="text-align:center"><em>chunks(N) = max(1, ⌈(N − O) / (S − O)⌉)</em>   for <em>N &gt; 0</em></p>
+<p>For doc 07 with <em>S = 300</em>, <em>O = 50</em>: <em>⌈405 / 250⌉ = ⌈1.62⌉ = 2</em>. With <em>S = 100</em>, <em>O = 20</em>: <em>⌈435 / 80⌉ = ⌈5.44⌉ = 6</em>.</p>
+<p>Two consequences are easy to miss:</p>
+<ul>
+  <li><strong>Chunking is per document.</strong> The Kestrel corpus has 5,427 words. Treated as one long text, it would give <em>⌈5377 / 250⌉ = 22</em> chunks. Chunked per document, as <code>chunk_documents</code> does, every one of the 12 documents (all between 395 and 492 words) yields 2 chunks, so 24. Never let a window cross a document boundary: a unit that mixes the end of a press release with the start of council minutes invents co-occurrences.</li>
+  <li><strong>Overlap multiplies tokens.</strong> Roughly <em>O / S</em> of every full window is repeated text, so you pay for it twice in extraction. On Kestrel at 300/50, the 24 units total 8,039 estimated tokens against 7,241 for the documents themselves, 11% more. At 100/20 it is 8,824, or 22% more. Overlap also means the same relationship is extracted twice, which resolution must merge.</li>
+</ul>
+
+<p>Try it on a passage from the board memo. Watch where boundaries fall relative to “the new owner” and the bullet list, and how much text overlap duplicates.</p>
+
+<div class="viz" data-viz="chunker">
+<script type="application/json">
+{
+  "title": "Fixed windows over the board memo",
+  "subtitle": "Document 08, sections 1 and 2 (192 words)",
+  "text": "On 2 May we received formal notice that Deepcast will not renew our supply agreement and will stop accepting new orders from outside customers at the end of June. Deepcast has supplied every sonar module in our fleet since 2022. The notice follows Deepcast's change of ownership last month; the new owner intends to reserve its production for internal programs. We will receive the units already on order, but after June we have no source for new sonar modules. Why it matters. Every Sentinel drone depends on these modules. Our current inventory covers roughly nine months of normal operations, including replacements for units lost or damaged at sea. That means: Project Sentinel operations on Halden Reef are secure through early 2026, but not beyond. We cannot grow the Sentinel fleet for new customers without a new sonar source. Our pipeline of monitoring contracts, several of which depend on upcoming regulation, is at risk if we cannot promise delivery. I want to be direct: this is the most serious operational risk Kestrel Labs has faced. Relying on a single supplier was a reasonable choice in 2022. It is not a reasonable choice now.",
+  "size": 40,
+  "overlap": 8,
+  "note": "At 40 words, “the new owner” lands in a different unit from “will not renew our supply agreement”, and neither unit says who “we” are. Raise the size until the first two sentences share a unit, then notice that no size fixes the missing author: that needs document metadata."
+}
+</script>
+</div>
+
+<h3>The implementation</h3>
+<pre data-file="minigraphrag/chunking.py"><code class="language-python">@dataclass
+class TextUnit:
+    """A chunk of a source document; the unit of extraction and of citation."""
+
+    id: str
+    doc_id: str
+    text: str
+    n_tokens: int
+    start: int  # character offset (inclusive) in the document
+    end: int  # character offset (exclusive)
+
+    def to_dict(self) -&gt; dict:
+        return asdict(self)
+
+
+def chunk_fixed(text: str, size: int = 300, overlap: int = 50, doc_id: str = "doc") -&gt; list[TextUnit]:
+    """Sliding window of `size` words that advances by `size - overlap` words.
+
+    With stride = size - overlap, consecutive chunks share exactly `overlap`
+    words, and a document of N words yields ceil((N - overlap) / stride) chunks.
+    """
+    if overlap &gt;= size:
+        raise ValueError("overlap must be smaller than size")
+    spans = [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
+    if not spans:
+        return []
+    stride = size - overlap
+    units: list[TextUnit] = []
+    for i, first in enumerate(range(0, len(spans), stride)):
+        window = spans[first : first + size]
+        start, end = window[0][0], window[-1][1]
+        piece = text[start:end]
+        units.append(TextUnit(f"{doc_id}-{i:03d}", doc_id, piece, count_tokens(piece), start, end))
+        if first + size &gt;= len(spans):  # this window reached the end of the document
+            break
+    return units</code></pre>
+<p>Three details are worth copying into any chunker you write:</p>
+<ul>
+  <li><strong>Offsets as well as text.</strong> <code>re.finditer(r"\S+")</code> records where each word starts and ends, so <code>text[unit.start:unit.end] == unit.text</code> always holds. Citations can highlight the exact span in the source, and ids can be derived from positions.</li>
+  <li><strong>The early break.</strong> Without <code>if first + size &gt;= len(spans): break</code>, the loop would emit extra trailing windows that are strict subsets of the last full one: pure duplicate cost.</li>
+  <li><strong>The guard.</strong> <code>overlap &gt;= size</code> would make the stride zero or negative, an infinite loop or a crash.</li>
+</ul>
+<p>Running it on doc 07 shows the weakness of fixed windows: unit <code>07_marlow_acquires_deepcast-000</code> ends with “…defense contractors, which have been snapping”, cut mid-sentence. The overlap rescues that sentence in unit 001, but the extractor reading unit 000 sees a fragment and may invent something to complete it.</p>
+
+<h2>Respecting sentences and structure</h2>
+
+<h3>Sentence-aware packing</h3>
+<p>The fix for mid-sentence cuts is to split the text into sentences first, then <em>pack</em> whole sentences into units up to a token budget. Overlap is measured in sentences instead of words.</p>
+<pre data-file="minigraphrag/chunking.py"><code class="language-python">_ABBREVIATIONS = ("Dr.", "Mr.", "Mrs.", "Ms.", "Prof.", "St.", "vs.", "e.g.", "i.e.", "Inc.")
+
+
+def split_sentences(text: str) -&gt; list[tuple[int, int]]:
+    """Return (start, end) character spans of sentences, also breaking at newlines.
+
+    Deliberately simple: split after . ! ? followed by whitespace, except after
+    common abbreviations, so "Dr. Mira Okafor" stays in one sentence.
+    """
+    spans, start = [], 0
+    for m in re.finditer(r"[.!?]+(?=\s)|\n", text):
+        end = m.end()
+        if m.group() != "\n" and text[:end].endswith(_ABBREVIATIONS):
+            continue
+        if text[start:end].strip():
+            spans.append((start, end))
+        start = end
+    if text[start:].strip():
+        spans.append((start, len(text)))
+    return spans
+
+
+def chunk_by_sentences(
+    text: str, max_tokens: int = 300, overlap_sentences: int = 1, doc_id: str = "doc"
+) -&gt; list[TextUnit]:
+    """Pack whole sentences into chunks of at most `max_tokens`."""
+    sents = split_sentences(text)
+    units: list[TextUnit] = []
+    i = 0
+    while i &lt; len(sents):
+        j, tokens = i, 0
+        while j &lt; len(sents):
+            t = count_tokens(text[sents[j][0] : sents[j][1]])
+            if j &gt; i and tokens + t &gt; max_tokens:
+                break
+            tokens += t
+            j += 1
+        start, end = sents[i][0], sents[j - 1][1]
+        piece = text[start:end].strip()
+        units.append(TextUnit(f"{doc_id}-{len(units):03d}", doc_id, piece, count_tokens(piece), start, end))
+        if j &gt;= len(sents):
+            break
+        i = max(i + 1, j - overlap_sentences)
+    return units</code></pre>
+<p>Read the packing loop carefully, because each line encodes a decision:</p>
+<ul>
+  <li><code>if j &gt; i and tokens + t &gt; max_tokens</code>: a unit always takes at least one sentence, even if that sentence alone exceeds the budget. Otherwise a single 400-token sentence would loop forever. The budget is therefore a soft limit.</li>
+  <li><code>i = max(i + 1, j - overlap_sentences)</code>: the next unit starts <code>overlap_sentences</code> back from where this one ended, but always makes progress by at least one sentence.</li>
+  <li>The text is stripped, but <code>start</code> and <code>end</code> keep the sentence spans' exact boundaries, which may include a leading space or newline. Use the offsets for highlighting and the text for prompts.</li>
+</ul>
+<p>On doc 07 with <code>max_tokens=150</code>, this produces 5 units of 110 to 147 tokens, each ending at a sentence boundary. Across the corpus, <code>chunk_documents(docs, 150, method="sentences")</code> gives 65 units ranging from 31 to 148 tokens: the uneven sizes are the price of clean boundaries. For this method, <code>chunk_documents</code> passes <code>size</code> as <code>max_tokens</code>, so the same number means words for fixed chunking and tokens for sentence chunking.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Sentence splitting is harder than it looks</span>
+  <p>The simple splitter handles “Dr. Mira Okafor” through its abbreviation list, but it still splits the doc 07 dateline “Maritime Industry Journal, Deals. 17 April 2025.” into two pieces, and it would split “U.S. Navy” or “Kestrel Labs Inc. and Marlow” wherever the abbreviation is not listed. For extraction this is usually harmless, because packing puts the pieces back in the same unit. For languages other than English or for legal and scientific text, use a trained splitter such as spaCy's or NLTK's Punkt, and keep the same packing loop.</p>
+</div>
+
+<h3>Structure-aware splitting</h3>
+<p>Documents are not flat streams of sentences. The Kestrel corpus is markdown: the board memo has numbered sections (“1. What happened”, “3. Options considered”), the Project Tern blog post has a bullet list of technical goals and a numbered timeline, and the Series A press release has a key-value list (“Amount: $12 million”, “Lead investor: Brightwater Capital”). Authors put boundaries there on purpose. A structure-aware chunker uses them:</p>
+<ol>
+  <li><strong>Never cross a section boundary.</strong> Split on headings first, so a unit never mixes “Options considered” with “Recommendation”.</li>
+  <li><strong>Keep small sections whole.</strong> If a section fits the budget, it is one unit, however short.</li>
+  <li><strong>Pack long sections by sentence.</strong> Within a long section, fall back to sentence packing.</li>
+  <li><strong>Keep blocks intact.</strong> A list item or table row is a line; the sentence splitter breaks at newlines, so packing keeps items whole. Tables need more: when a table is split, repeat its header row in every unit, or the extractor sees rows of numbers without column names.</li>
+  <li><strong>Remember the heading path.</strong> Store “Memo to the Board &gt; 3. Options considered” as metadata for the unit; it is often the only place the topic is named.</li>
+</ol>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="struct-title">
+      <title id="struct-title">The board memo split two ways: fixed windows that cut across section boundaries, and structure-aware units aligned with sections, with the long section two split into two sentence-packed units</title>
+      <text class="d-text bold" x="16" y="22">Board memo (doc 08)</text>
+      <rect class="d-box" x="16" y="34" width="190" height="30" rx="4"/>
+      <text class="d-text small" x="26" y="53">Header: From, To, Date, Subject</text>
+      <rect class="d-box" x="16" y="68" width="190" height="34" rx="4"/>
+      <text class="d-text small" x="26" y="89">## 1. What happened</text>
+      <rect class="d-box" x="16" y="106" width="190" height="52" rx="4"/>
+      <text class="d-text small" x="26" y="128">## 2. Why it matters</text>
+      <text class="d-text small" x="26" y="146">(paragraph + 3-item list)</text>
+      <rect class="d-box" x="16" y="162" width="190" height="44" rx="4"/>
+      <text class="d-text small" x="26" y="188">## 3. Options considered</text>
+      <rect class="d-box" x="16" y="210" width="190" height="40" rx="4"/>
+      <text class="d-text small" x="26" y="234">## 4. Recommendation</text>
+      <rect class="d-box" x="16" y="254" width="190" height="30" rx="4"/>
+      <text class="d-text small" x="26" y="273">## 5. Decision requested</text>
+
+      <text class="d-text bold" x="250" y="22">Fixed 300/50 words</text>
+      <rect class="d-box node" x="250" y="34" width="150" height="155" rx="4"/>
+      <text class="d-text small" x="262" y="56">unit 000</text>
+      <text class="d-text small" x="262" y="74">header … options</text>
+      <rect class="d-box edge" x="270" y="168" width="150" height="116" rx="4"/>
+      <text class="d-text small" x="282" y="236">unit 001</text>
+      <text class="d-text small" x="282" y="254">options … end</text>
+      <text class="d-text small" x="250" y="298">both cuts fall inside section 3</text>
+
+      <text class="d-text bold" x="460" y="22">Structure-aware, 150 tokens</text>
+      <rect class="d-box node" x="460" y="34" width="200" height="30" rx="4"/>
+      <text class="d-text small" x="472" y="53">000 header (50 tokens)</text>
+      <rect class="d-box node" x="460" y="68" width="200" height="34" rx="4"/>
+      <text class="d-text small" x="472" y="89">001 §1 (111 tokens)</text>
+      <rect class="d-box node" x="460" y="106" width="200" height="34" rx="4"/>
+      <text class="d-text small" x="472" y="127">002 §2 part 1 (134 tokens)</text>
+      <rect class="d-box node" x="460" y="132" width="200" height="26" rx="4"/>
+      <text class="d-text small" x="472" y="150">003 §2 part 2 (46 tokens)</text>
+      <rect class="d-box node" x="460" y="162" width="200" height="44" rx="4"/>
+      <text class="d-text small" x="472" y="188">004 §3 (134 tokens)</text>
+      <rect class="d-box node" x="460" y="210" width="200" height="40" rx="4"/>
+      <text class="d-text small" x="472" y="234">005 §4 (119 tokens)</text>
+      <rect class="d-box node" x="460" y="254" width="200" height="30" rx="4"/>
+      <text class="d-text small" x="472" y="273">006 §5 (64 tokens)</text>
+    </svg>
+  </div>
+  <figcaption>Fixed windows ignore the memo's structure; unit 000 stops mid-sentence in option B (“…signal-processing boards. Jonas”) and unit 001 starts inside option A. The structure-aware chunker below aligns units with sections and splits only section 2, which is over budget, repeating one sentence of overlap between its two parts. Token counts are the package's word-based estimates.</figcaption>
+</figure>
+
+<p><code>minigraphrag</code> does not ship a markdown chunker, so here is one built on its pieces. It returns ordinary <code>TextUnit</code>s with document-level offsets, plus the heading path for each.</p>
+<pre data-file="examples/ch07_structure.py"><code class="language-python">import re
+from dataclasses import replace
+
+from minigraphrag.chunking import TextUnit, chunk_by_sentences
+from minigraphrag.tokens import count_tokens
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
+
+
+def split_markdown_sections(text: str) -&gt; list[tuple[list[str], int, int]]:
+    """Return (heading_path, start, end) for each section of a markdown document."""
+    marks = [(m.start(), len(m.group(1)), m.group(2)) for m in HEADING_RE.finditer(text)]
+    if not marks or marks[0][0] &gt; 0:
+        marks.insert(0, (0, 0, ""))                      # text before the first heading
+    sections, path = [], []
+    for i, (start, level, title) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 &lt; len(marks) else len(text)
+        if level:
+            path = path[: level - 1] + [title]           # a level-2 heading replaces the old level-2 title
+        if text[start:end].strip():
+            sections.append((list(path), start, end))
+    return sections
+
+
+def chunk_markdown(text: str, doc_id: str, max_tokens: int = 300) -&gt; list[tuple[TextUnit, list[str]]]:
+    """Never cross a section boundary; pack sentences within long sections."""
+    out = []
+    for path, s_start, s_end in split_markdown_sections(text):
+        section = text[s_start:s_end]
+        if count_tokens(section) &lt;= max_tokens:
+            pieces = [TextUnit("", doc_id, section.strip(), count_tokens(section.strip()), s_start, s_end)]
+        else:
+            pieces = [replace(u, start=u.start + s_start, end=u.end + s_start)   # section offsets -&gt; document offsets
+                      for u in chunk_by_sentences(section, max_tokens, overlap_sentences=1, doc_id=doc_id)]
+        for u in pieces:
+            out.append((replace(u, id=f"{doc_id}-{len(out):03d}"), path))
+    return out</code></pre>
+<p>On the memo with <code>max_tokens=150</code> it yields the seven units in the diagram. Over the whole corpus at 300 tokens it yields 54 units, compared with 24 fixed windows: many Kestrel sections are short, and keeping them separate multiplies calls. A common refinement is to <em>merge</em> adjacent small sections under the same parent until the budget is reached. Exercise 7.3 puts a price on the difference.</p>
+
+<h3>Semantic chunking</h3>
+<p><strong>Semantic chunking</strong> puts boundaries where the topic changes, detected from embeddings rather than markup. The usual recipe: embed each sentence, compute the cosine similarity between each sentence and the next (or between sliding groups of sentences), and cut where similarity drops sharply, for example below a low percentile of all adjacent similarities. Then pack the resulting segments to the size budget.</p>
+<p>It helps with long unstructured text, such as interview transcripts like the Kestrel podcast in doc 12, where one speaker moves from the Deepcast shock to the new CTO without a heading. The costs: an embedding per sentence, a threshold to tune per corpus and embedder, and boundaries that change whenever you change embedding models, which also changes every unit id downstream. For well-structured documents, headings are a better and free signal. Exercise 7.4 builds a semantic chunker.</p>
+
+<table>
+  <thead><tr><th>Strategy</th><th>Boundaries</th><th>Unit sizes</th><th>Extra cost</th><th>Best for</th></tr></thead>
+  <tbody>
+    <tr><td>Fixed windows with overlap</td><td>Arbitrary, may cut sentences</td><td>Uniform</td><td>None</td><td>Baselines, uniform prose, strict cost planning</td></tr>
+    <tr><td>Sentence packing</td><td>Sentence ends</td><td>Uneven, under a soft budget</td><td>Sentence splitting</td><td>Most prose; the usual default for extraction</td></tr>
+    <tr><td>Structure-aware</td><td>Headings, list and table blocks</td><td>Very uneven unless small sections are merged</td><td>Format-specific parsing</td><td>Markdown, HTML, reports, filings, manuals</td></tr>
+    <tr><td>Semantic</td><td>Topic shifts in embeddings</td><td>Uneven</td><td>Embedding every sentence</td><td>Long unstructured text: transcripts, chats</td></tr>
+  </tbody>
+</table>
+
+<h2>Provenance: ids that survive re-indexing</h2>
+<p>Every entity and relationship in the graph carries <code>source_id</code>s pointing to text units. Community reports cite them, local search pulls their text into prompts, and an evaluation run is only reproducible if they mean the same thing tomorrow. The id scheme therefore has a hard requirement: <strong>indexing the same input twice must produce the same ids</strong>. That property, <em>idempotence</em>, is what makes caching, incremental updates and diffing two index runs possible.</p>
+
+<h3>Three id schemes</h3>
+<ul>
+  <li><strong>Random ids</strong> (<code>uuid4()</code>): unique, and useless for this purpose. Every run produces new ids, so an LLM cache keyed on unit id never hits and yesterday's citations dangle.</li>
+  <li><strong>Positional ids</strong>: <code>minigraphrag</code> uses <code>f"{doc_id}-{i:03d}"</code>, the document id plus the unit's index. Deterministic, readable (“07_marlow_acquires_deepcast-001” tells you where to look), and stable as long as the document and chunking settings do not change.</li>
+  <li><strong>Hashed ids</strong>: a digest of the document id, the unit's offsets and its text. Deterministic, fixed-length, safe in any storage system, and they change if and only if one of those inputs changes.</li>
+</ul>
+
+<pre data-file="examples/ch07_ids.py"><code class="language-python">import hashlib
+from dataclasses import replace
+
+from minigraphrag.chunking import TextUnit
+
+
+def stable_unit_id(doc_id: str, start: int, end: int, text: str) -&gt; str:
+    """Same document, same span, same text -&gt; same id, on every machine and every run."""
+    text_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    key = f"{doc_id}\x1f{start}\x1f{end}\x1f{text_digest}"   # unit separator avoids "a-1"+"2" == "a"+"-12"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+
+
+def with_stable_ids(units: list[TextUnit]) -&gt; list[TextUnit]:
+    return [replace(u, id=stable_unit_id(u.doc_id, u.start, u.end, u.text)) for u in units]</code></pre>
+<p>Details that matter:</p>
+<ul>
+  <li><strong>Use a cryptographic or otherwise stable hash, never Python's built-in <code>hash()</code>.</strong> String hashing is randomized per process, so <code>hash("x")</code> differs between runs. <code>HashingEmbedder</code> in <code>minigraphrag</code> uses <code>blake2b</code> for the same reason.</li>
+  <li><strong>Separate the fields unambiguously.</strong> Concatenating <code>"doc-1" + "2"</code> and <code>"doc-" + "12"</code> gives the same string. A separator character that cannot appear in the fields prevents collisions.</li>
+  <li><strong>Include the doc id.</strong> Boilerplate paragraphs (“About Kestrel Labs”, which appears in both funding press releases) have identical text in different documents. A pure content hash would give them the same id and merge their provenance.</li>
+  <li><strong>Sixteen hex characters</strong> are 64 bits: for a million units the chance of any collision is roughly one in 37 million. Use the full digest if that is not enough for you.</li>
+</ul>
+
+<h3>What still changes the ids</h3>
+<p>No scheme is stable under every edit. Suppose someone fixes a typo in the last paragraph of doc 07 and re-indexes.</p>
+<table>
+  <thead><tr><th>Change</th><th>Positional <code>doc-NNN</code></th><th>Hash of doc id, offsets and text</th></tr></thead>
+  <tbody>
+    <tr><td>Re-run with no changes</td><td>Stable</td><td>Stable</td></tr>
+    <tr><td>Same-length typo fix in the last unit</td><td>Ids stable, but unit 001 now has <em>different text under the same id</em>, so caches return stale extractions</td><td>Only unit 001's id changes; the stale cache entry is simply never hit</td></tr>
+    <tr><td>A sentence inserted at the top</td><td>Ids may be unchanged while every unit's text shifts</td><td>All units after the insertion change id</td></tr>
+    <tr><td>Chunk size or chunker changed</td><td>Everything changes meaning silently</td><td>Everything changes id</td></tr>
+  </tbody>
+</table>
+<p>The pattern: positional ids fail <em>silently</em> by keeping an id while its text changes; hashed ids fail <em>loudly</em> by changing the id. Loud failure is what you want: a changed id triggers re-extraction of exactly that unit, and an unchanged id is proof the cached extraction is still valid. Exercise 7.2 walks through the cases by hand, and <a href="27-incremental-temporal.html">Chapter 27</a> builds incremental updates on top of hashed ids.</p>
+
+<div class="callout note">
+  <span class="callout-title">Also version the chunking config</span>
+  <p>Store the chunker name, size, overlap and tokenizer with the index (<code>IndexConfig</code> already records <code>chunk_size</code> and <code>chunk_overlap</code>). When they change, you know every unit id is invalid without comparing texts. Some systems fold a config hash into each unit id for the same reason.</p>
+</div>
+
+<h2>Carrying document metadata into every unit</h2>
+<p>A text unit cut from the middle of a document has lost its title, its author, its date and its section. For vector search this is a minor issue. For extraction it is a correctness issue, because so much of what text means is relative:</p>
+<ul>
+  <li><strong>Relative time.</strong> “Last month” in the board memo means April 2025 only if the model knows the memo is dated 14 May 2025. Temporal facts in <a href="10-claims-temporal.html">Chapter 10</a> depend on this.</li>
+  <li><strong>Implicit subjects.</strong> “We will receive the units already on order” is Kestrel Labs speaking, which only the memo header says.</li>
+  <li><strong>Source reliability and recency.</strong> A 2021 newspaper profile and a 2026 interview can disagree about who is CTO; both are right for their date. Keeping each unit's publication date lets later stages prefer the newer claim.</li>
+  <li><strong>Topic.</strong> A section heading like “What Tern replaces” is often the clearest statement of what a unit is about.</li>
+</ul>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "From document to text units with metadata",
+  "perRow": 3,
+  "stages": [
+    {"label": "Load document", "detail": "<code>load_documents(\"data/corpus\")</code> returns <code>{doc_id: text}</code>; the doc id is the file stem, such as <code>08_kestrel_board_memo_supply</code>."},
+    {"label": "Parse metadata", "detail": "Read the title from the first <code># </code> heading and the date from the dateline or header: <em>CONFIDENTIAL: Memo to the Board of Directors</em>, 2025-05-14."},
+    {"label": "Split structure", "detail": "Find heading spans and their paths: header, <em>1. What happened</em>, <em>2. Why it matters</em>, and so on. Nothing crosses a section boundary."},
+    {"label": "Pack units", "detail": "Pack sentences within each section up to the token budget, recording document-level <code>start</code> and <code>end</code> offsets for every unit."},
+    {"label": "Assign ids", "detail": "Hash doc id, offsets and text into a stable 16-character id, so re-indexing unchanged text reproduces it exactly."},
+    {"label": "Attach metadata", "detail": "Store title, date and heading path per unit id. At extraction time, prepend a short header; the unit's own text and offsets stay untouched for citations."}
+  ]
+}
+</script>
+</div>
+
+<p><code>minigraphrag</code>'s <code>TextUnit</code> deliberately has no metadata field: it stays a plain record of <em>where</em> the text came from, and anything else lives in a side table keyed by <code>doc_id</code> or unit id. This keeps units serializable and lets you add metadata without re-chunking.</p>
+
+<pre data-file="examples/ch07_metadata.py"><code class="language-python">import re
+
+from minigraphrag.chunking import TextUnit
+
+MONTHS = "January|February|March|April|May|June|July|August|September|October|November|December"
+DATE_RE = re.compile(rf"\b(\d{{1,2}}) ({MONTHS}) (\d{{4}})\b")
+
+
+def document_metadata(doc_id: str, text: str) -&gt; dict:
+    """Title from the first '# ' heading; date from the first 'D Month YYYY' in the first 400 characters."""
+    title = next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), doc_id)
+    m = DATE_RE.search(text[:400])
+    date = None
+    if m:
+        month = MONTHS.split("|").index(m.group(2)) + 1
+        date = f"{m.group(3)}-{month:02d}-{int(m.group(1)):02d}"
+    return {"doc_id": doc_id, "title": title, "date": date}
+
+
+def unit_header(unit: TextUnit, doc_meta: dict, section: list[str] | None = None) -&gt; str:
+    """A short header prepended to the unit text in extraction prompts (not stored in unit.text)."""
+    lines = [f"Document: {doc_meta['title']}"]
+    if doc_meta.get("date"):
+        lines.append(f"Published: {doc_meta['date']}")
+    if section:
+        lines.append("Section: " + " &gt; ".join(section))
+    return "\n".join(lines) + "\n\n" + unit.text</code></pre>
+
+<p>On the corpus this recovers a title and date for all 12 documents, from datelines such as “Published 4 October 2021”, “Posted 30 June 2025”, the memo's “Date: 14 May 2025” and the podcast's “Recorded 26 March 2026”. The header for unit 002 of the memo looks like this:</p>
+<pre><code>Document: CONFIDENTIAL: Memo to the Board of Directors
+Published: 2025-05-14
+Section: CONFIDENTIAL: Memo to the Board of Directors &gt; 2. Why it matters
+
+## 2. Why it matters
+
+Every Sentinel drone depends on these modules. Our current inventory covers ...</code></pre>
+
+<p>How to use it with the existing extractor: <code>extract_from_unit</code> formats <code>unit.text</code> into the prompt, so pass it a copy whose text includes the header, and keep the original unit for storage and citations.</p>
+<pre data-file="examples/ch07_extract_with_context.py"><code class="language-python">from dataclasses import replace
+
+from minigraphrag.chunking import load_documents
+from minigraphrag.extraction import extract_from_unit
+from minigraphrag.llm import MockLLM
+
+from ch07_ids import with_stable_ids
+from ch07_metadata import document_metadata, unit_header
+from ch07_structure import chunk_markdown
+
+llm = MockLLM()
+docs = load_documents("data/corpus")
+meta = {doc_id: document_metadata(doc_id, text) for doc_id, text in docs.items()}
+
+units, sections = [], {}
+for doc_id, text in docs.items():
+    pairs = chunk_markdown(text, doc_id, max_tokens=300)
+    stable = with_stable_ids([u for u, _ in pairs])
+    for u, (_, path) in zip(stable, pairs):
+        units.append(u)
+        sections[u.id] = path
+
+results = []
+for u in units:
+    prompt_view = replace(u, text=unit_header(u, meta[u.doc_id], sections[u.id]))
+    results.append(extract_from_unit(llm, prompt_view, max_gleanings=1))   # ExtractionResult.unit_id == u.id</code></pre>
+<p>Because <code>replace</code> keeps the id, every extracted record's <code>source_id</code> still points to the stored unit, whose text and offsets are the clean source span.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Headers can leak into the graph</span>
+  <p>A header that says “Document: Kestrel Labs Raises $40 Million Series B” invites the extractor to emit Series B relationships from every unit of that document, including units that never mention the round. Keep headers short and factual, tell the extraction prompt that the header is context and that only the text below it should be extracted from, and spot-check provenance on a few units.</p>
+</div>
+
+<h2>What chunking costs</h2>
+<p>Chunking is free; what it causes is not. Every design decision above changes the number of units, and every unit is at least one extraction call. Put the pieces together.</p>
+
+<h3>Calls</h3>
+<p>For <em>U</em> units and <code>max_gleanings = g</code>, <code>extract_from_unit</code> makes one extraction call, up to <em>g</em> “continue” calls, and a yes/no loop check between gleaning rounds but not after the last, so at most:</p>
+<p style="text-align:center"><em>calls per unit = 1 + g + max(0, g − 1)</em>   (1 for g = 0, 2 for g = 1, 4 for g = 2)</p>
+<p>The indexer adds one claim-extraction call per unit when <code>extract_claims</code> is on (the default), then description summaries and community reports, which depend on the graph rather than directly on <em>U</em>. So the chunking-driven part is roughly <em>U × (calls per unit + 1)</em>.</p>
+
+<h3>Tokens</h3>
+<p>Let <em>P</em> be the extraction prompt template's tokens, <em>T</em> the unit's tokens, <em>R</em> the tokens of each response and <em>C</em> the continue prompt. Because gleaning replays the whole transcript in each call, input tokens grow with every round:</p>
+<ul>
+  <li>Extraction call: input <em>P + T</em>, output <em>R</em>.</li>
+  <li>Gleaning round <em>r</em> (1-based): input <em>P + T + r·R + r·C</em>, output about <em>R</em> (often less). Loop checks send the same transcript plus a short question, but <code>extract_from_unit</code> does not append them to the transcript, so they do not grow later calls.</li>
+</ul>
+<p>Worked example on Kestrel with <code>minigraphrag</code> defaults: <em>U = 24</em> fixed units averaging 335 tokens (8,039 / 24), <em>g = 1</em>. By the package's word-based estimate the extraction template is about 330 tokens and the continue prompt about 40. Assume responses of <em>R = 300</em> tokens.</p>
+<ul>
+  <li>Extraction call: input 330 + 335 = 665; output 300.</li>
+  <li>Gleaning call: input 665 + 300 + 40 = 1,005; output up to 300.</li>
+  <li>Per unit: 2 calls, 1,670 input tokens, up to 600 output tokens.</li>
+  <li>Corpus: <strong>48 calls, about 40,000 input and 14,400 output tokens</strong> for entity extraction, plus 24 claim calls.</li>
+</ul>
+<p>Now switch to structure-aware units at 300 tokens: <em>U = 54</em>, averaging far fewer tokens each. Calls rise to 108 plus 54 claim calls. Input tokens rise less than calls, because the template <em>P</em> is paid per call while the text is split among more units, and outputs rise because each call writes its own records, including duplicate mentions of Kestrel Labs from every unit. Whether that buys enough recall to be worth it is an empirical question: that is exactly the measurement in Exercise 8.3.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Three levers, in the order to try them</span>
+  <p>First, remove waste that buys nothing: cross-document windows, trailing duplicate windows, boilerplate sections such as the “About Kestrel Labs” paragraph that both funding press releases carry (deduplicate them by content hash). Second, choose size and gleaning together on a sample, measuring entities found per call. Third, put the fixed part of the prompt first so provider-side prompt caching can discount the template <em>P</em> on every call; <a href="26-cost-scaling.html">Chapter 26</a> covers the rest.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 7.1 <span class="level">Warm-up</span></h4>
+  <p>The Project Tern blog post (doc 09) has 460 words. By hand, for <code>chunk_fixed</code> with (a) size 300, overlap 50; (b) size 100, overlap 20; (c) size 100, overlap 0: give the number of units, the word range of the last unit, and how many words are processed more than once. Then check with code.</p>
+  <details class="hint"><summary>Hint</summary><p>Windows start at multiples of the stride. The last window is the first one whose start plus size reaches 460.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Stride 250. <em>⌈(460 − 50)/250⌉ = ⌈1.64⌉ = 2</em> units: words 0–299 and 250–459. The last unit has 210 words. Words in both: 250–299, so <strong>50</strong> duplicated words.</p>
+    <p>(b) Stride 80. <em>⌈(460 − 20)/80⌉ = ⌈5.5⌉ = 6</em> units starting at 0, 80, 160, 240, 320, 400. Checks: 320 + 100 = 420 &lt; 460, so continue; 400 + 100 = 500 ≥ 460, stop. The last unit is words 400–459 (60 words). Overlaps: each of the 5 boundaries between consecutive units shares 20 words, so <strong>100</strong> duplicated words (22% of the document).</p>
+    <p>(c) Stride 100. <em>⌈460/100⌉ = 5</em> units: 0–99, …, 400–459. <strong>0</strong> duplicated words, but any relationship stated across words 99/100, 199/200, 299/300 or 399/400 can be split.</p>
+    <pre><code class="language-python">from minigraphrag.chunking import chunk_fixed, load_documents
+
+text = load_documents("data/corpus")["09_kestrel_eng_blog_project_tern"]
+for size, overlap in [(300, 50), (100, 20), (100, 0)]:
+    units = chunk_fixed(text, size, overlap, "09")
+    last = units[-1]
+    print(size, overlap, len(units), len(last.text.split()))
+# 300 50 2 210
+# 100 20 6 60
+# 100 0 5 60</code></pre>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 7.2 <span class="level">Core</span></h4>
+  <p>Doc 07 is chunked at 300/50 into units 000 (words 0–299) and 001 (words 250–454), and extractions are cached by unit id. For each change below, say which unit ids change and whether the cache would serve a stale extraction, under (i) positional ids <code>doc-NNN</code> and (ii) <code>stable_unit_id</code>: (a) re-run unchanged; (b) “harbour” is corrected to “harbor” in the paragraph about Marlow's headquarters, near the end of the article; (c) a one-sentence editor's note is inserted before the first paragraph; (d) the file is renamed from <code>07_marlow_acquires_deepcast.md</code> to <code>07_marlow_deepcast.md</code>.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ul>
+      <li>(a) Unchanged: both schemes produce identical ids, and cached extractions are valid.</li>
+      <li>(b) “harbour” to “harbor” shortens the text by one character at word 403, in unit 001's exclusive part (after word 299). Unit 000's text and offsets are unchanged. (The article's other “harbour”, at word 254, sits inside the overlap; fixing that one would change both units.) Unit 001's end offset and text change. (i) Positional: both ids unchanged, so the cache serves unit 001's <strong>stale</strong> extraction for new text. Here it is harmless, but the same silent reuse happens for a meaningful edit, such as a corrected acquisition price. (ii) Hashed: unit 000 keeps its id and cache entry; unit 001 gets a new id and is re-extracted. Correct.</li>
+      <li>(c) Inserting a sentence shifts every word index, so both windows now cover different text. (i) Positional: ids <code>-000</code> and <code>-001</code> are unchanged, so both cached extractions are stale. The document might now even need a third unit, the only change you would notice. (ii) Hashed: both ids change, both units are re-extracted. Correct, at the cost of re-extracting text that only moved. (A content-anchored scheme that hashes only text, plus doc id, would still change here, because window boundaries moved by one sentence's worth of words.)</li>
+      <li>(d) The doc id is the file stem, so it changes. (i) and (ii) both change every id. The cache misses and everything in the document is re-extracted, and old <code>source_id</code>s in the graph dangle. The fix is not in the chunker: give documents ids that do not depend on file names, for example a registry mapping paths to permanent ids, or a hash of the canonical source URL.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 7.3 <span class="level">Core</span></h4>
+  <p>Using the cost formulas in this chapter, compare two configurations for indexing a corpus of 10,000 documents of 2,000 words each with gleaning <em>g = 2</em>: (A) fixed 600/100 words; (B) fixed 300/50 words. Assume 4 tokens per 3 words, a template of <em>P = 1,500</em> tokens, responses of <em>R = 500</em> tokens for A and 300 for B, and a continue prompt and loop check of 50 tokens each. Give chunks, calls, and input and output tokens for entity extraction only, assuming the model always answers yes to the loop check.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Chunks.</strong> A: <em>⌈(2000 − 100)/500⌉ = ⌈3.8⌉ = 4</em> per document, 40,000 total. B: <em>⌈(2000 − 50)/250⌉ = ⌈7.8⌉ = 8</em> per document, 80,000 total.</p>
+    <p><strong>Calls.</strong> <em>1 + g + (g − 1) = 4</em> per unit. A: 160,000. B: 320,000.</p>
+    <p><strong>Unit tokens.</strong> Full A windows are 600 words = 800 tokens; B windows 300 words = 400 tokens. (The last window of each document is shorter; use full windows for an upper bound.)</p>
+    <p><strong>Input per unit</strong>, with transcript replay. Let <em>B<sub>0</sub> = P + T</em>.</p>
+    <ul>
+      <li>A: extraction 1,500 + 800 = 2,300. Glean 1: 2,300 + 500 + 50 = 2,850. Loop check: 2,850 + 500 + 50 = 3,400 (transcript after round 1 plus the answer to it, plus the check question). Glean 2: the transcript holds both earlier answers and two continue prompts, but not the loop check, which <code>extract_from_unit</code> does not append: 2,300 + 500 + 50 + 500 + 50 = 3,400. Total ≈ <strong>11,950</strong>.</li>
+      <li>B: extraction 1,500 + 400 = 1,900. Glean 1: 1,900 + 300 + 50 = 2,250. Loop check: 2,250 + 300 + 50 = 2,600. Glean 2: 1,900 + 300 + 50 + 300 + 50 = 2,600. Total ≈ <strong>9,350</strong>.</li>
+    </ul>
+    <p><strong>Output per unit</strong>: three responses (extraction and two gleanings) plus a one-token check. A: about 1,500. B: about 900.</p>
+    <table>
+      <thead><tr><th></th><th>Units</th><th>Calls</th><th>Input tokens</th><th>Output tokens</th></tr></thead>
+      <tbody>
+        <tr><td>A: 600/100</td><td>40,000</td><td>160,000</td><td>≈ 478 million</td><td>≈ 60 million</td></tr>
+        <tr><td>B: 300/50</td><td>80,000</td><td>320,000</td><td>≈ 748 million</td><td>≈ 72 million</td></tr>
+      </tbody>
+    </table>
+    <p>Halving the chunk size doubles calls but raises input tokens by only about 56%, because the template dominates each call's input, and raises output by 20% under these assumptions. Two insights: prompt caching of <em>P</em> matters more for small chunks, and <em>g = 2</em> is expensive in both, since three of four calls replay a growing transcript. Before choosing B for recall, check whether A with <em>g = 1</em> (half the calls) reaches similar recall on a sample.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 7.4 <span class="level">Core</span></h4>
+  <p>Implement <code>chunk_semantic(text, doc_id, max_tokens=300, percentile=20, embedder=None)</code> that returns <code>TextUnit</code>s with correct document offsets: split with <code>split_sentences</code>, embed sentences with <code>HashingEmbedder</code>, cut between adjacent sentences whose cosine similarity is at or below the given percentile of all adjacent similarities, and never exceed <code>max_tokens</code> (cut early if needed). Test it on doc 12, the leadership interview.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import numpy as np
+
+from minigraphrag.chunking import TextUnit, split_sentences
+from minigraphrag.embeddings import HashingEmbedder
+from minigraphrag.tokens import count_tokens
+
+def chunk_semantic(text, doc_id, max_tokens=300, percentile=20, embedder=None):
+    spans = split_sentences(text)
+    if not spans:
+        return []
+    embedder = embedder or HashingEmbedder()
+    vecs = embedder.embed([text[a:b] for a, b in spans])        # rows are L2-normalized
+    sims = np.sum(vecs[:-1] * vecs[1:], axis=1)                 # cosine of sentence i and i+1
+    threshold = np.percentile(sims, percentile) if len(sims) else 0.0
+
+    units, first, tokens = [], 0, 0
+    def emit(last):
+        start, end = spans[first][0], spans[last][1]
+        piece = text[start:end].strip()
+        units.append(TextUnit(f"{doc_id}-{len(units):03d}", doc_id, piece, count_tokens(piece), start, end))
+
+    for i, (a, b) in enumerate(spans):
+        t = count_tokens(text[a:b])
+        if i &gt; first and tokens + t &gt; max_tokens:              # budget cut
+            emit(i - 1)
+            first, tokens = i, 0
+        tokens += t
+        if i &lt; len(sims) and sims[i] &lt;= threshold:             # topic cut after sentence i
+            emit(i)
+            first, tokens = i + 1, 0
+    if first &lt; len(spans):
+        emit(len(spans) - 1)
+    return units
+
+from minigraphrag.chunking import load_documents
+text = load_documents("data/corpus")["12_interview_leadership_change_2026"]
+units = chunk_semantic(text, "12_interview_leadership_change_2026", max_tokens=150)
+assert all(text[u.start:u.end].strip() == u.text for u in units)
+print(len(units), [u.n_tokens for u in units])</code></pre>
+    <p>Things to check in your output. Offsets must round-trip, which the assert verifies. Newlines count as sentence breaks, so speaker labels and blank lines become short “sentences” whose word-hash vectors share little with their neighbors; with a hashing embedder those produce many low similarities and therefore many small units. That is a real lesson: semantic chunking is only as good as the embedder, and lexical hashing mistakes “different words” for “different topic”. Swap in <code>SentenceTransformerEmbedder</code> and the cuts should move toward genuine topic shifts, such as from the Deepcast supply shock to the leadership change. A practical fix for both is to merge units under a minimum size, for example 40 tokens, into their neighbor.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 7.5 <span class="level">Stretch</span></h4>
+  <p>Chunking decides which relationships an extractor can possibly see: both entities must appear in the same unit. Build a cheap, LLM-free proxy. For the 22 entity pairs of the running example's key relationships (with a small alias list), count <em>pair-mentions</em>: the number of (unit, pair) combinations where both entities appear in the unit. Compare fixed 300/50, 100/20, 100/0 and 40/0, sentence packing at 150 tokens, <code>chunk_markdown</code> at 300, and whole documents. Also count units that contain the full Q1 chain: Marlow Dynamics, Deepcast, Kestrel Labs and Project Tern. Interpret the results.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.chunking import chunk_documents, load_documents
+from ch07_structure import chunk_markdown
+
+ALIASES = {
+    "Kestrel Labs": ["Kestrel"], "Mira Okafor": ["Okafor"], "Jonas Vehl": ["Vehl"], "Priya Nair": ["Priya", "Nair"],
+    "Tidewater Institute": ["Tidewater", "TWI"], "Ana Ruiz": ["Ruiz"], "Project Sentinel": ["Sentinel"],
+    "Project Tern": ["Tern"], "Halden Reef": ["Halden"], "Brightwater Capital": ["Brightwater"],
+    "Lena Park": ["Lena Park"], "Marlow Dynamics": ["Marlow"], "Deepcast": ["Deepcast"],
+    "Ocean Health Act": ["Ocean Health Act"], "Port Avalon City Council": ["City Council", "council"],
+    "Port Avalon": ["Port Avalon"],
+}
+PAIRS = [
+    ("Mira Okafor", "Kestrel Labs"), ("Jonas Vehl", "Kestrel Labs"), ("Priya Nair", "Kestrel Labs"),
+    ("Mira Okafor", "Tidewater Institute"), ("Priya Nair", "Marlow Dynamics"), ("Ana Ruiz", "Tidewater Institute"),
+    ("Kestrel Labs", "Project Sentinel"), ("Tidewater Institute", "Project Sentinel"), ("Priya Nair", "Project Sentinel"),
+    ("Project Sentinel", "Halden Reef"), ("Ana Ruiz", "Halden Reef"), ("Brightwater Capital", "Kestrel Labs"),
+    ("Lena Park", "Brightwater Capital"), ("Lena Park", "Kestrel Labs"), ("Deepcast", "Kestrel Labs"),
+    ("Marlow Dynamics", "Deepcast"), ("Marlow Dynamics", "Kestrel Labs"), ("Kestrel Labs", "Project Tern"),
+    ("Jonas Vehl", "Project Tern"), ("Priya Nair", "Project Tern"), ("Project Tern", "Deepcast"),
+    ("Port Avalon City Council", "Kestrel Labs"),
+]
+CHAIN = ("Marlow Dynamics", "Deepcast", "Kestrel Labs", "Project Tern")
+
+def mentions(text, name):
+    return any(a in text for a in [name] + ALIASES.get(name, []))
+
+docs = load_documents("data/corpus")
+configs = {
+    "fixed 300/50": [u.text for u in chunk_documents(docs, 300, 50)],
+    "fixed 100/20": [u.text for u in chunk_documents(docs, 100, 20)],
+    "fixed 100/0": [u.text for u in chunk_documents(docs, 100, 0)],
+    "fixed 40/0": [u.text for u in chunk_documents(docs, 40, 0)],
+    "sentences 150": [u.text for u in chunk_documents(docs, 150, method="sentences")],
+    "markdown 300": [u.text for d, t in docs.items() for u, _ in chunk_markdown(t, d, 300)],
+    "whole documents": list(docs.values()),
+}
+for name, texts in configs.items():
+    per_pair = [sum(mentions(t, a) and mentions(t, b) for t in texts) for a, b in PAIRS]
+    chain = sum(all(mentions(t, x) for x in CHAIN) for t in texts)
+    print(f"{name:16s} units={len(texts):3d} pair-mentions={sum(per_pair):4d} "
+          f"pairs-in-one-unit-only={sum(p == 1 for p in per_pair)} chain-units={chain}")</code></pre>
+    <pre><code>fixed 300/50     units= 24 pair-mentions= 142 pairs-in-one-unit-only=0 chain-units=2
+fixed 100/20     units= 70 pair-mentions= 159 pairs-in-one-unit-only=0 chain-units=1
+fixed 100/0      units= 59 pair-mentions= 140 pairs-in-one-unit-only=0 chain-units=1
+fixed 40/0       units=141 pair-mentions= 104 pairs-in-one-unit-only=4 chain-units=0
+sentences 150    units= 65 pair-mentions= 153 pairs-in-one-unit-only=0 chain-units=0
+markdown 300     units= 54 pair-mentions= 147 pairs-in-one-unit-only=0 chain-units=2
+whole documents  units= 12 pair-mentions=  95 pairs-in-one-unit-only=0 chain-units=1</code></pre>
+    <p>Interpretation:</p>
+    <ul>
+      <li><strong>Every configuration covers all 22 pairs somewhere</strong>, because the Kestrel corpus restates its central facts across documents. Real corpora are less forgiving, so look at the next columns.</li>
+      <li><strong>Tiny windows destroy co-occurrence.</strong> At 40 words, pair-mentions drop to 104 and four relationships survive in only a single unit: one missed extraction and the edge is gone.</li>
+      <li><strong>Overlap adds chances.</strong> 100/20 has 159 pair-mentions against 140 for 100/0, the highest of all, at the cost of 11 more units.</li>
+      <li><strong>Whole documents score lowest on pair-mentions</strong> (95) only because each document counts once. They maximize co-occurrence per unit but are exactly the long inputs where extraction recall drops, which this proxy cannot see.</li>
+      <li><strong>The full causal chain rarely sits in one unit</strong> (at most 2), and never in 150-token sentence units. That is expected and fine: Q1 is answered by joining edges from different units through shared entities, which is the whole point of building a graph.</li>
+    </ul>
+    <p>Caveats: substring alias matching is crude (“Tern” also matches “Western”, “council” matches any council), and co-occurrence is necessary, not sufficient, for an extractable relationship. Use this proxy to rule out bad settings cheaply, then measure real extraction recall on the survivors.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">A 1,000-word document is chunked with <code>chunk_fixed(text, size=200, overlap=40)</code>. How many units result?</p>
+  <ol>
+    <li>5</li>
+    <li data-correct>6</li>
+    <li>7</li>
+    <li>8</li>
+  </ol>
+  <div class="explain">Stride is 160. ⌈(1000 − 40)/160⌉ = ⌈6.0⌉ = 6. Windows start at 0, 160, 320, 480, 640 and 800; the last covers words 800–999 and reaches the end.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does GraphRAG extraction benefit from smaller text units than a single long document, even with a large context window?</p>
+  <ol>
+    <li>Smaller units are cheaper per token</li>
+    <li>Large context windows cannot hold markdown</li>
+    <li data-correct>Models asked to list every entity in a long input tend to miss many; each smaller unit gets a fresh, focused pass</li>
+    <li>Entity resolution only works on short texts</li>
+  </ol>
+  <div class="explain">On HotPotQA the GraphRAG paper observed almost twice as many entity references from 600-token chunks as from 2400-token chunks with one pass. Fitting in the window is not the same as being read thoroughly.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which id scheme lets an extraction cache detect that a unit's text changed while its position in the document did not?</p>
+  <ol>
+    <li>Positional ids like <code>doc-001</code></li>
+    <li>Random UUIDs generated at chunking time</li>
+    <li>Python's built-in <code>hash()</code> of the text</li>
+    <li data-correct>A SHA-256 digest of doc id, offsets and text</li>
+  </ol>
+  <div class="explain">Positional ids stay the same while text changes, so stale cache entries are served. UUIDs never match across runs. Built-in <code>hash()</code> is randomized per process. A stable digest that includes the text changes exactly when the text does.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">The board memo says “the new owner intends to reserve its production”. What most directly helps the extractor connect this to the right date?</p>
+  <ol>
+    <li data-correct>Prepending the document's title and date (14 May 2025) to the unit in the extraction prompt</li>
+    <li>Increasing the overlap to 100 words</li>
+    <li>Switching to semantic chunking</li>
+    <li>Using hashed ids</li>
+  </ol>
+  <div class="explain">“Last month” is relative to the memo's date, which only the document header states. Overlap and boundary strategies cannot recover information that lives outside the body text.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In <code>chunk_by_sentences</code>, what does the condition <code>if j &gt; i and tokens + t &gt; max_tokens</code> guarantee?</p>
+  <ol>
+    <li>No unit ever exceeds <code>max_tokens</code></li>
+    <li>Units never overlap</li>
+    <li>Every unit ends with a period</li>
+    <li data-correct>Each unit takes at least one sentence, so a sentence longer than the budget still makes progress</li>
+  </ol>
+  <div class="explain">Without <code>j &gt; i</code>, a single over-budget sentence would never be added and the loop would not advance. The budget is therefore soft.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Going from structure-aware units that keep every short section separate to merged sections nearer the token budget will usually…</p>
+  <ol>
+    <li>Increase calls and decrease input tokens</li>
+    <li data-correct>Decrease calls and template tokens, at some risk to recall in the longer merged units</li>
+    <li>Change nothing, because tokens are the same</li>
+    <li>Break provenance, because merged units cannot have offsets</li>
+  </ol>
+  <div class="explain">Fewer units means fewer calls, and the prompt template is paid once per call. Merged units are longer, which can reduce recall. Merged units still have a start and end offset.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>What chunk size should I start with?</summary>
+  <div><p>For extraction, start in the range of a few hundred tokens to about a thousand, with 10–15% overlap, and sentence or structure-aware boundaries. Then run the extraction on a sample at two sizes and compare entities per call and a hand-checked recall on a few units. Microsoft GraphRAG's default has long been 1,200 tokens with 100 of overlap, at the large end of that range; check the configuration docs for your version rather than copying a number.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should chunks for extraction and chunks for vector search be the same?</summary>
+  <div><p>They do not have to be. Some systems extract from larger units and embed smaller ones, linking them with PART_OF edges (the parent-child pattern from <a href="06-graph-shapes.html">Chapter 6</a>). Using one set is simpler, and <code>minigraphrag</code> does that: the same text units feed extraction, the text-unit vector store and citations.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why count words instead of tokens?</summary>
+  <div><p>It keeps chunking independent of any tokenizer, deterministic across machines, and exactly aligned with character offsets. The cost is that 300 words is only roughly 400 tokens, and much more for code, numbers or non-English text. If you budget tightly against a model's limit, chunk with the model's tokenizer and map token spans back to character offsets.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How should I handle PDFs, HTML and tables?</summary>
+  <div><p>Convert to a structured intermediate first, such as markdown with headings, lists and tables preserved, then apply structure-aware chunking. Keep a mapping from intermediate offsets back to the original page or element for citations. For tables, either keep a whole table in one unit or repeat the header row in each unit; a table row without its header is a list of numbers the extractor cannot interpret.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does overlap create duplicate entities in the graph?</summary>
+  <div><p>It creates duplicate <em>mentions</em>, not duplicate nodes: the same name extracted from two units merges into one entity with two source ids, and relationship weights add up. That summing slightly inflates weights for facts that happen to fall in overlaps. It is usually negligible, but it is one more reason not to use very large overlaps.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a chunking lab for the Kestrel corpus</h3>
+  <p>Build a small command-line tool that makes chunking decisions visible and comparable before you pay for extraction.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>chunklab --method fixed|sentences|markdown --size N --overlap M</code> prints units per document, token distribution (min, median, max) and duplicated-token percentage</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Every unit gets a <code>stable_unit_id</code>; a test proves two runs produce identical ids and that editing one paragraph changes only the affected units' ids</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A metadata table (<code>units.jsonl</code>) with unit id, doc id, offsets, title, date and heading path, and a test that <code>text[start:end]</code> matches every unit</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A cost estimate per configuration: calls and input and output tokens for a chosen gleaning setting, using the formulas in this chapter</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The pair-mention proxy from Exercise 7.5 reported for each configuration</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A one-paragraph recommendation for which configuration to use in Chapter 8, with the numbers that justify it</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can rerun the lab after changing one setting and explain every number that moved.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>In GraphRAG a text unit is an extraction input, citation unit and retrieval target; size it for recall, relationship co-occurrence and cost.</li>
+    <li>Fixed windows give <em>max(1, ⌈(N − O)/(S − O)⌉)</em> units per document; chunk per document, and remember overlap duplicates roughly <em>O/S</em> of the tokens.</li>
+    <li>Sentence packing avoids mid-sentence cuts; structure-aware splitting respects headings, lists and tables and records the heading path.</li>
+    <li>Provenance ids must be deterministic; hashes of doc id, offsets and text fail loudly when text changes, which keeps caches and incremental updates correct.</li>
+    <li>Carry title, date and section into the extraction prompt, but keep the stored unit text and offsets clean.</li>
+    <li>Units × calls per unit (with gleaning) × replayed transcript tokens is the cost you choose when you choose a chunker.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a> and <a href="https://microsoft.github.io/graphrag/">documentation</a>: text units and chunking configuration. <span class="venue">GitHub</span></li>
+  <li>Sarthi et al. <a href="https://arxiv.org/abs/2401.18059">RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval</a>. <span class="venue">arXiv 2401.18059, 2024</span></li>
+  <li>Liu et al. <a href="https://arxiv.org/abs/2307.03172">Lost in the Middle: How Language Models Use Long Contexts</a>. <span class="venue">TACL, 2024; arXiv 2307.03172</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>Kiss and Strunk. <a href="https://aclanthology.org/J06-4003/">Unsupervised Multilingual Sentence Boundary Detection</a> (Punkt). <span class="venue">Computational Linguistics, 2006</span></li>
+  <li>GraphRAG pattern catalog. <a href="https://graphrag.com/reference/">Lexical graph and parent-child patterns</a>. <span class="venue">graphrag.com</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

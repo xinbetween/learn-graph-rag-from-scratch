@@ -1,0 +1,893 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Path retrieval and LLMs walking the graph | Graph RAG from Scratch</title>
+<meta name="description" content="Retrieve relational paths as evidence, prune them with PathRAG's flow model, and let an LLM explore the graph with Think-on-Graph, ToG-2 and Plan-on-Graph.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/18-paths-and-agents.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="18-paths-and-agents" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Path retrieval and LLMs walking the graph</h1>
+  <p class="lede">A multi-hop answer is a path: Sentinel detected the bleaching, Kestrel runs Sentinel, Lena Park sits on Kestrel's board. This chapter retrieves such paths directly, first with a cheap algorithmic pruner (PathRAG) and then by letting an LLM walk the graph step by step (Think-on-Graph and its successors), and measures what each costs.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain why relational paths make faithful, checkable evidence, and why enumerating them explodes</li>
+      <li>Compute PathRAG's flow-based pruning and path reliability scores by hand, and order paths in a prompt</li>
+      <li>Trace Think-on-Graph's beam search: relation exploration, entity exploration, pruning and the stop decision</li>
+      <li>Implement <code>find_relational_paths</code>, <code>paths_to_text</code> and a minimal Think-on-Graph loop on the LLM protocol</li>
+      <li>Describe how ToG-2 couples graph and text, and how Plan-on-Graph self-corrects</li>
+      <li>Estimate LLM calls per question for each method and choose between them</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why paths are good evidence</h2>
+<p>Look at canonical question 2: <em>“Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?”</em> The answer is Brightwater Capital, through Lena Park, and the justification is a chain of four facts:</p>
+<pre><code>2024 Halden Reef bleaching event  &lt;-[detected]-  Project Sentinel
+Project Sentinel                  &lt;-[runs]-      Kestrel Labs
+Kestrel Labs                      &lt;-[board member of]-  Lena Park
+Lena Park                         -[partner at]-&gt; Brightwater Capital</code></pre>
+<p>Every retriever you have built so far returns something <em>near</em> this chain: chunks similar to the question (Chapter 2), neighborhoods of seed entities (<a href="14-local-search.html">Chapter 14</a>), passages scored by PPR mass (<a href="17-ppr-hipporag.html">Chapter 17</a>). None returns the chain itself. The LLM has to rediscover it inside a pile of context. Retrieving the path directly has three advantages.</p>
+<ul>
+  <li><strong>It is the explanation.</strong> A path is a proof sketch. You can show it to a user, and each hop can carry a citation to the text unit that produced the edge.</li>
+  <li><strong>It is checkable.</strong> If the model's answer mentions a relation that is not on any retrieved path, you have detected a likely hallucination. Research on faithful graph reasoning, such as Reasoning on Graphs (RoG), builds on exactly this: plan relation paths, retrieve instances of them, and reason only over what was retrieved.</li>
+  <li><strong>It is compact.</strong> Four triples take about 60 tokens. The four source passages take well over a thousand.</li>
+</ul>
+<p>The cost is that someone has to find the right path among very many candidates. The rest of the chapter is about who does that search, an algorithm or an LLM, and how to keep it affordable.</p>
+
+<h2>Enumerating paths and why it explodes</h2>
+
+<h3>Shortest and k-shortest paths</h3>
+<p>The simplest path retriever links the question's entities to nodes (as in Chapter 14) and returns shortest paths between each pair. BFS finds one shortest path in <em>O(|V| + |E|)</em>. One path is rarely enough, though: the single shortest path from Priya Nair to Deepcast goes through the hub Kestrel Labs (“Priya is CTO of Kestrel, which Deepcast supplied”), which is true but not the interesting answer. The <strong>k shortest simple paths</strong> (Yen's algorithm, available as <code>networkx.shortest_simple_paths</code>) returns the next-best alternatives in order of length.</p>
+
+<pre data-file="minigraphrag/search/paths.py"><code class="language-python">from itertools import islice
+import networkx as nx
+
+def k_shortest_paths(G: nx.Graph, source: str, target: str, k: int = 3, weight: str | None = None) -&gt; list[list[str]]:
+    """The k shortest simple paths (Yen's algorithm via networkx)."""
+    try:
+        return list(islice(nx.shortest_simple_paths(G, source, target, weight=weight), k))
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return []</code></pre>
+
+<p>On the curated Kestrel graph used throughout this chapter (the graph drawn in the PathRAG visualization below plus Ana Ruiz's two edges: 17 nodes, 28 edges), <code>k_shortest_paths(G, "PRIYA NAIR", "DEEPCAST", k=5)</code> returns:</p>
+<pre><code>PRIYA NAIR -&gt; KESTREL LABS -&gt; DEEPCAST
+PRIYA NAIR -&gt; MARLOW DYNAMICS -&gt; DEEPCAST
+PRIYA NAIR -&gt; PROJECT TERN -&gt; DEEPCAST
+PRIYA NAIR -&gt; KESTREL LABS -&gt; MARLOW DYNAMICS -&gt; DEEPCAST
+PRIYA NAIR -&gt; MARLOW DYNAMICS -&gt; KESTREL LABS -&gt; DEEPCAST</code></pre>
+<p>All three 2-hop paths are real connections, and the two that matter for question 3 are there. So are 3-hop detours through the hub that add nothing.</p>
+
+<h3>Path explosion</h3>
+<p>Count all simple paths between two entities by maximum length on that same small graph:</p>
+<table>
+  <thead><tr><th>Max hops</th><th>Priya Nair → Deepcast</th><th>2024 bleaching event → Lena Park</th></tr></thead>
+  <tbody>
+    <tr><td>2</td><td>3</td><td>0</td></tr>
+    <tr><td>3</td><td>8</td><td>1</td></tr>
+    <tr><td>4</td><td>14</td><td>4</td></tr>
+    <tr><td>5</td><td>19</td><td>11</td></tr>
+    <tr><td>6</td><td>24</td><td>27</td></tr>
+    <tr><td>any length</td><td>53</td><td>84</td></tr>
+  </tbody>
+</table>
+<p>That is a 17-node graph with 28 edges, and Kestrel Labs, the only real hub, has degree 11. In a graph where nodes average <em>d</em> neighbors, the number of length-<em>L</em> walks from a node grows like <em>d<sup>L</sup></em>. An extracted corpus graph with 50,000 entities and an average degree of 8 has on the order of 8<sup>3</sup> = 512 three-hop walks from <em>each</em> node, and a hub with degree 2,000 multiplies whatever passes through it. Every hub on a path multiplies the candidates, and almost all of them are noise. Two families of fixes exist:</p>
+<ul>
+  <li><strong>Algorithmic pruning</strong>: score partial paths with a cheap function and stop expanding weak ones. PathRAG is the example below.</li>
+  <li><strong>LLM-guided search</strong>: let the model decide which relations and entities to follow, one hop at a time. Think-on-Graph is the example.</li>
+</ul>
+
+<h2>PathRAG: pruning paths with resource flow</h2>
+<p>PathRAG (Chen et al., 2025) starts from a LightRAG-style index (<a href="16-lightrag.html">Chapter 16</a>): entity nodes and relation edges, each with a text description. At query time it runs three stages.</p>
+<ol>
+  <li><strong>Node retrieval.</strong> An LLM extracts keywords from the question, and dense matching retrieves the most relevant nodes (40 in the paper's default setting).</li>
+  <li><strong>Flow-based pruning.</strong> For each pair of retrieved nodes, find the paths between them, pruned by a resource-flow model.</li>
+  <li><strong>Path-based prompting.</strong> Convert the top-K paths (15 by default) to text and order them by reliability in the prompt.</li>
+</ol>
+
+<h3>The flow model</h3>
+<p>Think of retrieval relevance as a resource that starts at one retrieved node and spreads along edges, the way water spreads through pipes that split at every junction. The start node gets <em>S(v<sub>start</sub>) = 1</em>. Every other node receives, from each neighbor that sends to it:</p>
+<p style="text-align:center"><em>S(v<sub>i</sub>) = ∑<sub>v<sub>j</sub> ∈ N(·, v<sub>i</sub>)</sub> α · S(v<sub>j</sub>) / |N(v<sub>j</sub>, ·)|</em></p>
+<p>Here <em>|N(v<sub>j</sub>, ·)|</em> is the out-degree of the sender and <em>α</em> is a <strong>decay rate</strong> (0.7 by default in the paper; <code>minigraphrag</code> defaults to 0.8). Two effects follow directly: resource shrinks geometrically with distance, and a hub splits whatever it receives among all its neighbors, so paths through hubs carry little flow. Propagation proceeds hop by hop, and a node <strong>stops propagating</strong> when</p>
+<p style="text-align:center"><em>S(v<sub>i</sub>) / |N(v<sub>i</sub>, ·)| &lt; θ</em></p>
+<p>for a threshold θ. The paper does not publish a single value for θ; treat it as a knob you tune. This early stopping is what prunes the search: nodes with little resource per neighbor are not expanded, so the paths through them are never enumerated.</p>
+
+<h3>Path reliability and ordering</h3>
+<p>Each surviving path <em>P</em> from the start node to another retrieved node gets a reliability score: the resource of its nodes, averaged over its edges.</p>
+<p style="text-align:center"><em>S(P) = (1 / |E<sub>P</sub>|) · ∑<sub>v<sub>i</sub> ∈ V<sub>P</sub></sub> S(v<sub>i</sub>)</em></p>
+<p>Because the start node's resource of 1 is included and divided by the number of edges, shorter paths get a built-in bonus. The top-K paths across all node pairs are kept.</p>
+<p>The prompt ordering is a small, deliberate detail. LLMs attend best to the beginning and end of long contexts and worst to the middle (“lost in the middle”). PathRAG places paths in <strong>ascending</strong> reliability order, so the most reliable path sits at the end of the context, right before the question.</p>
+
+<h3>A worked example on question 3</h3>
+<p>Question 3 asks <em>“What connects Priya Nair to Deepcast?”</em> Keyword matching retrieves both entities. Run the flow from Priya Nair with α = 0.8 and θ = 0.02 on the curated Kestrel graph. Kestrel Labs has 11 neighbors, Project Sentinel 6 (including Ocean Health Act), Priya Nair and Project Tern 4 each, Marlow Dynamics 3.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "PathRAG flow-based pruning from Priya Nair",
+  "subtitle": "Decay α = 0.8, threshold θ = 0.02, at most 3 hops",
+  "height": 400,
+  "scoreDigits": 3,
+  "nodes": [
+    {"id": "okafor", "label": "Mira Okafor", "group": 2, "x": 36, "y": 9},
+    {"id": "port", "label": "Port Avalon", "group": 4, "x": 10, "y": 14},
+    {"id": "council", "label": "City Council", "group": 1, "x": 24, "y": 30},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 62, "y": 9},
+    {"id": "bright", "label": "Brightwater", "group": 1, "x": 87, "y": 9},
+    {"id": "twi", "label": "Tidewater", "group": 1, "x": 9, "y": 48},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 52, "y": 38},
+    {"id": "vehl", "label": "Jonas Vehl", "group": 2, "x": 87, "y": 36},
+    {"id": "sentinel", "label": "Sentinel", "group": 3, "x": 30, "y": 60},
+    {"id": "oha", "label": "Ocean Health Act", "group": 6, "x": 9, "y": 74},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 50, "y": 70},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 20, "y": 90},
+    {"id": "bleach", "label": "2024 bleaching", "group": 5, "x": 38, "y": 90},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 86, "y": 62},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 64, "y": 90},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 88, "y": 88}
+  ],
+  "edges": [
+    {"source": "okafor", "target": "kestrel", "label": "CEO of"}, {"source": "vehl", "target": "kestrel", "label": "co-founded"},
+    {"source": "priya", "target": "kestrel", "label": "CTO of"}, {"source": "okafor", "target": "twi", "label": "worked at"},
+    {"source": "priya", "target": "marlow", "label": "formerly at"},
+    {"source": "kestrel", "target": "sentinel", "label": "runs"}, {"source": "twi", "target": "sentinel", "label": "partners on"},
+    {"source": "priya", "target": "sentinel", "label": "leads"}, {"source": "sentinel", "target": "halden", "label": "monitors"},
+    {"source": "sentinel", "target": "bleach", "label": "detected"}, {"source": "bleach", "target": "halden", "label": "occurred at"},
+    {"source": "oha", "target": "sentinel", "label": "drives demand"},
+    {"source": "bright", "target": "kestrel", "label": "invested in"}, {"source": "lena", "target": "bright", "label": "partner at"},
+    {"source": "lena", "target": "kestrel", "label": "board member"}, {"source": "deepcast", "target": "kestrel", "label": "supplied"},
+    {"source": "marlow", "target": "deepcast", "label": "acquired"}, {"source": "marlow", "target": "kestrel", "label": "competes"},
+    {"source": "kestrel", "target": "tern", "label": "runs"}, {"source": "vehl", "target": "tern", "label": "co-leads"},
+    {"source": "priya", "target": "tern", "label": "co-leads"}, {"source": "tern", "target": "deepcast", "label": "replaces"},
+    {"source": "kestrel", "target": "port", "label": "located in"}, {"source": "twi", "target": "port", "label": "located in"},
+    {"source": "council", "target": "kestrel", "label": "contracted"}, {"source": "council", "target": "port", "label": "located in"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project", "4": "Location", "5": "Event", "6": "Law"},
+  "steps": [
+    {"caption": "Start: the flow begins at the retrieved node <span class=\"viz-chip node\">Priya Nair</span> with resource S = 1. The target retrieved node is Deepcast.", "active": ["priya"], "scores": {"priya": 1}},
+    {"caption": "Hop 1: Priya has 4 neighbors, so each receives α · 1 / 4 = 0.8 / 4 = <strong>0.200</strong>.", "active": ["kestrel", "marlow", "sentinel", "tern"], "visited": ["priya"], "edges": ["priya>kestrel", "priya>marlow", "priya>sentinel", "priya>tern"], "scores": {"priya": 1, "kestrel": 0.2, "marlow": 0.2, "sentinel": 0.2, "tern": 0.2}},
+    {"caption": "Early stopping test S / degree &lt; θ. Kestrel Labs: 0.2 / 11 = 0.018 &lt; 0.02, so the hub <strong>stops</strong>. Marlow (0.2 / 3 = 0.067), Sentinel (0.2 / 6 = 0.033) and Tern (0.2 / 4 = 0.050) keep spreading.", "active": ["marlow", "sentinel", "tern"], "visited": ["priya", "kestrel"], "visitedEdges": ["priya>kestrel", "priya>marlow", "priya>sentinel", "priya>tern"], "scores": {"priya": 1, "kestrel": "0.2/11 stop", "marlow": 0.067, "sentinel": 0.033, "tern": 0.05}},
+    {"caption": "Hop 2: Deepcast receives 0.8 · 0.2 / 3 from Marlow plus 0.8 · 0.2 / 4 from Tern = 0.053 + 0.040 = <strong>0.093</strong>. Jonas Vehl gets 0.040. Sentinel's new neighbors each get 0.8 · 0.2 / 6 = 0.027. Nothing flows to Lena Park, Brightwater, Mira Okafor or the Council: the hub did not spread.", "active": ["deepcast", "vehl", "twi", "halden", "bleach", "oha"], "visited": ["priya", "marlow", "sentinel", "tern", "kestrel"], "edges": ["marlow>deepcast", "tern>deepcast", "tern>vehl", "sentinel>twi", "sentinel>halden", "sentinel>bleach", "sentinel>oha"], "visitedEdges": ["priya>marlow", "priya>sentinel", "priya>tern", "priya>kestrel"], "scores": {"priya": 1, "kestrel": 0.2, "marlow": 0.2, "sentinel": 0.2, "tern": 0.2, "deepcast": 0.093, "vehl": 0.04, "twi": 0.027, "halden": 0.027, "bleach": 0.027, "oha": 0.027}},
+    {"caption": "Candidate paths to Deepcast through nodes that kept spreading: Priya → Marlow → Deepcast and Priya → Tern → Deepcast. Priya → Kestrel → Deepcast is pruned because Kestrel stopped. Reliability of each: (1 + 0.200 + 0.093) / 2 edges = <strong>0.647</strong>.", "active": ["priya", "marlow", "tern", "deepcast"], "visited": ["kestrel"], "edges": ["priya>marlow", "marlow>deepcast", "priya>tern", "tern>deepcast"], "scores": {"priya": 1, "marlow": 0.2, "tern": 0.2, "deepcast": 0.093}},
+    {"caption": "Both surviving paths are exactly the two halves of the gold answer: Priya used to work at Marlow, which acquired Deepcast; she co-leads Tern, which replaces Deepcast's sonar. They go into the prompt in ascending reliability, most reliable last.", "active": ["priya", "marlow", "tern", "deepcast"], "edges": ["priya>marlow", "marlow>deepcast", "priya>tern", "tern>deepcast"], "showAllLabels": false}
+  ]
+}
+</script>
+</div>
+
+<p>With the paper's default α = 0.7 the numbers shrink (hop-1 nodes get 0.175, Deepcast 0.082, reliability 0.623), but the same two paths survive and tie. Ties are common with small integer degrees; break them by path length and then by a secondary signal such as the embedding similarity of the edge descriptions to the question.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Hub pruning cuts both ways</span>
+  <p>Now run the same flow for question 2 from the bleaching event, looking for Lena Park or Brightwater Capital. Sentinel gets 0.4, Kestrel Labs only 0.053 at hop 2, and 0.053 / 11 = 0.005 is far below θ = 0.02. The hub stops and <em>no</em> path to the investor survives, even though the answer path runs through Kestrel Labs. Hubs are usually noise, but sometimes the hub is the answer's company. Exercise 18.3 finds the θ that lets this path through and counts what else comes with it.</p>
+</div>
+
+<h3>From paths to prompt text</h3>
+<p>PathRAG turns each path into text by concatenating, in order, the text of each node and each edge along it: entity names with their descriptions, and relation descriptions. Rendered this way, a path reads as a short narrative, which LLMs follow more reliably than a bag of triples.</p>
+
+<h3>The minigraphrag implementation</h3>
+<pre data-file="minigraphrag/search/paths.py"><code class="language-python">from collections import defaultdict
+import networkx as nx
+
+def _flow_from(G: nx.Graph, source: str, max_hops: int, decay: float,
+               threshold: float) -&gt; tuple[dict[str, float], set[str]]:
+    """Resource reaching each node when spreading hop by hop from `source`, and the nodes that were expanded."""
+    flow = {source: 1.0}
+    frontier = {source: 1.0}
+    expanded: set[str] = set()
+    for _ in range(max_hops):
+        nxt: dict[str, float] = defaultdict(float)
+        for v, resource in frontier.items():
+            share = decay * resource / max(1, G.degree(v))
+            if share &lt; threshold:
+                continue  # pruned: too little resource left to be worth following
+            expanded.add(v)
+            for u in G.neighbors(v):
+                if u not in flow:
+                    nxt[u] += share
+        flow.update(nxt)
+        frontier = nxt
+    return flow, expanded
+
+def find_relational_paths(G: nx.Graph, sources: list[str], targets: list[str], max_hops: int = 3,
+                          decay: float = 0.8, threshold: float = 0.02, top_k: int = 10) -&gt; list[tuple[list[str], float]]:
+    """Scored simple paths from any source to any target, best first.
+
+    Score = average flow of the nodes after the source (PathRAG's reliability).
+    """
+    results: list[tuple[list[str], float]] = []
+    targets_set = set(targets)
+    for s in sources:
+        if s not in G:
+            continue
+        flow, expanded = _flow_from(G, s, max_hops, decay, threshold)
+
+        def dfs(path: list[str]) -&gt; None:
+            node = path[-1]
+            if node in targets_set and len(path) &gt; 1:
+                results.append((list(path), sum(flow[n] for n in path[1:]) / (len(path) - 1)))
+                return
+            if len(path) &gt; max_hops or node not in expanded:
+                return  # hop limit reached, or this node's flow was pruned
+            for nbr in sorted(G.neighbors(node)):
+                if nbr in flow and nbr not in path:
+                    dfs(path + [nbr])
+
+        dfs([s])
+    results.sort(key=lambda x: (-x[1], len(x[0])))
+    return results[:top_k]
+
+def paths_to_text(G: nx.Graph, paths: list) -&gt; str:
+    """Render paths as narrated chains, e.g. `A --[desc]--&gt; B --[desc]--&gt; C`."""
+    lines = []
+    for item in paths:
+        path, score = (item, None) if isinstance(item[0], str) else item
+        hops = [path[0]]
+        for u, v in zip(path, path[1:]):
+            desc = G.edges[u, v].get("description", "related to")
+            hops.append(f" --[{desc[:200]}]--&gt; {v}")
+        lines.append("".join(hops) + (f"  (score {score:.3f})" if score is not None else ""))
+    return "\n".join(lines)</code></pre>
+
+<div class="callout note">
+  <span class="callout-title">Two simplifications, and why they matter</span>
+  <p>The reference code follows the paper's structure (paths may only continue through nodes that kept spreading) with two simplifications. It tests <code>decay · S / degree</code> against the threshold, where the paper tests <code>S / degree</code>, so the same θ prunes slightly more. And its score averages flow over the nodes <em>after</em> the source, leaving out the source's resource of 1. For Priya Nair → Deepcast it returns the same two paths, each scored (0.2 + 0.093) / 2 = 0.147 instead of 0.647. The ranking can differ, though: without the source term, longer paths lose their built-in penalty, so a 3-hop detour through two well-supplied nodes can outrank a direct 2-hop path. Exercise 18.2 finds such a case on the Kestrel graph.</p>
+</div>
+
+<p>Assembling the prompt in PathRAG order is one line: reverse the best-first list.</p>
+<pre data-file="examples/path_prompt.py"><code class="language-python">from minigraphrag.search.paths import find_relational_paths, paths_to_text
+
+paths = find_relational_paths(index.graph, ["PRIYA NAIR"], ["DEEPCAST"], max_hops=3, top_k=8)
+context = paths_to_text(index.graph, list(reversed(paths)))   # ascending: most reliable path last
+prompt = (
+    "Relational paths from the knowledge graph, least to most reliable:\n"
+    f"{context}\n\n"
+    "Question: What connects Priya Nair to Deepcast?\n"
+    "Answer using only these paths and name the entities on the path you rely on."
+)</code></pre>
+
+<div class="callout paper">
+  <span class="callout-title">Chen et al., PathRAG (2025)</span>
+  <p>PathRAG argues that graph RAG methods like LightRAG retrieve too much: flat lists of neighboring entities and relations whose redundancy hurts answers and costs tokens. In LLM-judged pairwise comparisons across six datasets and five dimensions (comprehensiveness, diversity, logicality, relevance and coherence), the paper reports average win rates of 59.9% against GraphRAG and 57.1% against LightRAG, while cutting token consumption by about 14%. The defaults behind those numbers are 40 retrieved nodes, 15 paths and a decay rate of 0.7.</p>
+</div>
+
+<h2>Think-on-Graph: the LLM walks the graph</h2>
+<p>PathRAG's pruning is blind to meaning: flow knows degrees, not that “board member of” matters for a question about oversight. Think-on-Graph (ToG, Sun et al., ICLR 2024) puts an LLM in charge of the search. The model acts as an agent on the knowledge graph, running a <strong>beam search</strong>: it keeps the <em>N</em> most promising partial reasoning paths (the beam width), extends each by one hop per iteration, and stops when the paths suffice or a maximum depth <em>D</em> is reached. The paper's default is N = 3 and D = 3.</p>
+
+<h3>One iteration</h3>
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 290" role="img" aria-labelledby="tog-title">
+      <title id="tog-title">One Think-on-Graph iteration: relation exploration, entity exploration, reasoning, then loop or answer</title>
+      <defs><marker id="t18a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box" x="10" y="20" width="120" height="80" rx="6"/>
+      <text class="d-text bold" x="22" y="46">Beam</text>
+      <text class="d-text small" x="22" y="66">top-N paths,</text>
+      <text class="d-text small" x="22" y="82">tail entities</text>
+      <rect class="d-box node" x="160" y="20" width="150" height="80" rx="6"/>
+      <text class="d-text bold" x="172" y="46">Relation exploration</text>
+      <text class="d-text small" x="172" y="66">search: tail's relations</text>
+      <text class="d-text small" x="172" y="82">prune: LLM keeps top N</text>
+      <rect class="d-box node" x="340" y="20" width="150" height="80" rx="6"/>
+      <text class="d-text bold" x="352" y="46">Entity exploration</text>
+      <text class="d-text small" x="352" y="66">search: entities via kept</text>
+      <text class="d-text small" x="352" y="82">relations; LLM keeps N</text>
+      <rect class="d-box edge" x="520" y="20" width="150" height="80" rx="6"/>
+      <text class="d-text bold" x="532" y="46">Reasoning</text>
+      <text class="d-text small" x="532" y="66">LLM: are these paths</text>
+      <text class="d-text small" x="532" y="82">enough to answer?</text>
+      <line class="d-line" x1="130" y1="60" x2="158" y2="60" marker-end="url(#t18a)"/>
+      <line class="d-line" x1="310" y1="60" x2="338" y2="60" marker-end="url(#t18a)"/>
+      <line class="d-line" x1="490" y1="60" x2="518" y2="60" marker-end="url(#t18a)"/>
+      <path class="d-line" d="M595,100 L595,150 L70,150 L70,102" marker-end="url(#t18a)"/>
+      <text class="d-text small" x="230" y="142">no, and depth &lt; D: extend the beam by one hop</text>
+      <rect class="d-box good" x="520" y="190" width="150" height="70" rx="6"/>
+      <text class="d-text bold" x="532" y="216">Answer</text>
+      <text class="d-text small" x="532" y="236">from paths, or model</text>
+      <text class="d-text small" x="532" y="252">knowledge at depth D</text>
+      <line class="d-line" x1="640" y1="100" x2="640" y2="188" marker-end="url(#t18a)"/>
+      <text class="d-text small" x="648" y="150">yes</text>
+      <text class="d-text small" x="10" y="200">LLM calls per iteration:</text>
+      <text class="d-text small" x="10" y="218">relation pruning, up to N</text>
+      <text class="d-text small" x="10" y="236">entity pruning, up to N</text>
+      <text class="d-text small" x="10" y="254">reasoning, 1</text>
+      <text class="d-text small" x="10" y="276">Bound per question: 2ND + D + 1</text>
+    </svg>
+  </div>
+  <figcaption>Each ToG iteration makes three kinds of LLM decision. Search steps are graph lookups; pruning and reasoning are prompts.</figcaption>
+</figure>
+
+<ol>
+  <li><strong>Initialization.</strong> The LLM extracts the topic entities from the question, which are linked to KG nodes. Each topic entity starts a path.</li>
+  <li><strong>Relation exploration.</strong> <em>Search</em> fetches all relations of each path's tail entity from the KG. <em>Prune</em> asks the LLM to score them against the question and keeps the top ones.</li>
+  <li><strong>Entity exploration.</strong> <em>Search</em> follows the kept relations to candidate tail entities. <em>Prune</em> asks the LLM to score the extended paths and keeps the top N for the next beam.</li>
+  <li><strong>Reasoning.</strong> The LLM is shown the current paths and decides whether they are enough to answer. If yes, it answers. If not and depth is below D, repeat. At depth D, ToG answers anyway, relying on the paths plus the model's own knowledge.</li>
+</ol>
+<p>The paper bounds the cost at <strong>2ND + D + 1</strong> LLM calls per question: up to N calls for relation pruning and N for entity pruning at each of D depths, one reasoning call per depth, and one for the final answer. With the defaults that is 2·3·3 + 3 + 1 = 22 calls. A variant, <strong>ToG-R</strong>, explores relation chains and prunes entities randomly instead of with the LLM, cutting the bound to ND + D + 1. Replacing LLM pruning with BM25 or Sentence-BERT scoring cuts it to D + 1, at a cost in accuracy.</p>
+
+<h3>A trace on question 2, beam width 2, depth 3</h3>
+<p>Step through ToG on the Kestrel graph. The scores are illustrative of what an LLM pruner returns; the structure of the search is exactly ToG's.</p>
+
+<div class="viz" data-viz="ch18-beam">
+<script type="application/json">
+{
+  "title": "Think-on-Graph beam search, N = 2, D = 3",
+  "subtitle": "Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?",
+  "height": 400,
+  "nodes": [
+    {"id": "bleach", "label": "2024 bleaching", "group": 5, "x": 8, "y": 52},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 35, "y": 30},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 35, "y": 74},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 62, "y": 14},
+    {"id": "twi", "label": "Tidewater", "group": 1, "x": 62, "y": 44},
+    {"id": "ruiz1", "label": "Ana Ruiz", "group": 2, "x": 62, "y": 80},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 89, "y": 8},
+    {"id": "bright", "label": "Brightwater", "group": 1, "x": 89, "y": 32},
+    {"id": "ruiz2", "label": "Ana Ruiz", "group": 2, "x": 89, "y": 56},
+    {"id": "port", "label": "Port Avalon", "group": 4, "x": 89, "y": 80}
+  ],
+  "edges": [
+    {"source": "bleach", "target": "sentinel", "label": "detected by"},
+    {"source": "bleach", "target": "halden", "label": "occurred at"},
+    {"source": "sentinel", "target": "kestrel", "label": "run by"},
+    {"source": "sentinel", "target": "twi", "label": "partner"},
+    {"source": "halden", "target": "ruiz1", "label": "surveyed by"},
+    {"source": "kestrel", "target": "lena", "label": "board member"},
+    {"source": "kestrel", "target": "bright", "label": "investor"},
+    {"source": "twi", "target": "ruiz2", "label": "directed by"},
+    {"source": "twi", "target": "port", "label": "located in"}
+  ],
+  "steps": [
+    {"phase": "Initialization", "show": ["bleach"], "kept": ["bleach"],
+     "caption": "The LLM extracts the topic entity <span class=\"viz-chip node\">2024 Halden Reef bleaching event</span> and links it to the graph. The beam holds one path of length 0."},
+    {"phase": "Depth 1: relation exploration", "show": ["bleach"], "kept": ["bleach"],
+     "table": [["2024 bleaching", "detected by", "0.70", "keep"], ["2024 bleaching", "occurred at", "0.30", "keep"]],
+     "caption": "Search returns the event's relations. One pruning call scores them; with only two candidates, both fit in the width."},
+    {"phase": "Depth 1: entity exploration", "show": ["bleach", "sentinel", "halden"], "kept": ["sentinel", "halden"], "edges": ["bleach>sentinel", "bleach>halden"], "scores": {"sentinel": 0.8, "halden": 0.2},
+     "caption": "Following the kept relations reaches Project Sentinel and Halden Reef. The entity pruning call scores the two paths and both stay."},
+    {"phase": "Depth 1: reasoning", "show": ["bleach", "sentinel", "halden"], "kept": ["sentinel", "halden"], "edges": ["bleach>sentinel", "bleach>halden"],
+     "caption": "Reasoning call: <em>“We know the drones are Project Sentinel, but not the company, board member or investor.”</em> Not sufficient; continue. Calls so far: 3."},
+    {"phase": "Depth 2: relation exploration", "show": ["bleach", "sentinel", "halden"], "kept": ["sentinel", "halden"], "edges": ["bleach>sentinel", "bleach>halden"],
+     "table": [["Project Sentinel", "run by", "0.60", "keep"], ["Project Sentinel", "partner", "0.20", "keep"], ["Project Sentinel", "led by", "0.10", "drop"], ["Project Sentinel", "demand driven by", "0.10", "drop"], ["Halden Reef", "surveyed by", "0.50", "keep"]],
+     "caption": "One relation pruning call per beam entity (2 calls). Each keeps at most N = 2 relations. Relations back to already visited nodes are skipped."},
+    {"phase": "Depth 2: entity exploration", "show": ["bleach", "sentinel", "halden", "kestrel", "twi", "ruiz1"], "kept": ["kestrel", "twi"], "pruned": ["ruiz1"], "edges": ["sentinel>kestrel", "sentinel>twi"], "visitedEdges": ["bleach>sentinel", "bleach>halden", "halden>ruiz1"], "scores": {"kestrel": 0.7, "twi": 0.2, "ruiz1": 0.1},
+     "caption": "Three candidate paths end at Kestrel Labs, Tidewater Institute and Ana Ruiz. Entity pruning keeps the top 2. The Halden Reef branch dies here."},
+    {"phase": "Depth 2: reasoning", "show": ["bleach", "sentinel", "halden", "kestrel", "twi", "ruiz1"], "kept": ["kestrel", "twi"], "pruned": ["ruiz1"], "edges": ["bleach>sentinel", "sentinel>kestrel"], "visitedEdges": ["sentinel>twi"],
+     "caption": "Reasoning: <em>“Kestrel Labs runs Sentinel, so it is the company. Board member and investor unknown.”</em> Continue. Calls so far: 7."},
+    {"phase": "Depth 3: relation exploration", "show": ["bleach", "sentinel", "halden", "kestrel", "twi", "ruiz1"], "kept": ["kestrel", "twi"], "pruned": ["ruiz1"], "edges": ["bleach>sentinel", "sentinel>kestrel"], "visitedEdges": ["sentinel>twi"],
+     "table": [["Kestrel Labs", "board member", "0.50", "keep"], ["Kestrel Labs", "investor", "0.40", "keep"], ["Kestrel Labs", "CEO", "0.05", "drop"], ["Kestrel Labs", "supplier", "0.03", "drop"], ["Tidewater", "directed by", "0.30", "keep"], ["Tidewater", "located in", "0.10", "keep"]],
+     "caption": "Kestrel Labs has eleven relations; the pruner keeps the two about governance and funding. Tidewater keeps its two best, weak as they are."},
+    {"phase": "Depth 3: entity exploration", "show": ["bleach", "sentinel", "halden", "kestrel", "twi", "ruiz1", "lena", "bright", "ruiz2", "port"], "kept": ["lena", "bright"], "pruned": ["ruiz1", "ruiz2", "port"], "edges": ["kestrel>lena", "kestrel>bright"], "visitedEdges": ["bleach>sentinel", "sentinel>kestrel", "sentinel>twi", "twi>ruiz2", "twi>port"], "scores": {"lena": 0.55, "bright": 0.35, "ruiz2": 0.07, "port": 0.03},
+     "caption": "Four candidate paths; the beam keeps the paths ending at Lena Park and Brightwater Capital."},
+    {"phase": "Depth 3: reasoning and answer", "show": ["bleach", "sentinel", "halden", "kestrel", "twi", "ruiz1", "lena", "bright", "ruiz2", "port"], "kept": ["lena", "bright"], "pruned": ["ruiz1", "ruiz2", "port"], "edges": ["bleach>sentinel", "sentinel>kestrel", "kestrel>lena", "kestrel>bright"],
+     "caption": "Max depth reached. Paths: bleaching ← Sentinel ← Kestrel → board member Lena Park, and Kestrel ← investor Brightwater. The answer “Brightwater Capital, through Lena Park” is right, but one fact is <strong>not on any path</strong>: that Lena Park is a partner <em>at Brightwater</em>. At depth D, ToG fills gaps from model knowledge, which for private data means a guess. A fourth hop would retrieve it. Total: 11 calls plus the answer call = 12."}
+  ]
+}
+</script>
+</div>
+
+<p>Two lessons from the trace. First, the LLM pruner made the decisive choice at depth 3, keeping “board member” and “investor” out of eleven relations, which no degree-based flow could have done. Second, depth is a hard budget. The question needed four hops to be fully grounded; with D = 3, ToG answered correctly but partly from inference. On a public knowledge graph such as Freebase, the model's own knowledge often fills such gaps correctly; on your private corpus it cannot, so either raise D or add a verification step that checks every entity pair the answer relies on.</p>
+
+<h3>A minimal ToG loop</h3>
+<p>This implementation runs on any <code>networkx</code> graph and any object with the <code>minigraphrag</code> LLM protocol (<code>complete(prompt, system=None, json=False)</code>). It groups an entity's edges into “relations” by a <code>relation</code> attribute when the graph has typed edges, and by edge description otherwise, so it works on both a curated KG and the extracted graph. It is a teaching version: ToG's prompts include few-shot examples, and relation pruning in the paper asks for scores in text rather than JSON.</p>
+
+<pre data-file="examples/think_on_graph.py"><code class="language-python">import networkx as nx
+from minigraphrag.llm import LLM, parse_json_response
+
+RELATION_PRUNE = """Question: {question}
+Topic entity: {entity}
+Candidate relations:
+{candidates}
+Score each candidate relation from 0 to 1 by how useful following it is for answering the question.
+Return JSON: {{"scores": [&lt;one number per candidate, in order&gt;]}}"""
+
+ENTITY_PRUNE = """Question: {question}
+Candidate reasoning paths (each ends in a new entity):
+{candidates}
+Score each path from 0 to 1 by how likely its last entity helps answer the question.
+Return JSON: {{"scores": [&lt;one number per candidate, in order&gt;]}}"""
+
+REASON = """Question: {question}
+Knowledge paths retrieved so far:
+{paths}
+Can the question be answered from these paths alone? If yes, answer it and cite the paths.
+Return JSON: {{"sufficient": true|false, "answer": "&lt;answer or empty&gt;"}}"""
+
+ANSWER = """Question: {question}
+Knowledge paths:
+{paths}
+Answer the question using the paths. Say which facts you are unsure of."""
+
+
+def relations_of(G: nx.Graph, entity: str) -&gt; dict[str, list[str]]:
+    """Group an entity's edges by relation label (typed KG) or description (extracted graph)."""
+    groups: dict[str, list[str]] = {}
+    for nbr in G.neighbors(entity):
+        d = G.edges[entity, nbr]
+        rel = d.get("relation") or d.get("description", "related to")[:120]
+        groups.setdefault(rel, []).append(nbr)
+    return groups
+
+
+def _scores(llm: LLM, prompt: str, n: int) -&gt; list[float]:
+    data = parse_json_response(llm.complete(prompt, json=True))
+    s = [float(x) for x in data.get("scores", [])][:n]
+    return s + [0.0] * (n - len(s))            # a short or broken reply scores the rest 0
+
+
+def _render(paths: list[list[str]]) -&gt; str:
+    return "\n".join(" -&gt; ".join(p) for p in paths)
+
+
+def think_on_graph(G: nx.Graph, question: str, llm: LLM, topic_entities: list[str],
+                   width: int = 3, depth: int = 3) -&gt; dict:
+    # A path alternates entity, relation, entity, ...; the beam holds the top `width` paths.
+    beam = [[e] for e in topic_entities if e in G][:width]
+    calls = 0
+    for _ in range(depth):
+        # 1. Relation exploration: search the tail's relations, let the LLM prune.
+        rel_candidates = []                     # (path, relation, tails)
+        for path in beam:
+            groups = relations_of(G, path[-1])
+            rels = [r for r, tails in groups.items() if any(t not in path for t in tails)]
+            if not rels:
+                continue
+            prompt = RELATION_PRUNE.format(question=question, entity=path[-1],
+                                           candidates="\n".join(f"{i}. {r}" for i, r in enumerate(rels)))
+            scores = _scores(llm, prompt, len(rels)); calls += 1
+            for r, _ in sorted(zip(rels, scores), key=lambda x: -x[1])[:width]:
+                rel_candidates.append((path, r, [t for t in groups[r] if t not in path]))
+        if not rel_candidates:
+            break
+        # 2. Entity exploration: expand to tail entities, let the LLM prune to the beam width.
+        paths = [path + [rel, tail] for path, rel, tails in rel_candidates for tail in tails]
+        prompt = ENTITY_PRUNE.format(question=question,
+                                     candidates="\n".join(f"{i}. {' -&gt; '.join(p)}" for i, p in enumerate(paths)))
+        scores = _scores(llm, prompt, len(paths)); calls += 1
+        beam = [p for p, _ in sorted(zip(paths, scores), key=lambda x: -x[1])[:width]]
+        # 3. Reasoning: stop as soon as the paths suffice.
+        verdict = parse_json_response(llm.complete(REASON.format(question=question, paths=_render(beam)), json=True))
+        calls += 1
+        if verdict.get("sufficient") and verdict.get("answer"):
+            return {"answer": verdict["answer"], "paths": beam, "llm_calls": calls}
+    # Depth exhausted: answer from what was found (ToG falls back on the model's own knowledge here).
+    answer = llm.complete(ANSWER.format(question=question, paths=_render(beam)))
+    return {"answer": answer, "paths": beam, "llm_calls": calls + 1}</code></pre>
+
+<p>Call it with the linked topic entities. On the curated Kestrel graph with <code>width=2, depth=3</code> and a pruner that never stops early, it makes 12 LLM calls, the same count as the trace above:</p>
+<pre data-file="examples/think_on_graph.py"><code class="language-python">result = think_on_graph(G, "Which investor's board member oversees the company whose drones detected "
+                           "the Halden Reef bleaching?", llm, topic_entities=["2024 HALDEN REEF BLEACHING EVENT"],
+                        width=2, depth=3)
+for path in result["paths"]:
+    print(" -&gt; ".join(path))
+print(result["llm_calls"], result["answer"])</code></pre>
+
+<div class="callout tip">
+  <span class="callout-title">Engineering the loop</span>
+  <p>Three changes make this production-worthy. Batch the relation pruning calls for all beam entities into one prompt (fewer calls, same decisions). Cap the candidates per prompt, because a hub like Kestrel Labs in an extracted graph can have hundreds of edge descriptions; pre-rank them by embedding similarity to the question and send the top 30. And cache pruning calls keyed on (question, entity, candidates), since reruns and similar questions revisit the same entities.</p>
+</div>
+
+<h2>ToG-2: coupling the graph with text</h2>
+<p>ToG explores only the knowledge graph, so it knows only what the triples say. Extracted graphs are lossy (Chapter 8 kept descriptions for this reason), and curated KGs miss most of what documents say. Think-on-Graph 2.0 (Ma et al., 2024) interleaves graph search with document retrieval in what the authors call <strong>tight coupling</strong>: each source guides retrieval from the other, rather than retrieving from both and concatenating (loose coupling).</p>
+<ol>
+  <li><strong>Initialization.</strong> Extract and link the question's entities; a <em>topic prune</em> LLM step selects which to start from. Dense retrieval pulls the top chunks from documents linked to those entities.</li>
+  <li><strong>Knowledge-guided graph search.</strong> As in ToG: discover relations of the current entities, prune relations with the LLM, discover candidate entities.</li>
+  <li><strong>Knowledge-guided context retrieval.</strong> Collect the documents attached to the candidate entities and score their chunks with a dense retriever, appending the triple that led to each entity to the query so that the retriever looks for evidence about <em>that</em> relation.</li>
+  <li><strong>Context-based entity pruning.</strong> Score each candidate entity from the scores of its top chunks (with exponentially decaying weights by rank) and keep the top W. Entities are chosen by what the text says about them, not by an LLM guess from names.</li>
+  <li><strong>Hybrid reasoning.</strong> The LLM sees both triples and chunks and decides whether to answer. If not, it writes clues summarizing what it has learned and can rewrite the query for the next round.</li>
+</ol>
+<p>The paper's defaults are width W = 3, depth D = 3 and the top 10 chunks for entity scoring. On Kestrel, the win is concrete: the edge “Deepcast supplied Kestrel Labs” says nothing about why the supply ended, but the chunks attached to Deepcast do. ToG-2 would keep Marlow Dynamics in the beam for question 1 because the acquisition chunk scores high against “why did Kestrel start Project Tern”, not because an LLM guessed from the name.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Ma et al., Think-on-Graph 2.0 (2024)</span>
+  <p>ToG-2 reports the best results among its baselines on six of seven knowledge-intensive datasets with GPT-3.5, and shows that a smaller model such as Llama-2-13B reaches GPT-3.5-level results when augmented with it. In the authors' manual analysis of correct answers, those grounded mainly in document context were the largest group at about 42%, and those grounded in triples alone the smallest: the graph's job is mostly to find the right text.</p>
+</div>
+
+<h2>Plan-on-Graph: plans, memory and self-correction</h2>
+<p>ToG's search has three structural weaknesses that Plan-on-Graph (PoG, Chen et al., 2024) targets:</p>
+<ul>
+  <li><strong>Fixed breadth.</strong> Width N is set in advance. Some hops need one relation, some need five.</li>
+  <li><strong>Irreversible direction.</strong> Once a branch is pruned it is gone. If the pruner dropped the right entity at depth 1, no later step can recover it.</li>
+  <li><strong>Forgotten conditions.</strong> A multi-constraint question (“investor's board member”, “company whose drones”) loses constraints as paths grow.</li>
+</ul>
+<p>PoG adds three mechanisms:</p>
+<ul>
+  <li><strong>Guidance.</strong> The LLM first decomposes the question into sub-objectives with their conditions: <em>(1) find the drones that detected the bleaching; (2) find the company that runs them; (3) find its board members; (4) find which investor each board member belongs to.</em> Exploration is steered toward unfinished sub-objectives, and the number of relations and entities kept per step is chosen adaptively rather than fixed.</li>
+  <li><strong>Memory.</strong> PoG maintains the explored subgraph, the reasoning paths so far, and the status of each sub-objective (what is known for each condition). Memory is what makes reflection possible: the model can see what it already tried.</li>
+  <li><strong>Reflection.</strong> After each exploration step the LLM evaluates whether the sub-objectives are satisfied. If they are not, it decides whether to keep going or to <em>self-correct</em>: backtrack to previously discovered but unselected entities and explore from there.</li>
+</ul>
+<p>On question 2, PoG's sub-objective (4) stays open after the ToG trace above, because nothing links Lena Park to an investor. Reflection notices, and the next step explores Lena Park's relations and finds “partner at Brightwater Capital”. If the pruner had dropped Kestrel Labs at depth 2 in favor of Tidewater, reflection would notice that sub-objective (2) produced no company with board members and backtrack to the unselected candidate.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Chen et al., Plan-on-Graph (2024)</span>
+  <p>On three KGQA benchmarks (CWQ, WebQSP and GrailQA), PoG reports better accuracy than ToG together with at least 40% fewer LLM calls, far fewer output tokens and a runtime speedup of over four times on CWQ and GrailQA, because adaptive breadth avoids exploring branches it does not need. The paper also reports that in about 24% of cases the model reversed direction during exploration, which is evidence that the reflection step is doing work rather than rubber-stamping.</p>
+</div>
+
+<h2>Cost, latency and choosing a method</h2>
+<p>The methods in this chapter and the last span two orders of magnitude in query-time LLM usage. Indexing costs are separate: all of them need a graph, and PathRAG and HippoRAG need the same extraction you built in Part 2.</p>
+<table>
+  <thead><tr><th>Method</th><th>LLM calls per question</th><th>What drives it</th><th>Latency profile</th></tr></thead>
+  <tbody>
+    <tr><td>Vector RAG (Chapter 2)</td><td>1</td><td>Answer only</td><td>One retrieval, one generation</td></tr>
+    <tr><td>Local search (Chapter 14)</td><td>1</td><td>Answer only</td><td>Graph lookups are milliseconds</td></tr>
+    <tr><td>HippoRAG (Chapter 17)</td><td>2</td><td>Query NER + answer</td><td>Adds one short call and one PPR</td></tr>
+    <tr><td>PathRAG</td><td>2</td><td>Keyword extraction + answer</td><td>Path enumeration is cheap after pruning</td></tr>
+    <tr><td>ToG with BM25 or SBERT pruning</td><td>up to D + 1 (4 at D = 3)</td><td>Reasoning per depth + answer</td><td>Sequential calls</td></tr>
+    <tr><td>ToG-R</td><td>up to ND + D + 1 (13 at N = D = 3)</td><td>Relation pruning per beam entity</td><td>Sequential depths; prunes within a depth can run in parallel</td></tr>
+    <tr><td>ToG</td><td>up to 2ND + D + 1 (22 at N = D = 3)</td><td>Relation and entity pruning, reasoning</td><td>Seconds to tens of seconds</td></tr>
+    <tr><td>ToG-2</td><td>Similar order to ToG, plus dense retrieval per depth</td><td>Relation pruning and hybrid reasoning per depth</td><td>Extra retriever passes over entity documents</td></tr>
+    <tr><td>PoG</td><td>Adaptive; reported lower than ToG</td><td>Decomposition, exploration, reflection</td><td>Varies with backtracking</td></tr>
+    <tr><td>Global search (Chapter 15)</td><td>One per batch of community reports, plus reduce</td><td>Number of communities</td><td>Parallel map, one reduce</td></tr>
+  </tbody>
+</table>
+<p>A rough guide to choosing:</p>
+<ul>
+  <li><strong>Questions name two entities and ask how they relate</strong> (question 3): path retrieval between the linked entities. Algorithmic pruning is enough and costs almost nothing.</li>
+  <li><strong>Questions describe a chain by its constraints</strong> (question 2): the relation choices need semantic judgment. Use an LLM-guided walker, and budget for 10–25 calls per question, or precompute relation-path templates for frequent question types.</li>
+  <li><strong>The graph is incomplete relative to the documents</strong> (almost every extracted graph): couple with text, as ToG-2 does, or fall back to HippoRAG-style passage retrieval.</li>
+  <li><strong>The graph is curated and questions are precise</strong> (counts, filters, dates): skip walking entirely and generate a query, which is <a href="20-text2cypher.html">Chapter 20</a>.</li>
+</ul>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 18.1 <span class="level">Warm-up</span></h4>
+  <p>Recompute the PathRAG worked example for Priya Nair → Deepcast with the paper's default decay α = 0.7 and θ = 0.02, using the paper's early-stopping rule S / degree &lt; θ and the reliability formula that includes the source. Which nodes stop spreading after hop 1, and what are the reliabilities of the surviving paths?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Hop 1: each of Priya's 4 neighbors gets 0.7 · 1 / 4 = 0.175.</p>
+    <p>Stopping test: Kestrel Labs 0.175 / 11 = 0.0159 &lt; 0.02, stops. Marlow 0.175 / 3 = 0.058, Sentinel 0.175 / 6 = 0.029, Tern 0.175 / 4 = 0.044: all keep spreading.</p>
+    <p>Hop 2: Deepcast receives 0.7 · 0.175 / 3 = 0.0408 from Marlow and 0.7 · 0.175 / 4 = 0.0306 from Tern, total 0.0715.</p>
+    <p>Surviving paths: Priya → Marlow → Deepcast and Priya → Tern → Deepcast, each with reliability (1 + 0.175 + 0.0715) / 2 = <strong>0.623</strong>. Priya → Kestrel → Deepcast is pruned as before. Lowering α shrinks all flows by the same kind of factor per hop, so it changes which nodes pass θ (here none changed) more than it changes the ranking.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 18.2 <span class="level">Core</span></h4>
+  <p>Write <code>pathrag_paths(G, source, targets, alpha, theta, max_hops, top_k)</code> that follows the paper more closely than <code>find_relational_paths</code>: use S / degree &lt; θ for early stopping, let a path continue only through nodes that kept spreading, and include the source's resource in the reliability sum. Run both functions on the curated Kestrel graph from Jonas Vehl to Deepcast and compare the rankings. Which scoring would you rather put in front of a reader LLM, and why?</p>
+  <details class="hint"><summary>Hint</summary><p>Jonas Vehl has only two neighbors, Kestrel Labs and Project Tern, so both get a lot of resource, and even the hub Kestrel Labs keeps spreading (0.4 / 11 = 0.036 &gt; 0.02).</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from collections import defaultdict
+import networkx as nx
+
+def flow_resources(G, source, alpha=0.8, theta=0.02, max_hops=3):
+    S, expanded, frontier = {source: 1.0}, set(), [source]
+    for _ in range(max_hops):
+        incoming = defaultdict(float)
+        for v in frontier:
+            deg = G.degree(v)
+            if deg == 0 or S[v] / deg &lt; theta:
+                continue                      # early stop: keeps its resource, does not spread
+            expanded.add(v)
+            for u in G.neighbors(v):
+                if u not in S:
+                    incoming[u] += alpha * S[v] / deg
+        S.update(incoming)
+        frontier = list(incoming)
+    return S, expanded
+
+def pathrag_paths(G, source, targets, alpha=0.8, theta=0.02, max_hops=3, top_k=10):
+    S, expanded = flow_resources(G, source, alpha, theta, max_hops)
+    targets, results = set(targets), []
+    def dfs(path):
+        node = path[-1]
+        if node in targets and len(path) &gt; 1:
+            results.append((path, sum(S[n] for n in path) / (len(path) - 1)))   # includes the source
+            return
+        if len(path) &gt; max_hops or node not in expanded:
+            return
+        for nbr in sorted(G.neighbors(node)):
+            if nbr in S and nbr not in path:
+                dfs(path + [nbr])
+    dfs([source])
+    results.sort(key=lambda x: (-x[1], len(x[0])))
+    return results[:top_k]</code></pre>
+    <p>Flows from Jonas Vehl (α = 0.8): Kestrel Labs and Project Tern get 0.4 each; Deepcast gets 0.8 · 0.4 / 11 + 0.8 · 0.4 / 4 = 0.029 + 0.080 = 0.109. Results:</p>
+    <pre><code>find_relational_paths (reference, source excluded):
+0.303  JONAS VEHL -&gt; KESTREL LABS -&gt; PROJECT TERN -&gt; DEEPCAST
+0.303  JONAS VEHL -&gt; PROJECT TERN -&gt; KESTREL LABS -&gt; DEEPCAST
+0.255  JONAS VEHL -&gt; KESTREL LABS -&gt; DEEPCAST
+0.255  JONAS VEHL -&gt; PROJECT TERN -&gt; DEEPCAST
+
+pathrag_paths (paper-style, source included):
+0.755  JONAS VEHL -&gt; KESTREL LABS -&gt; DEEPCAST
+0.755  JONAS VEHL -&gt; PROJECT TERN -&gt; DEEPCAST
+0.636  JONAS VEHL -&gt; KESTREL LABS -&gt; PROJECT TERN -&gt; DEEPCAST
+0.636  JONAS VEHL -&gt; PROJECT TERN -&gt; KESTREL LABS -&gt; DEEPCAST</code></pre>
+    <p>The reference scores the 3-hop detours (0.4 + 0.4 + 0.109) / 3 = 0.303 above the direct paths (0.4 + 0.109) / 2 = 0.255, because two hop-1 nodes with high flow lift the average. The paper's formula adds the source's 1.0 before dividing by the edge count: (1 + 0.4 + 0.109) / 2 = 0.755 versus (1 + 0.4 + 0.4 + 0.109) / 3 = 0.636, so direct paths win. For a reader LLM the paper-style ranking is better: the detours repeat the same facts with an extra hop and, placed last in an ascending prompt, would take the most attended position. For Priya Nair → Deepcast both functions agree, which is why a single test case is not enough to validate a scorer.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 18.3 <span class="level">Core</span></h4>
+  <p>Using your <code>pathrag_paths</code> from 18.2 with α = 0.8, find the largest threshold θ (to three decimal places) for which a path from the 2024 bleaching event to Lena Park or Brightwater Capital survives within 3 hops. How many nodes spread at that θ compared with θ = 0.02, and what does this say about tuning θ globally?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Flows from the bleaching event (degree 2): Sentinel and Halden Reef get 0.8 / 2 = 0.4. Sentinel (degree 6) sends 0.8 · 0.4 / 6 = 0.0533 to Kestrel Labs. For Kestrel to spread we need 0.0533 / 11 = 0.00485 ≥ θ. So the largest θ is <strong>0.004</strong> at three decimals (0.00485 exactly). Lena Park and Brightwater then get 0.8 · 0.0533 / 11 = 0.0039 each.</p>
+    <pre><code class="language-python">for theta in (0.02, 0.005, 0.004):
+    S, expanded = flow_resources(G, "2024 BLEACHING", theta=theta)
+    paths = pathrag_paths(G, "2024 BLEACHING", ["LENA PARK", "BRIGHTWATER CAPITAL"], theta=theta)
+    print(theta, len(expanded), [(round(s, 3), p) for p, s in paths])
+# 0.02  5 []
+# 0.005 7 []
+# 0.004 8 [(0.486, [..., 'PROJECT SENTINEL', 'KESTREL LABS', 'BRIGHTWATER CAPITAL']),
+#          (0.486, [..., 'PROJECT SENTINEL', 'KESTREL LABS', 'LENA PARK'])]</code></pre>
+    <p>Reliability is (1 + 0.4 + 0.0533 + 0.0039) / 3 = 0.486. At θ = 0.004, 8 nodes spread instead of 5, including the hub, which in a real graph with thousands of Kestrel edges would release a flood of candidates. A single global θ cannot serve both question 3 (where hub pruning is exactly right) and question 2 (where the hub is on the answer). Practical fixes: set θ per query based on how many candidates survive (start strict, relax until at least k paths exist), or combine flow with semantic relation scoring so the “board member” edge out of a hub survives while “located in” does not.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 18.4 <span class="level">Core</span></h4>
+  <p>Your product must answer 5,000 questions a day with a p95 latency under 8 seconds. Each LLM pruning or reasoning call takes about 700 ms and costs $0.002 with your model; the final answer call takes 2 seconds and costs $0.01. Compute the worst-case latency and daily cost for ToG with N = 3, D = 3 (sequential calls), for ToG-R, and for ToG with SBERT pruning. Then propose a configuration that meets the latency target.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Worst-case calls, excluding the final answer: ToG 2ND + D = 21; ToG-R ND + D = 12; SBERT pruning D = 3 (reasoning only).</p>
+    <table>
+      <thead><tr><th>Variant</th><th>Sequential latency</th><th>Cost per question</th><th>Cost per day</th></tr></thead>
+      <tbody>
+        <tr><td>ToG</td><td>21 × 0.7 + 2 = 16.7 s</td><td>21 × 0.002 + 0.01 = $0.052</td><td>$260</td></tr>
+        <tr><td>ToG-R</td><td>12 × 0.7 + 2 = 10.4 s</td><td>$0.034</td><td>$170</td></tr>
+        <tr><td>SBERT pruning</td><td>3 × 0.7 + 2 = 4.1 s</td><td>$0.016</td><td>$80</td></tr>
+      </tbody>
+    </table>
+    <p>Only SBERT pruning meets 8 s sequentially, at some accuracy cost. A better design keeps LLM pruning but parallelizes within a depth: the N relation pruning calls for the N beam entities are independent, so a depth takes about 0.7 s (relation prunes in parallel) + 0.7 s (entity prune) + 0.7 s (reasoning) = 2.1 s, and three depths plus the answer take about 8.3 s, just over target. Merge relation pruning for all beam entities into one call and fold the reasoning question into the entity pruning prompt (“score these paths, and say whether they suffice”), and a depth takes 1.4 s: 3 × 1.4 + 2 = 6.2 s worst case, 7 calls (two per depth plus the answer), 6 × $0.002 + $0.01 = $0.022 per question or $110 per day. Early stopping at depth 1 or 2 lowers the average further.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 18.5 <span class="level">Stretch</span></h4>
+  <p>Add Plan-on-Graph style self-correction to <code>think_on_graph</code>: (a) before searching, ask the LLM to decompose the question into sub-objectives; (b) keep every pruned candidate path in memory; (c) after each reasoning step, ask the LLM which sub-objectives are unmet and whether to backtrack; if so, restore the best pruned candidates relevant to an unmet sub-objective into the beam. Test on question 2 with a pruner that wrongly prefers Tidewater Institute over Kestrel Labs at depth 2.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">DECOMPOSE = """Question: {question}
+Break the question into ordered sub-objectives, each a short condition to satisfy.
+Return JSON: {{"subobjectives": ["...", "..."]}}"""
+
+REFLECT = """Question: {question}
+Sub-objectives: {subs}
+Current paths:
+{paths}
+Previously pruned paths (numbered):
+{pruned}
+Which sub-objectives are still unmet? Should we backtrack to some pruned paths?
+Return JSON: {{"unmet": [&lt;indices&gt;], "sufficient": true|false, "answer": "", "restore": [&lt;pruned path numbers&gt;]}}"""
+
+def plan_on_graph(G, question, llm, topic_entities, width=2, depth=4):
+    subs = parse_json_response(llm.complete(DECOMPOSE.format(question=question), json=True)).get("subobjectives", [])
+    beam = [[e] for e in topic_entities if e in G][:width]
+    memory_pruned: list[list[str]] = []
+    for _ in range(depth):
+        candidates = []
+        for path in beam:
+            for rel, tails in relations_of(G, path[-1]).items():
+                candidates += [path + [rel, t] for t in tails if t not in path]
+        if not candidates:
+            break
+        prompt = ENTITY_PRUNE.format(question=question + "\nSub-objectives: " + "; ".join(subs),
+                                     candidates="\n".join(f"{i}. {' -&gt; '.join(p)}" for i, p in enumerate(candidates)))
+        ranked = [p for p, _ in sorted(zip(candidates, _scores(llm, prompt, len(candidates))), key=lambda x: -x[1])]
+        beam, memory_pruned = ranked[:width], memory_pruned + ranked[width:]
+        verdict = parse_json_response(llm.complete(REFLECT.format(
+            question=question, subs=subs, paths=_render(beam),
+            pruned="\n".join(f"{i}. {' -&gt; '.join(p)}" for i, p in enumerate(memory_pruned))), json=True))
+        if verdict.get("sufficient") and verdict.get("answer"):
+            return {"answer": verdict["answer"], "paths": beam}
+        restore = [memory_pruned[i] for i in verdict.get("restore", []) if 0 &lt;= i &lt; len(memory_pruned)]
+        if restore:                                   # self-correction: backtrack to unselected entities
+            beam = (restore + beam)[:width]
+            memory_pruned = [p for p in memory_pruned if p not in restore]
+    return {"answer": llm.complete(ANSWER.format(question=question, paths=_render(beam))), "paths": beam}</code></pre>
+    <p>Merging relation and entity pruning into one call keeps the example short (a design choice, not PoG's exact procedure). For the test, script a fake LLM whose entity pruner scores Tidewater above Kestrel Labs at depth 2 and whose reflection step, seeing that the “company that runs the drones” sub-objective has no path containing a company with board members, returns the index of the pruned path ending at Kestrel Labs. Assert that Kestrel Labs is back in the beam at depth 3 and that the final paths include Lena Park. Two things to watch: bound the number of restores per question (reflection loops can oscillate), and keep pruned memory small by storing only the top few pruned candidates per depth, or the reflection prompt grows every iteration.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In PathRAG's flow model, why do paths through a hub like Kestrel Labs tend to be pruned?</p>
+  <ol>
+    <li>Hubs are removed from the graph during indexing</li>
+    <li data-correct>A hub divides the resource it receives by its large degree, so its resource per neighbor falls below θ</li>
+    <li>The LLM scores hub relations low</li>
+    <li>The decay rate is applied twice at hubs</li>
+  </ol>
+  <div class="explain">Each node passes α · S / out-degree to its neighbors and stops if S / degree &lt; θ. With 11 neighbors, Kestrel's 0.2 becomes 0.018 per neighbor, under θ = 0.02. No LLM is involved in the pruning.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does PathRAG put the most reliable path last in the prompt?</p>
+  <ol>
+    <li>Because the answer is generated from the last line only</li>
+    <li>To save tokens through prompt caching</li>
+    <li>Because paths must be in topological order</li>
+    <li data-correct>LLMs use information at the ends of long contexts better than in the middle, and the end is closest to the question</li>
+  </ol>
+  <div class="explain">This addresses the “lost in the middle” effect. Ascending reliability order leaves the strongest evidence in a well-attended position.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In Think-on-Graph with beam width N = 3 and depth D = 3, what is the upper bound on LLM calls per question?</p>
+  <ol>
+    <li>4</li>
+    <li>13</li>
+    <li data-correct>22</li>
+    <li>27</li>
+  </ol>
+  <div class="explain">2ND + D + 1 = 18 + 3 + 1 = 22: up to N relation-pruning and N entity-pruning calls per depth, one reasoning call per depth, and a final answer. 13 is ToG-R's bound (ND + D + 1); 4 is the bound with BM25 or SBERT pruning (D + 1).</div>
+</div>
+
+<div class="quiz">
+  <p class="q">ToG reaches its maximum depth without the reasoning step declaring the paths sufficient. What happens?</p>
+  <ol>
+    <li data-correct>It generates an answer from the retrieved paths, relying on the model's own knowledge for any gaps</li>
+    <li>It returns “I don't know”</li>
+    <li>It restarts the search with a larger beam</li>
+    <li>It backtracks to pruned entities</li>
+  </ol>
+  <div class="explain">ToG answers anyway at depth D. That is why depth matters on private graphs, where model knowledge cannot fill the gaps. Backtracking to pruned entities is Plan-on-Graph's reflection, not ToG's behavior.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What does “tight coupling” mean in ToG-2?</p>
+  <ol>
+    <li>The knowledge graph and document index are stored in the same database</li>
+    <li>Graph results and text results are concatenated into one prompt</li>
+    <li data-correct>Graph search picks which documents to read, and scores from those documents decide which entities stay in the beam</li>
+    <li>The LLM is fine-tuned on the knowledge graph</li>
+  </ol>
+  <div class="explain">Each source guides retrieval from the other in every iteration: candidate entities select documents, and chunk relevance scores prune entities. Concatenating separately retrieved results is loose coupling.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which problem is Plan-on-Graph's reflection step designed to fix?</p>
+  <ol>
+    <li>High indexing cost</li>
+    <li data-correct>An early pruning mistake that ToG's beam search cannot undo</li>
+    <li>Entity linking errors at initialization</li>
+    <li>Prompt injection through node descriptions</li>
+  </ol>
+  <div class="explain">With memory of explored and pruned candidates and sub-objective status, PoG can decide to backtrack to entities it did not select, which fixed-beam ToG cannot do.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>My extracted graph has no relation types, only descriptions. Can I still use ToG?</summary>
+  <div><p>Yes, with care. Treat each edge description as a relation, as <code>relations_of</code> does, but expect many near-duplicate “relations” around hubs, which inflates pruning prompts. Two improvements help: extract a short typed label alongside the description during indexing (Chapter 8 discusses this), or cluster descriptions per entity by embedding similarity and show the pruner one representative per cluster.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Are paths better context than passages?</summary>
+  <div><p>For relational questions, paths are more compact and more checkable; for questions that need nuance, dates, reasons or quotes, passages win, because edges compress text. The strongest setups give both: the path as a skeleton, and for each hop the source text unit that produced the edge (<code>source_ids</code>), trimmed to the relevant sentence. Chapter 22 covers formatting and budgeting that context.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I find the entities to start paths from?</summary>
+  <div><p>The same way as local search: LLM or NER extraction of mentions, then linking by name, alias and embedding similarity (Chapter 14). For path retrieval linking errors are more damaging, because a wrong start node yields confident, well-formed, wrong paths. Keep the top two or three candidates per mention when similarities are close, and let path scores or the LLM pruner decide.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should the LLM walker see node descriptions or just names?</summary>
+  <div><p>Names alone often mislead (“Tern” could be a bird). Short descriptions, truncated to one sentence, make pruning decisions much better for a modest token cost. Descriptions are also where prompt injection can enter, since they come from documents: treat them as data inside clear delimiters, and never let graph content choose tools or queries directly. Chapter 29 covers this.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is beam search on a graph different from beam search in decoding?</summary>
+  <div><p>The idea is the same: keep the best N partial hypotheses, extend each, rescore and keep the best N again. In decoding, hypotheses are token sequences and the score is model log-probability. In ToG, hypotheses are relation paths and the score is an LLM relevance judgment, so scores are not comparable across steps and there is no length normalization. That is one reason the explicit reasoning step decides when to stop instead of a score threshold.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a path-evidence answerer with a budget</h3>
+  <p>Build a service that answers the three multi-hop canonical questions with explicit paths, using PathRAG-style pruning by default and escalating to an LLM walker only when the cheap method finds nothing.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>paths</code> command that prints the top paths between linked entities, their flow scores, and the source text unit for every hop</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A paper-style reliability scorer (Exercise 18.2) with unit tests for the Priya Nair → Deepcast and Jonas Vehl → Deepcast numbers</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A ToG walker with a hard cap on LLM calls, and a counter that logs calls and tokens per question</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An escalation rule: if PathRAG returns no path within 3 hops, or the reader says the paths are insufficient, run the walker</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A faithfulness check that flags any answer entity pair not connected on a retrieved path</span></li>
+  </ul>
+  <p><strong>Done when</strong> all three multi-hop questions are answered with paths shown to the user, and you can report LLM calls per question for each route.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Relational paths are compact, citable, checkable evidence for multi-hop questions, but the number of candidate paths explodes with length and hubs.</li>
+    <li>PathRAG prunes with resource flow: decay per hop, division by degree, early stopping below θ, and reliability as resource averaged over edges; the best path goes last in the prompt.</li>
+    <li>Hub pruning is usually right and sometimes removes the answer; tune θ per query or add semantic relation scoring.</li>
+    <li>Think-on-Graph lets an LLM run beam search on the graph with relation and entity pruning and a stop decision, at up to 2ND + D + 1 calls per question.</li>
+    <li>ToG-2 couples graph search with document retrieval so text decides which entities survive; Plan-on-Graph adds sub-objectives, memory and backtracking.</li>
+    <li>Choose by question shape and budget: algorithmic paths for “how are X and Y connected”, LLM walkers for constraint chains, generated queries for precise questions over curated graphs.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Chen, Guo, Yang, et al. <a href="https://arxiv.org/abs/2502.14902">PathRAG: Pruning Graph-based Retrieval Augmented Generation with Relational Paths</a>. <span class="venue">arXiv 2502.14902, 2025</span></li>
+  <li>Sun, Xu, Tang, Wang, Lin, Gong, Ni, Shum, Guo. <a href="https://arxiv.org/abs/2307.07697">Think-on-Graph: Deep and Responsible Reasoning of Large Language Model on Knowledge Graph</a>. <span class="venue">ICLR 2024, arXiv 2307.07697</span></li>
+  <li>Ma, Xu, Jiang, Li, Qu, Yang, Mao, Guo. <a href="https://arxiv.org/abs/2407.10805">Think-on-Graph 2.0: Deep and Faithful Large Language Model Reasoning with Knowledge-guided Retrieval Augmented Generation</a>. <span class="venue">arXiv 2407.10805, 2024</span></li>
+  <li>Chen, Tong, Jin, Sun, Ye, Xiong. <a href="https://arxiv.org/abs/2410.23875">Plan-on-Graph: Self-Correcting Adaptive Planning of Large Language Model on Knowledge Graphs</a>. <span class="venue">arXiv 2410.23875, 2024</span></li>
+  <li>Luo, Li, Haffari, Pan. <a href="https://arxiv.org/abs/2310.01061">Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning</a>. <span class="venue">ICLR 2024, arXiv 2310.01061</span></li>
+  <li>Liu et al. <a href="https://arxiv.org/abs/2307.03172">Lost in the Middle: How Language Models Use Long Contexts</a>. <span class="venue">TACL 2024, arXiv 2307.03172</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>Yen. <a href="https://doi.org/10.1287/mnsc.17.11.712">Finding the K Shortest Loopless Paths in a Network</a>. <span class="venue">Management Science, 1971</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch18-beam", function (el, cfg, api) {
+  var W = 720, H = cfg.height || 400;
+  var fr = api.frame(el, cfg);
+  var svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Beam search" }, fr.stage);
+  var G = api.drawGraph(svg, { nodes: cfg.nodes, edges: cfg.edges, directed: true }, W, H);
+  var phase = api.h("div", { class: "viz-text" }, fr.stage);
+  phase.style.borderTop = "1px solid var(--rule)";
+  var cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  var steps = cfg.steps || [];
+  function render(i) {
+    var s = steps[i];
+    var shown = {};
+    for (var k = 0; k <= i; k++) (steps[k].show || []).forEach(function (id) { shown[id] = true; });
+    var kept = new Set(s.kept || []), pruned = new Set(s.pruned || []);
+    G.nodes.forEach(function (n) {
+      var on = !!shown[n.id];
+      n._g.style.opacity = on ? 1 : 0;
+      n._g.style.pointerEvents = on ? "" : "none";
+      n._g.classList.toggle("active", kept.has(n.id));
+      var fillPct = kept.has(n.id) ? 70 : pruned.has(n.id) ? 8 : 30;
+      n._c.style.fill = "color-mix(in srgb, " + (pruned.has(n.id) ? "var(--bad)" : n._col) + " " + fillPct + "%, var(--panel))";
+      n._c.style.stroke = pruned.has(n.id) ? "var(--bad)" : kept.has(n.id) ? "var(--edge)" : n._col;
+      n._c.style.strokeWidth = kept.has(n.id) ? "3" : "1.5";
+      n._c.style.strokeDasharray = pruned.has(n.id) ? "3 3" : "";
+      n._t.style.textDecoration = "";
+      n._t.style.fill = pruned.has(n.id) ? "var(--bad)" : "";
+      var sc = s.scores && s.scores[n.id];
+      n._s.textContent = sc != null ? api.fmt(sc, 2) : "";
+      n._s.setAttribute("dy", -G.radius(n) - 6);
+    });
+    var hot = new Set(s.edges || []), vis = new Set(s.visitedEdges || []);
+    G.edges.forEach(function (e) {
+      var on = shown[e.source] && shown[e.target];
+      var k1 = e.source + ">" + e.target, k2 = e.target + ">" + e.source;
+      var isHot = hot.has(k1) || hot.has(k2), isVis = vis.has(k1) || vis.has(k2);
+      e._el.style.opacity = on ? (isHot ? 1 : isVis ? 0.8 : 0.45) : 0;
+      e._el.classList.toggle("active", isHot);
+      e._el.classList.toggle("visited", isVis && !isHot);
+      if (e._label) { e._label.style.opacity = on ? 1 : 0; e._label.classList.remove("off"); }
+    });
+    var html = "<strong>" + api.escapeHtml(s.phase || "") + "</strong>";
+    if (s.table && s.table.length) {
+      html += '<table style="margin:.5em 0 0;font-size:.82rem"><thead><tr><th>Beam entity</th><th>Candidate relation</th><th>LLM score</th><th>Decision</th></tr></thead><tbody>';
+      s.table.forEach(function (r) {
+        var keep = r[3] === "keep";
+        html += "<tr><td>" + api.escapeHtml(r[0]) + "</td><td>" + api.escapeHtml(r[1]) + "</td><td>" + api.escapeHtml(r[2]) + '</td><td style="color:' + (keep ? "var(--good)" : "var(--bad)") + '">' + api.escapeHtml(r[3]) + "</td></tr>";
+      });
+      html += "</tbody></table>";
+    }
+    phase.innerHTML = html;
+    cap.innerHTML = s.caption || "";
+  }
+  api.player(el, steps.length, render, { interval: cfg.interval || 2600 });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graph fundamentals for RAG | Graph RAG from Scratch</title>
+<meta name="description" content="The graph ideas GraphRAG stands on: adjacency, degree, BFS and DFS, k-hop neighborhoods, shortest paths, components, PageRank, clustering and modularity, worked on the Kestrel Labs graph.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/04-graph-fundamentals.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="04-graph-fundamentals" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Graph fundamentals for RAG</h1>
+  <p class="lede">Every GraphRAG retriever is a classic graph algorithm wearing an LLM costume: local search is a neighborhood expansion, HippoRAG is PageRank, global search sits on community detection. This chapter teaches those algorithms on the Kestrel Labs graph, by hand and in NetworkX, so the later chapters feel like applications rather than magic.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Describe a graph precisely: directed or undirected, weighted, multigraph, with node and edge attributes</li>
+      <li>Store a graph as an adjacency list or matrix and reason about the memory and time each costs</li>
+      <li>Run BFS, DFS, k-hop expansion and shortest-path search by hand, and explain why hub nodes make neighborhoods explode</li>
+      <li>Compute degree centrality, clustering coefficients and a few steps of PageRank power iteration with real numbers</li>
+      <li>Explain what connected components, communities and modularity measure, and where each shows up in GraphRAG</li>
+      <li>Implement all of the above in NetworkX on the Kestrel graph</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why a RAG engineer needs graph theory</h2>
+<p>In <a href="03-where-rag-breaks.html">Chapter 3</a> you saw vector RAG fail on “Why did Kestrel Labs start Project Tern?”. The answer lives in three separate facts: Marlow Dynamics acquired Deepcast, Deepcast supplied Kestrel, Kestrel started Tern to replace Deepcast sonar. No single chunk is similar enough to the question to bring back all three. A graph fixes this by making the connections explicit, but only if you can <em>move around</em> the graph efficiently and decide <em>which</em> parts of it matter. That is what graph algorithms are for.</p>
+<p>Here is the map from this chapter to the rest of the course:</p>
+<table>
+  <thead><tr><th>Concept in this chapter</th><th>Where GraphRAG uses it</th></tr></thead>
+  <tbody>
+    <tr><td>Adjacency lists, node and edge attributes</td><td>The in-memory index built in <a href="09-entity-resolution.html">Chapter 9</a> and stored in <a href="13-storage-indexing.html">Chapter 13</a></td></tr>
+    <tr><td>Degree</td><td>Entity “rank” used to prioritize context in <a href="14-local-search.html">local search</a></td></tr>
+    <tr><td>BFS and k-hop neighborhoods</td><td>Neighborhood expansion from seed entities (Chapters 14 and 16)</td></tr>
+    <tr><td>Shortest paths</td><td>Path retrieval and bridge paths between communities (<a href="18-paths-and-agents.html">Chapter 18</a>)</td></tr>
+    <tr><td>PageRank and Personalized PageRank</td><td>HippoRAG-style retrieval (<a href="17-ppr-hipporag.html">Chapter 17</a>)</td></tr>
+    <tr><td>Clustering, communities, modularity</td><td>Louvain and Leiden in <a href="11-community-detection.html">Chapter 11</a>, community reports and global search</td></tr>
+  </tbody>
+</table>
+<p>Throughout the chapter we use one graph: 16 entities and 27 of the running example's relationships, treated as undirected for now. You will meet it in the first visualization below.</p>
+
+<h2>What a graph is</h2>
+<p>A <strong>graph</strong> <em>G = (V, E)</em> is a set of <strong>nodes</strong> (also called vertices) <em>V</em> and a set of <strong>edges</strong> <em>E</em>, where each edge connects two nodes. We write <em>n = |V|</em> for the number of nodes and <em>m = |E|</em> for the number of edges. In the Kestrel graph, <em>n = 16</em> and <em>m = 27</em>. Two nodes joined by an edge are <strong>adjacent</strong>, or <strong>neighbors</strong>.</p>
+<p>That definition is tiny on purpose. Everything else is a variation you choose depending on what your data means.</p>
+
+<h3>Directed and undirected</h3>
+<p>In an <strong>undirected</strong> graph an edge <em>{u, v}</em> has no direction: “Lena Park is connected to Brightwater Capital.” In a <strong>directed</strong> graph an edge <em>(u, v)</em> goes from a source to a target: “Marlow Dynamics ACQUIRED Deepcast” is not the same as “Deepcast ACQUIRED Marlow Dynamics.” Knowledge graphs are naturally directed, because relations have a reading direction.</p>
+<p>So why does Microsoft GraphRAG, and <code>minigraphrag</code>'s <code>build_graph</code>, store an undirected <code>nx.Graph</code>? Because the downstream algorithms (community detection, neighborhood expansion for context) care about <em>whether</em> two entities are related, not the grammatical direction, and the relation's meaning is preserved in the edge's free-text description. When you need direction, for example to ask “who acquired whom?”, you either keep a directed graph or keep the direction as an edge attribute. Chapter 5 covers typed, directed knowledge graphs in depth.</p>
+
+<h3>Weighted graphs</h3>
+<p>A <strong>weighted</strong> graph attaches a number <em>w(u, v)</em> to each edge. What the number <em>means</em> is your choice, and getting it backwards is a classic bug:</p>
+<ul>
+  <li><strong>Strength or similarity</strong> (higher = more connected). <code>minigraphrag</code>'s <code>build_graph</code>, like the Microsoft GraphRAG implementation, adds up the 1–10 <code>strength</code> of every extracted instance of a relation, so an edge stated in five text units ends up heavier. (The GraphRAG paper describes the weight as the number of duplicate extractions; the effect is the same.) Community detection and PageRank read weights this way.</li>
+  <li><strong>Cost or distance</strong> (higher = farther). Shortest-path algorithms read weights this way. To use strengths as distances, transform them, for example <em>cost = 1 / w</em> or <em>cost = −log p</em> if the weight is a probability.</li>
+</ul>
+
+<h3>Multigraphs</h3>
+<p>A <strong>multigraph</strong> allows more than one edge between the same pair of nodes. Dr. Mira Okafor both CO_FOUNDED and is CEO_OF Kestrel Labs; Jonas Vehl CO_FOUNDED Kestrel and was CTO_OF it until March 2026. A simple graph must squash those into one edge; a multigraph keeps them separate, each with its own type and dates. NetworkX has four classes for the four combinations: <code>Graph</code>, <code>DiGraph</code>, <code>MultiGraph</code> and <code>MultiDiGraph</code>.</p>
+
+<h3>Attributes</h3>
+<p>Real graphs carry data on nodes and edges. An entity node in GraphRAG has a type, a description, the ids of the text units it came from, and a degree. An edge has a description, a weight and its own source ids. In graph-database vocabulary this is a <strong>labeled property graph</strong>; Chapter 5 compares it with RDF triples.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="kinds-title">
+      <title id="kinds-title">Four kinds of graph drawn with Kestrel Labs examples: undirected, directed, weighted and multigraph</title>
+      <defs>
+        <marker id="ch4-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <text class="d-text bold" x="12" y="22">Undirected</text>
+      <line class="d-line" x1="50" y1="80" x2="120" y2="150"/>
+      <circle class="d-node" cx="50" cy="80" r="16"/>
+      <circle class="d-node" cx="120" cy="150" r="16"/>
+      <text class="d-text small" x="16" y="54">Lena Park</text>
+      <text class="d-text small" x="76" y="186">Brightwater</text>
+      <text class="d-text small" x="12" y="232">{u, v} = {v, u}</text>
+
+      <text class="d-text bold" x="182" y="22">Directed</text>
+      <line class="d-line" x1="220" y1="80" x2="276" y2="136" marker-end="url(#ch4-arrow)"/>
+      <circle class="d-node" cx="220" cy="80" r="16"/>
+      <circle class="d-node" cx="290" cy="150" r="16"/>
+      <text class="d-text small" x="186" y="54">Marlow</text>
+      <text class="d-text small" x="262" y="186">Deepcast</text>
+      <text class="d-text small mono" x="250" y="104">ACQUIRED</text>
+      <text class="d-text small" x="182" y="232">(u, v) is not (v, u)</text>
+
+      <text class="d-text bold" x="352" y="22">Weighted</text>
+      <line class="d-line hot" x1="390" y1="80" x2="460" y2="150"/>
+      <circle class="d-node" cx="390" cy="80" r="16"/>
+      <circle class="d-node" cx="460" cy="150" r="16"/>
+      <text class="d-text small" x="356" y="54">Deepcast</text>
+      <text class="d-text small" x="420" y="186">Kestrel Labs</text>
+      <text class="d-text bold" x="432" y="108">w = 17</text>
+      <text class="d-text small" x="352" y="232">strength summed over chunks</text>
+
+      <text class="d-text bold" x="522" y="22">Multigraph</text>
+      <path class="d-line" d="M 572 92 Q 640 92 648 138" marker-end="url(#ch4-arrow)"/>
+      <path class="d-line dash" d="M 562 98 Q 566 150 630 152" marker-end="url(#ch4-arrow)"/>
+      <circle class="d-node" cx="560" cy="80" r="16"/>
+      <circle class="d-node" cx="650" cy="155" r="16"/>
+      <text class="d-text small" x="528" y="54">Mira Okafor</text>
+      <text class="d-text small" x="600" y="190">Kestrel</text>
+      <text class="d-text small mono" x="596" y="84">CO_FOUNDED</text>
+      <text class="d-text small mono" x="530" y="172">CEO_OF</text>
+      <text class="d-text small" x="522" y="232">parallel typed edges</text>
+    </svg>
+  </div>
+  <figcaption>The same corpus can be modeled four ways. GraphRAG's entity graph is undirected and weighted; a typed knowledge graph (Chapter 5) is a directed multigraph.</figcaption>
+</figure>
+
+<h2>Storing a graph: adjacency list or matrix</h2>
+<p>An algorithm's speed depends on how quickly it can answer “who are the neighbors of <em>v</em>?” and “is there an edge between <em>u</em> and <em>v</em>?”. Two representations dominate.</p>
+
+<h3>A worked example on a Kestrel subgraph</h3>
+<p>Take five nodes: Kestrel Labs (K), Dr. Mira Okafor (M), Jonas Vehl (J), Priya Nair (P) and Project Tern (T), with six undirected edges: M–K, J–K, P–K, K–T, J–T, P–T.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 230" role="img" aria-labelledby="adj-title">
+      <title id="adj-title">A five-node Kestrel subgraph and its adjacency list</title>
+      <line class="d-line" x1="130" y1="95" x2="40" y2="40"/>
+      <line class="d-line" x1="130" y1="95" x2="60" y2="195"/>
+      <line class="d-line" x1="130" y1="95" x2="230" y2="195"/>
+      <line class="d-line" x1="130" y1="95" x2="260" y2="70"/>
+      <line class="d-line" x1="60" y1="195" x2="260" y2="70"/>
+      <line class="d-line" x1="230" y1="195" x2="260" y2="70"/>
+      <circle class="d-node hot" cx="130" cy="95" r="20"/>
+      <text class="d-text bold on-hot" x="130" y="100" text-anchor="middle">K</text>
+      <circle class="d-node" cx="40" cy="40" r="18"/>
+      <text class="d-text bold" x="40" y="45" text-anchor="middle">M</text>
+      <circle class="d-node" cx="60" cy="195" r="18"/>
+      <text class="d-text bold" x="60" y="200" text-anchor="middle">J</text>
+      <circle class="d-node" cx="230" cy="195" r="18"/>
+      <text class="d-text bold" x="230" y="200" text-anchor="middle">P</text>
+      <circle class="d-node alt" cx="260" cy="70" r="18"/>
+      <text class="d-text bold" x="260" y="75" text-anchor="middle">T</text>
+
+      <rect class="d-box" x="330" y="20" width="330" height="190" rx="8"/>
+      <text class="d-text bold" x="346" y="46">Adjacency list</text>
+      <text class="d-text mono" x="346" y="76">K: [M, J, P, T]</text>
+      <text class="d-text mono" x="346" y="100">M: [K]</text>
+      <text class="d-text mono" x="346" y="124">J: [K, T]</text>
+      <text class="d-text mono" x="346" y="148">P: [K, T]</text>
+      <text class="d-text mono" x="346" y="172">T: [K, J, P]</text>
+      <text class="d-text small" x="500" y="76">degree 4</text>
+      <text class="d-text small" x="500" y="100">degree 1</text>
+      <text class="d-text small" x="500" y="124">degree 2</text>
+      <text class="d-text small" x="500" y="148">degree 2</text>
+      <text class="d-text small" x="500" y="172">degree 3</text>
+      <text class="d-text small" x="346" y="198">12 entries = 2m, because each edge is listed twice</text>
+    </svg>
+  </div>
+  <figcaption>An adjacency list stores, for each node, the list of its neighbors. Total size is proportional to n + m.</figcaption>
+</figure>
+
+<p>The <strong>adjacency matrix</strong> <em>A</em> is an <em>n × n</em> grid where <em>A<sub>ij</sub> = 1</em> if there is an edge between node <em>i</em> and node <em>j</em> (or the weight, in a weighted graph), else 0. For the undirected subgraph, in the order K, M, J, P, T:</p>
+
+<table>
+  <thead><tr><th></th><th>K</th><th>M</th><th>J</th><th>P</th><th>T</th><th>Row sum (degree)</th></tr></thead>
+  <tbody>
+    <tr><th>K</th><td>0</td><td>1</td><td>1</td><td>1</td><td>1</td><td>4</td></tr>
+    <tr><th>M</th><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td></tr>
+    <tr><th>J</th><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>2</td></tr>
+    <tr><th>P</th><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>2</td></tr>
+    <tr><th>T</th><td>1</td><td>0</td><td>1</td><td>1</td><td>0</td><td>3</td></tr>
+  </tbody>
+</table>
+
+<p>Three properties follow from how the graph was defined. The matrix is <strong>symmetric</strong> (<em>A = A<sup>T</sup></em>) because the graph is undirected. The diagonal is zero because there are no self-loops. And each row sum is the node's degree.</p>
+<p>Now make it directed, using the reading direction of each relation: M→K (CO_FOUNDED), J→K (CO_FOUNDED), P→K (CTO_OF), K→T (RUNS), J→T (CO_LEADS), P→T (CO_LEADS).</p>
+
+<table>
+  <thead><tr><th>from \ to</th><th>K</th><th>M</th><th>J</th><th>P</th><th>T</th><th>Out-degree</th></tr></thead>
+  <tbody>
+    <tr><th>K</th><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td><td>1</td></tr>
+    <tr><th>M</th><td>1</td><td>0</td><td>0</td><td>0</td><td>0</td><td>1</td></tr>
+    <tr><th>J</th><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>2</td></tr>
+    <tr><th>P</th><td>1</td><td>0</td><td>0</td><td>0</td><td>1</td><td>2</td></tr>
+    <tr><th>T</th><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+    <tr><th>In-degree</th><td>3</td><td>0</td><td>0</td><td>0</td><td>3</td><td></td></tr>
+  </tbody>
+</table>
+
+<p>The matrix is no longer symmetric. Row sums give <strong>out-degree</strong>, column sums give <strong>in-degree</strong>. Project Tern has out-degree 0: a random walk that follows arrows gets stuck there. Remember that; it is the “dangling node” problem PageRank has to handle.</p>
+
+<h3>Which representation to use</h3>
+<table>
+  <thead><tr><th>Operation</th><th>Adjacency list</th><th>Adjacency matrix</th></tr></thead>
+  <tbody>
+    <tr><td>Memory</td><td><em>O(n + m)</em></td><td><em>O(n²)</em> dense; <em>O(n + m)</em> as a sparse matrix</td></tr>
+    <tr><td>List neighbors of <em>v</em></td><td><em>O(deg v)</em></td><td><em>O(n)</em> dense</td></tr>
+    <tr><td>Is <em>(u, v)</em> an edge?</td><td><em>O(deg u)</em>, or <em>O(1)</em> with a hash set per node</td><td><em>O(1)</em></td></tr>
+    <tr><td>Linear algebra (PageRank, spectral methods)</td><td>Awkward</td><td>Natural: <em>A x</em> is one matrix-vector product</td></tr>
+  </tbody>
+</table>
+<p>Entity graphs extracted from text are <strong>sparse</strong>: most entities relate to a handful of others. A corpus with 100,000 entities and 500,000 relationships would need 10<sup>10</sup> cells as a dense matrix (about 80 GB of float64) but only a few million list entries. That is why NetworkX uses dict-of-dicts adjacency lists, and why numerical code switches to sparse matrices (<code>scipy.sparse</code>) rather than dense ones.</p>
+
+<div class="callout note">
+  <span class="callout-title">NetworkX is a dict of dicts</span>
+  <p>In NetworkX, <code>G.adj["Kestrel Labs"]</code> is a dict mapping each neighbor to that edge's attribute dict. Neighbor lookup and edge-existence checks are both hash lookups. It is pleasant and flexible, and slow in pure Python past a few million edges. For larger graphs, the ideas in this chapter carry over unchanged to igraph, graph-tool, a graph database or sparse matrices.</p>
+</div>
+
+<h2>Degree and degree centrality</h2>
+<p>The <strong>degree</strong> of a node, <em>deg(v)</em>, is its number of neighbors (in a weighted graph, the <strong>weighted degree</strong> or strength sums the edge weights). Because every edge has two ends, the degrees always add up to twice the number of edges:</p>
+<p style="text-align:center"><em>∑<sub>v</sub> deg(v) = 2m</em></p>
+<p>The Kestrel graph's degrees sum to 54 = 2 × 27. This “handshake lemma” is a good sanity check for any graph you build.</p>
+<p><strong>Degree centrality</strong> normalizes degree by the maximum possible, <em>n − 1</em>, so graphs of different sizes are comparable: <em>C<sub>D</sub>(v) = deg(v) / (n − 1)</em>. In the Kestrel graph:</p>
+<table>
+  <thead><tr><th>Entity</th><th>Degree</th><th>Degree centrality (÷ 15)</th></tr></thead>
+  <tbody>
+    <tr><td>Kestrel Labs</td><td>11</td><td>0.733</td></tr>
+    <tr><td>Project Sentinel</td><td>5</td><td>0.333</td></tr>
+    <tr><td>Priya Nair, Project Tern, Tidewater Institute</td><td>4</td><td>0.267</td></tr>
+    <tr><td>Deepcast, Marlow Dynamics, Port Avalon, Halden Reef</td><td>3</td><td>0.200</td></tr>
+    <tr><td>The other seven</td><td>2</td><td>0.133</td></tr>
+  </tbody>
+</table>
+<p>Degree is the cheapest importance signal there is, and GraphRAG uses it directly: an entity's <code>rank</code> is its degree, and a relationship's rank is the sum of its endpoints' degrees (<code>add_rank_attributes</code> in <code>minigraphrag/graph_build.py</code>). When local search has more candidate entities and relationships than its token budget allows, it keeps the highest-ranked ones first.</p>
+
+<div class="callout warn">
+  <span class="callout-title">High degree is not the same as relevant</span>
+  <p>Kestrel Labs has degree 11 because nearly every document mentions it. For the question “Who led the Halden Reef survey?”, it is noise. Degree tells you what the corpus talks about most, not what the question needs. Personalized PageRank (Chapter 17) fixes this by measuring importance <em>relative to the query's entities</em>.</p>
+</div>
+
+<h2>Traversal: BFS and DFS</h2>
+<p>A <strong>traversal</strong> visits every node reachable from a start node exactly once. The two basic orders differ in one data structure.</p>
+
+<h3>Breadth-first search</h3>
+<p><strong>BFS</strong> uses a <em>queue</em> (first in, first out). It visits the start node, then all nodes at distance 1, then all at distance 2, and so on. The sets of nodes at each distance are called <strong>BFS layers</strong>. Because it explores in order of hop count, BFS finds shortest paths in unweighted graphs for free.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "BFS from Kestrel Labs",
+  "subtitle": "Layer by layer: queue order equals distance order",
+  "height": 460,
+  "nodes": [
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 46},
+    {"id": "mira", "label": "Mira Okafor", "group": 2, "x": 32, "y": 30},
+    {"id": "jonas", "label": "Jonas Vehl", "group": 2, "x": 58, "y": 14},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 68, "y": 50},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 77, "y": 16},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 90, "y": 33},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 89, "y": 72},
+    {"id": "brightwater", "label": "Brightwater", "group": 1, "x": 80, "y": 90},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 58, "y": 84},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 30, "y": 64},
+    {"id": "tidewater", "label": "Tidewater", "group": 1, "x": 12, "y": 42},
+    {"id": "ruiz", "label": "Ana Ruiz", "group": 2, "x": 7, "y": 70},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 20, "y": 88},
+    {"id": "bleaching", "label": "Bleaching 2024", "group": 5, "x": 40, "y": 88},
+    {"id": "avalon", "label": "Port Avalon", "group": 4, "x": 40, "y": 7},
+    {"id": "council", "label": "City Council", "group": 1, "x": 18, "y": 9}
+  ],
+  "edges": [
+    {"source": "kestrel", "target": "mira"}, {"source": "kestrel", "target": "jonas"}, {"source": "kestrel", "target": "priya"},
+    {"source": "kestrel", "target": "sentinel"}, {"source": "kestrel", "target": "tern"}, {"source": "kestrel", "target": "brightwater"},
+    {"source": "kestrel", "target": "lena"}, {"source": "kestrel", "target": "deepcast"}, {"source": "kestrel", "target": "marlow"},
+    {"source": "kestrel", "target": "avalon"}, {"source": "kestrel", "target": "council"},
+    {"source": "mira", "target": "tidewater"}, {"source": "priya", "target": "marlow"}, {"source": "ruiz", "target": "tidewater"},
+    {"source": "tidewater", "target": "sentinel"}, {"source": "priya", "target": "sentinel"}, {"source": "sentinel", "target": "halden"},
+    {"source": "sentinel", "target": "bleaching"}, {"source": "bleaching", "target": "halden"}, {"source": "ruiz", "target": "halden"},
+    {"source": "lena", "target": "brightwater"}, {"source": "marlow", "target": "deepcast"}, {"source": "jonas", "target": "tern"},
+    {"source": "priya", "target": "tern"}, {"source": "tern", "target": "deepcast"}, {"source": "tidewater", "target": "avalon"},
+    {"source": "council", "target": "avalon"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project", "4": "Location", "5": "Event"},
+  "steps": [
+    {"caption": "The whole graph: 16 entities, 27 relationships. We start BFS at <strong>Kestrel Labs</strong>, so the queue holds just that node.", "dim": false},
+    {"caption": "<strong>Layer 0.</strong> Dequeue Kestrel Labs, mark it visited and enqueue every unvisited neighbor.", "active": ["kestrel"]},
+    {"caption": "<strong>Layer 1: 11 nodes.</strong> All of Kestrel's neighbors are at distance 1. One hop from a hub already reaches 11 of the 15 other entities.", "active": ["mira", "jonas", "priya", "sentinel", "tern", "brightwater", "lena", "deepcast", "marlow", "avalon", "council"], "visited": ["kestrel"], "edges": ["kestrel>mira", "kestrel>jonas", "kestrel>priya", "kestrel>sentinel", "kestrel>tern", "kestrel>brightwater", "kestrel>lena", "kestrel>deepcast", "kestrel>marlow", "kestrel>avalon", "kestrel>council"]},
+    {"caption": "<strong>Layer 2: 3 nodes.</strong> Dequeuing layer 1 in order: Mira Okafor discovers Tidewater; Project Sentinel discovers Halden Reef and the bleaching event. Every other neighbor was already seen, so it is skipped.", "active": ["tidewater", "halden", "bleaching"], "visited": ["kestrel", "mira", "jonas", "priya", "sentinel", "tern", "brightwater", "lena", "deepcast", "marlow", "avalon", "council"], "edges": ["mira>tidewater", "sentinel>halden", "sentinel>bleaching"], "visitedEdges": ["kestrel>mira", "kestrel>jonas", "kestrel>priya", "kestrel>sentinel", "kestrel>tern", "kestrel>brightwater", "kestrel>lena", "kestrel>deepcast", "kestrel>marlow", "kestrel>avalon", "kestrel>council"]},
+    {"caption": "<strong>Layer 3: 1 node.</strong> Tidewater discovers Dr. Ana Ruiz. The queue then empties: all 16 nodes are reachable, so the graph is connected.", "active": ["ruiz"], "visited": ["kestrel", "mira", "jonas", "priya", "sentinel", "tern", "brightwater", "lena", "deepcast", "marlow", "avalon", "council", "tidewater", "halden", "bleaching"], "edges": ["tidewater>ruiz"], "visitedEdges": ["kestrel>mira", "kestrel>jonas", "kestrel>priya", "kestrel>sentinel", "kestrel>tern", "kestrel>brightwater", "kestrel>lena", "kestrel>deepcast", "kestrel>marlow", "kestrel>avalon", "kestrel>council", "mira>tidewater", "sentinel>halden", "sentinel>bleaching"]},
+    {"caption": "<strong>The BFS tree.</strong> The 15 highlighted edges (n − 1) are the ones that discovered a node. Following them back to the root gives a shortest path to every node, for example Ana Ruiz → Tidewater → Mira Okafor → Kestrel Labs.", "visited": ["kestrel", "mira", "jonas", "priya", "sentinel", "tern", "brightwater", "lena", "deepcast", "marlow", "avalon", "council", "tidewater", "halden", "bleaching", "ruiz"], "visitedEdges": ["kestrel>mira", "kestrel>jonas", "kestrel>priya", "kestrel>sentinel", "kestrel>tern", "kestrel>brightwater", "kestrel>lena", "kestrel>deepcast", "kestrel>marlow", "kestrel>avalon", "kestrel>council", "mira>tidewater", "sentinel>halden", "sentinel>bleaching", "tidewater>ruiz"]}
+  ]
+}
+</script>
+</div>
+
+<p>The algorithm, written out so you can see every moving part:</p>
+<pre data-file="examples/ch04_traversal.py"><code class="language-python">from collections import deque
+
+def bfs_layers(adj: dict[str, list[str]], start: str) -&gt; list[list[str]]:
+    """Return nodes grouped by hop distance from `start`."""
+    dist = {start: 0}
+    queue = deque([start])
+    layers = [[start]]
+    while queue:
+        u = queue.popleft()                 # FIFO: oldest discovered first
+        for v in adj[u]:
+            if v not in dist:               # first time we see v is via a shortest path
+                dist[v] = dist[u] + 1
+                if dist[v] == len(layers):
+                    layers.append([])
+                layers[dist[v]].append(v)
+                queue.append(v)
+    return layers</code></pre>
+<p>Each node enters the queue once, and each edge is examined twice (once from each end), so BFS runs in <em>O(n + m)</em> time and <em>O(n)</em> extra memory.</p>
+
+<h3>Depth-first search</h3>
+<p><strong>DFS</strong> swaps the queue for a <em>stack</em> (last in, first out), or equivalently recursion. It follows one path as deep as it can, then backtracks to the most recent node with unexplored neighbors. It also runs in <em>O(n + m)</em>, but the order is completely different.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "DFS from Kestrel Labs",
+  "subtitle": "Go deep, then backtrack",
+  "height": 460,
+  "nodes": [
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 46},
+    {"id": "mira", "label": "Mira Okafor", "group": 2, "x": 32, "y": 30},
+    {"id": "jonas", "label": "Jonas Vehl", "group": 2, "x": 58, "y": 14},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 68, "y": 50},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 77, "y": 16},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 90, "y": 33},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 89, "y": 72},
+    {"id": "brightwater", "label": "Brightwater", "group": 1, "x": 80, "y": 90},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 58, "y": 84},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 30, "y": 64},
+    {"id": "tidewater", "label": "Tidewater", "group": 1, "x": 12, "y": 42},
+    {"id": "ruiz", "label": "Ana Ruiz", "group": 2, "x": 7, "y": 70},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 20, "y": 88},
+    {"id": "bleaching", "label": "Bleaching 2024", "group": 5, "x": 40, "y": 88},
+    {"id": "avalon", "label": "Port Avalon", "group": 4, "x": 40, "y": 7},
+    {"id": "council", "label": "City Council", "group": 1, "x": 18, "y": 9}
+  ],
+  "edges": [
+    {"source": "kestrel", "target": "mira"}, {"source": "kestrel", "target": "jonas"}, {"source": "kestrel", "target": "priya"},
+    {"source": "kestrel", "target": "sentinel"}, {"source": "kestrel", "target": "tern"}, {"source": "kestrel", "target": "brightwater"},
+    {"source": "kestrel", "target": "lena"}, {"source": "kestrel", "target": "deepcast"}, {"source": "kestrel", "target": "marlow"},
+    {"source": "kestrel", "target": "avalon"}, {"source": "kestrel", "target": "council"},
+    {"source": "mira", "target": "tidewater"}, {"source": "priya", "target": "marlow"}, {"source": "ruiz", "target": "tidewater"},
+    {"source": "tidewater", "target": "sentinel"}, {"source": "priya", "target": "sentinel"}, {"source": "sentinel", "target": "halden"},
+    {"source": "sentinel", "target": "bleaching"}, {"source": "bleaching", "target": "halden"}, {"source": "ruiz", "target": "halden"},
+    {"source": "lena", "target": "brightwater"}, {"source": "marlow", "target": "deepcast"}, {"source": "jonas", "target": "tern"},
+    {"source": "priya", "target": "tern"}, {"source": "tern", "target": "deepcast"}, {"source": "tidewater", "target": "avalon"},
+    {"source": "council", "target": "avalon"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project", "4": "Location", "5": "Event"},
+  "steps": [
+    {"caption": "Start at <strong>Kestrel Labs</strong>. Neighbors are tried in the order edges were added, so the first is Mira Okafor.", "active": ["kestrel"]},
+    {"caption": "Kestrel → Mira Okafor → Tidewater → Ana Ruiz → Halden Reef → Project Sentinel. Each step takes the first unvisited neighbor and goes one level deeper.", "active": ["sentinel"], "visited": ["kestrel", "mira", "tidewater", "ruiz", "halden"], "edges": ["halden>sentinel"], "visitedEdges": ["kestrel>mira", "mira>tidewater", "tidewater>ruiz", "ruiz>halden"]},
+    {"caption": "Still deeper: Sentinel → Priya Nair → Marlow Dynamics → Deepcast → Project Tern → Jonas Vehl. The recursion stack is now 11 frames deep.", "active": ["jonas"], "visited": ["kestrel", "mira", "tidewater", "ruiz", "halden", "sentinel", "priya", "marlow", "deepcast", "tern"], "edges": ["tern>jonas"], "visitedEdges": ["kestrel>mira", "mira>tidewater", "tidewater>ruiz", "ruiz>halden", "halden>sentinel", "sentinel>priya", "priya>marlow", "marlow>deepcast", "deepcast>tern"]},
+    {"caption": "Jonas has no unvisited neighbors. <strong>Backtrack</strong> up the stack until a node has one: Project Sentinel still has the bleaching event.", "active": ["bleaching"], "visited": ["kestrel", "mira", "tidewater", "ruiz", "halden", "sentinel", "priya", "marlow", "deepcast", "tern", "jonas"], "edges": ["sentinel>bleaching"], "visitedEdges": ["kestrel>mira", "mira>tidewater", "tidewater>ruiz", "ruiz>halden", "halden>sentinel", "sentinel>priya", "priya>marlow", "marlow>deepcast", "deepcast>tern", "tern>jonas"]},
+    {"caption": "Backtrack to Tidewater, which still has Port Avalon; from there, City Council.", "active": ["avalon", "council"], "visited": ["kestrel", "mira", "tidewater", "ruiz", "halden", "sentinel", "priya", "marlow", "deepcast", "tern", "jonas", "bleaching"], "edges": ["tidewater>avalon", "avalon>council"], "visitedEdges": ["kestrel>mira", "mira>tidewater", "tidewater>ruiz", "ruiz>halden", "halden>sentinel", "sentinel>priya", "priya>marlow", "marlow>deepcast", "deepcast>tern", "tern>jonas", "sentinel>bleaching"]},
+    {"caption": "Backtrack all the way to Kestrel Labs, which still has Brightwater; from there, Lena Park. Done. The DFS tree is long and thin, unlike BFS's short, bushy tree, and its paths are <em>not</em> shortest: DFS reached Jonas Vehl in 10 hops, BFS in 1.", "active": ["brightwater", "lena"], "visited": ["kestrel", "mira", "tidewater", "ruiz", "halden", "sentinel", "priya", "marlow", "deepcast", "tern", "jonas", "bleaching", "avalon", "council"], "edges": ["kestrel>brightwater", "brightwater>lena"], "visitedEdges": ["kestrel>mira", "mira>tidewater", "tidewater>ruiz", "ruiz>halden", "halden>sentinel", "sentinel>priya", "priya>marlow", "marlow>deepcast", "deepcast>tern", "tern>jonas", "sentinel>bleaching", "tidewater>avalon", "avalon>council"]}
+  ]
+}
+</script>
+</div>
+
+<pre data-file="examples/ch04_traversal.py"><code class="language-python">def dfs_order(adj: dict[str, list[str]], start: str) -&gt; list[str]:
+    """Iterative DFS preorder. An explicit stack avoids Python's recursion limit."""
+    order, seen = [], set()
+    stack = [start]
+    while stack:
+        u = stack.pop()                     # LIFO: newest discovered first
+        if u in seen:
+            continue
+        seen.add(u)
+        order.append(u)
+        # Push neighbors in reverse so the first neighbor is explored first,
+        # matching the recursive version's order.
+        for v in reversed(adj[u]):
+            if v not in seen:
+                stack.append(v)
+    return order</code></pre>
+
+<p>When do you want which? In retrieval, almost always BFS-like expansion: nearby facts are more relevant than distant ones, and you want to stop at a fixed radius. DFS is the tool for structural questions: detecting cycles, topological sorting of dependency graphs (useful for code graphs in <a href="32-domain-graphrag.html">Chapter 32</a>), and enumerating all simple paths between two entities up to a length limit, which path retrievers do. LLM-driven explorers like Think-on-Graph (Chapter 18) mix the two: a <em>beam search</em> is a BFS that keeps only the best few nodes per layer.</p>
+
+<h2>Neighborhoods, hubs and paths</h2>
+
+<h3>k-hop neighborhoods</h3>
+<p>The <strong>k-hop neighborhood</strong> <em>N<sub>k</sub>(v)</em> is every node within distance <em>k</em> of <em>v</em>: BFS stopped after <em>k</em> layers. The induced subgraph around it is the <strong>ego graph</strong>. This is the core of entity-anchored retrieval: find the entities a question mentions, pull their 1-hop or 2-hop neighborhood, and turn it into context.</p>
+<p>The trouble is growth. If every node had exactly <em>d</em> neighbors and no two paths overlapped, <em>N<sub>k</sub></em> would hold about <em>d + d² + … + d<sup>k</sup></em> nodes. Real graphs overlap, but they also have <strong>hubs</strong>: a few nodes with very high degree. A path that touches a hub suddenly reaches a large part of the graph.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Neighborhood explosion through a hub",
+  "subtitle": "k-hop neighborhoods of Halden Reef",
+  "height": 460,
+  "nodes": [
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 46},
+    {"id": "mira", "label": "Mira Okafor", "group": 2, "x": 32, "y": 30},
+    {"id": "jonas", "label": "Jonas Vehl", "group": 2, "x": 58, "y": 14},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 68, "y": 50},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 77, "y": 16},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 90, "y": 33},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 89, "y": 72},
+    {"id": "brightwater", "label": "Brightwater", "group": 1, "x": 80, "y": 90},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 58, "y": 84},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 30, "y": 64},
+    {"id": "tidewater", "label": "Tidewater", "group": 1, "x": 12, "y": 42},
+    {"id": "ruiz", "label": "Ana Ruiz", "group": 2, "x": 7, "y": 70},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 20, "y": 88},
+    {"id": "bleaching", "label": "Bleaching 2024", "group": 5, "x": 40, "y": 88},
+    {"id": "avalon", "label": "Port Avalon", "group": 4, "x": 40, "y": 7},
+    {"id": "council", "label": "City Council", "group": 1, "x": 18, "y": 9}
+  ],
+  "edges": [
+    {"source": "kestrel", "target": "mira"}, {"source": "kestrel", "target": "jonas"}, {"source": "kestrel", "target": "priya"},
+    {"source": "kestrel", "target": "sentinel"}, {"source": "kestrel", "target": "tern"}, {"source": "kestrel", "target": "brightwater"},
+    {"source": "kestrel", "target": "lena"}, {"source": "kestrel", "target": "deepcast"}, {"source": "kestrel", "target": "marlow"},
+    {"source": "kestrel", "target": "avalon"}, {"source": "kestrel", "target": "council"},
+    {"source": "mira", "target": "tidewater"}, {"source": "priya", "target": "marlow"}, {"source": "ruiz", "target": "tidewater"},
+    {"source": "tidewater", "target": "sentinel"}, {"source": "priya", "target": "sentinel"}, {"source": "sentinel", "target": "halden"},
+    {"source": "sentinel", "target": "bleaching"}, {"source": "bleaching", "target": "halden"}, {"source": "ruiz", "target": "halden"},
+    {"source": "lena", "target": "brightwater"}, {"source": "marlow", "target": "deepcast"}, {"source": "jonas", "target": "tern"},
+    {"source": "priya", "target": "tern"}, {"source": "tern", "target": "deepcast"}, {"source": "tidewater", "target": "avalon"},
+    {"source": "council", "target": "avalon"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project", "4": "Location", "5": "Event"},
+  "steps": [
+    {"caption": "Seed: <strong>Halden Reef</strong>, the entity in “Who led the Halden Reef survey?”", "active": ["halden"]},
+    {"caption": "<strong>1 hop: 3 nodes.</strong> Project Sentinel, the bleaching event and Dr. Ana Ruiz. Small, focused, and it contains the answer.", "active": ["sentinel", "bleaching", "ruiz"], "visited": ["halden"], "edges": ["halden>sentinel", "halden>bleaching", "halden>ruiz"]},
+    {"caption": "<strong>2 hops: 6 nodes.</strong> Adds Kestrel Labs, Tidewater and Priya Nair. Still reasonable, but Kestrel Labs is a hub with degree 11.", "active": ["kestrel", "tidewater", "priya"], "visited": ["halden", "sentinel", "bleaching", "ruiz"], "edges": ["sentinel>kestrel", "sentinel>tidewater", "sentinel>priya", "ruiz>tidewater"], "visitedEdges": ["halden>sentinel", "halden>bleaching", "halden>ruiz"]},
+    {"caption": "<strong>3 hops: all 15 other nodes.</strong> Passing through the hub pulls in investors, competitors and the city council. For a question about a reef survey, most of this context is noise, and in a real corpus a hub might have thousands of neighbors.", "active": ["mira", "jonas", "tern", "deepcast", "marlow", "brightwater", "lena", "avalon", "council"], "visited": ["halden", "sentinel", "bleaching", "ruiz", "kestrel", "tidewater", "priya"], "edges": ["kestrel>mira", "kestrel>jonas", "kestrel>tern", "kestrel>deepcast", "kestrel>marlow", "kestrel>brightwater", "kestrel>lena", "kestrel>avalon", "kestrel>council"], "visitedEdges": ["halden>sentinel", "halden>bleaching", "halden>ruiz", "sentinel>kestrel", "sentinel>tidewater", "sentinel>priya", "ruiz>tidewater"]}
+  ]
+}
+</script>
+</div>
+
+<p>The numbers for a few seeds tell the same story:</p>
+<table>
+  <thead><tr><th>Seed</th><th>1 hop</th><th>2 hops</th><th>3 hops</th></tr></thead>
+  <tbody>
+    <tr><td>Kestrel Labs (the hub)</td><td>11</td><td>14</td><td>15</td></tr>
+    <tr><td>Project Sentinel</td><td>5</td><td>15</td><td>15</td></tr>
+    <tr><td>Halden Reef</td><td>3</td><td>6</td><td>15</td></tr>
+    <tr><td>Dr. Ana Ruiz</td><td>2</td><td>6</td><td>9</td></tr>
+  </tbody>
+</table>
+<p>The graph's <strong>diameter</strong> (the longest shortest path) is only 4, and the average shortest path between two entities is 2.1 hops. Extracted entity graphs are almost always like this: a “small world” where everything is a few hops from everything else. Retrieval systems therefore never expand blindly. The standard defenses, which you will implement in Chapters 14 and 21:</p>
+<ul>
+  <li><strong>Cap the fan-out</strong>: take at most the top <em>b</em> neighbors per node, ranked by edge weight or by similarity to the query.</li>
+  <li><strong>Down-weight or skip hubs</strong>: divide a neighbor's score by its degree, or do not expand through nodes above a degree threshold.</li>
+  <li><strong>Budget by tokens, not hops</strong>: add neighbors in ranked order until the context budget is full.</li>
+  <li><strong>Score instead of expanding</strong>: Personalized PageRank spreads relevance from the seeds and naturally dilutes it through hubs.</li>
+</ul>
+
+<h3>Shortest paths in unweighted graphs</h3>
+<p>A <strong>path</strong> is a sequence of nodes where each consecutive pair is joined by an edge; its <strong>length</strong> is the number of edges. BFS from the source gives shortest paths to all nodes in <em>O(n + m)</em>: store each node's <em>parent</em> (the node that discovered it) and walk parents back from the target.</p>
+<p>Shortest paths are often <em>not unique</em>. For canonical question 3, “What connects Priya Nair to Deepcast?”, there are three paths of length 2:</p>
+<ul>
+  <li>Priya Nair – Kestrel Labs – Deepcast (she works at the company Deepcast supplied)</li>
+  <li>Priya Nair – Marlow Dynamics – Deepcast (her former employer acquired it)</li>
+  <li>Priya Nair – Project Tern – Deepcast (her project replaces its sonar)</li>
+</ul>
+<p>All three are true, and the full answer needs the second and third. A retriever that returns only “the” shortest path would pick one arbitrarily. This is why path retrieval methods enumerate several short paths and then rank or prune them (<a href="18-paths-and-agents.html">Chapter 18</a>).</p>
+
+<h3>Weighted shortest paths: Dijkstra's intuition</h3>
+<p>With edge costs, fewest hops is no longer cheapest. <strong>Dijkstra's algorithm</strong> generalizes BFS by replacing the FIFO queue with a <em>priority queue</em> ordered by distance so far. It repeatedly pops the closest unsettled node, which is then final (this is only valid when all costs are non-negative), and <em>relaxes</em> its edges: if going through it gives a neighbor a shorter tentative distance, update that neighbor.</p>
+<p>Take extraction strengths on the Priya–Deepcast subgraph and convert them to costs with <em>cost = 1/w</em>:</p>
+<table>
+  <thead><tr><th>Edge</th><th>Strength w</th><th>Cost 1/w</th></tr></thead>
+  <tbody>
+    <tr><td>Priya Nair – Kestrel Labs</td><td>9</td><td>0.111</td></tr>
+    <tr><td>Priya Nair – Project Tern</td><td>8</td><td>0.125</td></tr>
+    <tr><td>Priya Nair – Marlow Dynamics</td><td>6</td><td>0.167</td></tr>
+    <tr><td>Kestrel Labs – Deepcast</td><td>8</td><td>0.125</td></tr>
+    <tr><td>Project Tern – Deepcast</td><td>7</td><td>0.143</td></tr>
+    <tr><td>Marlow Dynamics – Deepcast</td><td>9</td><td>0.111</td></tr>
+  </tbody>
+</table>
+<p>The trace:</p>
+<ol>
+  <li>Start: <em>d(Priya) = 0</em>. Relax her edges: Kestrel 0.111, Tern 0.125, Marlow 0.167.</li>
+  <li>Pop Kestrel (0.111, the smallest). Relax: Deepcast = 0.111 + 0.125 = 0.236.</li>
+  <li>Pop Tern (0.125). Via Tern, Deepcast would be 0.125 + 0.143 = 0.268 &gt; 0.236, so no update.</li>
+  <li>Pop Marlow (0.167). Via Marlow, 0.167 + 0.111 = 0.278 &gt; 0.236, no update.</li>
+  <li>Pop Deepcast (0.236). Final path: Priya → Kestrel Labs → Deepcast.</li>
+</ol>
+<p>Dijkstra picked the path through the hub, which is the least informative of the three. Dijkstra did its job. <em>The weights define what “short” means</em>, and raw extraction strengths do not encode “explains the question.” With a binary heap, Dijkstra runs in <em>O((n + m) log n)</em>.</p>
+
+<h3>Connected components</h3>
+<p>A <strong>connected component</strong> is a maximal set of nodes where every pair is joined by some path. Run BFS from any unvisited node, label everything it reaches, repeat: all components in <em>O(n + m)</em>. In directed graphs you distinguish <em>weakly</em> connected (ignoring direction) from <em>strongly</em> connected (reachable both ways).</p>
+<p>The Kestrel graph is one component. But delete the hub and it splits: {Brightwater Capital, Lena Park} becomes an island, because Kestrel Labs was their only link to everything else. Components matter in GraphRAG for three practical reasons:</p>
+<ul>
+  <li><strong>Extraction quality check</strong>: a real corpus graph usually has one giant component plus many tiny ones. Hundreds of 2-node components often mean entity resolution failed to merge aliases (“Sentinel” and “Project Sentinel” as separate islands).</li>
+  <li><strong>Unreachable answers</strong>: no traversal from a seed can reach an entity in another component. If a multi-hop question fails, check this first.</li>
+  <li><strong>Community detection</strong> runs within components; GraphRAG's pipeline can restrict clustering to the largest connected component.</li>
+</ul>
+
+<h2>Importance and structure: PageRank, clustering and communities</h2>
+
+<h3>PageRank as a random surfer</h3>
+<p>Degree counts neighbors. <strong>PageRank</strong> asks a subtler question: how often would a random walker be at this node? Imagine a surfer who, at each step, with probability <em>α</em> (the <strong>damping factor</strong>, usually 0.85) follows a random edge out of the current node, and with probability <em>1 − α</em> gets bored and <strong>teleports</strong> to a node chosen uniformly at random. The teleport probability <em>1 − α</em> is also called the <strong>restart probability</strong>, the name Chapter 17 uses; in <code>minigraphrag.search.ppr.personalized_pagerank</code>, <code>alpha</code> is the follow-an-edge probability, as here. The long-run fraction of time spent at each node is its PageRank. A node is important if important nodes point to it.</p>
+<p>For an undirected graph with <em>n</em> nodes, write <em>r<sup>(t)</sup></em> for the score vector at step <em>t</em>. The update, called <strong>power iteration</strong>, is:</p>
+<p style="text-align:center"><em>r<sup>(t+1)</sup>(v) = (1 − α) / n + α · ∑<sub>u ∈ N(v)</sub> r<sup>(t)</sup>(u) / deg(u)</em></p>
+<p>Each node splits its current score evenly among its neighbors (that is the <em>/ deg(u)</em>), passes on a fraction <em>α</em> of it, and everyone receives an equal share of the teleport mass. Start from <em>r<sup>(0)</sup> = 1/n</em> everywhere and repeat until the scores stop changing. The scores always sum to 1. In matrix form, with <em>D</em> the diagonal degree matrix, <em>r ← (1 − α)/n · <strong>1</strong> + α A D<sup>−1</sup> r</em>.</p>
+<p>Two details make it work on real graphs. <strong>Teleportation</strong> guarantees convergence to a unique answer, even on graphs with several components or with cycles that would trap a pure walker. <strong>Dangling nodes</strong> (out-degree 0 in a directed graph, like Project Tern in the directed matrix above) have nowhere to send their score; the standard fix redistributes their mass as if they teleported.</p>
+
+<div class="viz" data-viz="pagerank">
+<script type="application/json">
+{
+  "title": "PageRank on the Kestrel graph",
+  "subtitle": "Uniform teleport. Drag the iteration slider from 0, then try clicking nodes",
+  "height": 460,
+  "alpha": 0.85,
+  "seeds": [],
+  "directed": false,
+  "nodes": [
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 46},
+    {"id": "mira", "label": "Mira Okafor", "group": 2, "x": 32, "y": 30},
+    {"id": "jonas", "label": "Jonas Vehl", "group": 2, "x": 58, "y": 14},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 68, "y": 50},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 77, "y": 16},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 90, "y": 33},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 89, "y": 72},
+    {"id": "brightwater", "label": "Brightwater", "group": 1, "x": 80, "y": 90},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 58, "y": 84},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 30, "y": 64},
+    {"id": "tidewater", "label": "Tidewater", "group": 1, "x": 12, "y": 42},
+    {"id": "ruiz", "label": "Ana Ruiz", "group": 2, "x": 7, "y": 70},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 20, "y": 88},
+    {"id": "bleaching", "label": "Bleaching 2024", "group": 5, "x": 40, "y": 88},
+    {"id": "avalon", "label": "Port Avalon", "group": 4, "x": 40, "y": 7},
+    {"id": "council", "label": "City Council", "group": 1, "x": 18, "y": 9}
+  ],
+  "edges": [
+    {"source": "kestrel", "target": "mira"}, {"source": "kestrel", "target": "jonas"}, {"source": "kestrel", "target": "priya"},
+    {"source": "kestrel", "target": "sentinel"}, {"source": "kestrel", "target": "tern"}, {"source": "kestrel", "target": "brightwater"},
+    {"source": "kestrel", "target": "lena"}, {"source": "kestrel", "target": "deepcast"}, {"source": "kestrel", "target": "marlow"},
+    {"source": "kestrel", "target": "avalon"}, {"source": "kestrel", "target": "council"},
+    {"source": "mira", "target": "tidewater"}, {"source": "priya", "target": "marlow"}, {"source": "ruiz", "target": "tidewater"},
+    {"source": "tidewater", "target": "sentinel"}, {"source": "priya", "target": "sentinel"}, {"source": "sentinel", "target": "halden"},
+    {"source": "sentinel", "target": "bleaching"}, {"source": "bleaching", "target": "halden"}, {"source": "ruiz", "target": "halden"},
+    {"source": "lena", "target": "brightwater"}, {"source": "marlow", "target": "deepcast"}, {"source": "jonas", "target": "tern"},
+    {"source": "priya", "target": "tern"}, {"source": "tern", "target": "deepcast"}, {"source": "tidewater", "target": "avalon"},
+    {"source": "council", "target": "avalon"}
+  ]
+}
+</script>
+</div>
+
+<p>With uniform teleport the ranking after convergence is Kestrel Labs (about 0.186), then Project Sentinel (0.089), Tidewater Institute (0.076), Project Tern (0.070) and Priya Nair (0.069). Compare with degree: Tidewater and Priya both have degree 4, but Tidewater edges ahead: two of its neighbors, Mira Okafor and Ana Ruiz, have only two connections each, so each passes half its score to Tidewater, while Priya's most important neighbor, Kestrel Labs, splits its score eleven ways. PageRank depends on <em>whom</em> you are connected to and how many others they share their score with; degree alone sees none of that.</p>
+<p>Now click Halden Reef in the visualization. The teleport step stops being uniform and always jumps back to the clicked node. That is <strong>Personalized PageRank</strong> (PPR): <em>(1 − α)/n</em> becomes <em>(1 − α) · p(v)</em>, where <em>p</em> puts all its mass on the seeds. Scores now mean “relevance to Halden Reef”: after the seed itself (about 0.25), Project Sentinel (0.15), the bleaching event, Kestrel Labs and Ana Ruiz (each about 0.09 to 0.10) lead, while Brightwater Capital and Lena Park fall to about 0.013. Even personalized, the hub keeps a respectable score. HippoRAG uses exactly this computation to rank passages from the entities a question mentions, and <a href="17-ppr-hipporag.html">Chapter 17</a> builds it, including the tricks for keeping hubs in check.</p>
+<p>Try lowering α too. Small α means frequent teleports, so scores stay close to the teleport distribution; high α lets mass travel further along edges. Each iteration costs <em>O(n + m)</em>, and tens of iterations usually suffice for retrieval-sized graphs.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Watch the first iterations oscillate</span>
+  <p>Move the iteration slider from 0 to 3. Kestrel Labs jumps up, drops, then rises again. Star-like structures bounce mass back and forth between the hub and its leaves before settling. Exercise 4.3 has you compute two of these steps by hand.</p>
+</div>
+
+<h3>Clustering coefficient</h3>
+<p>Do my neighbors know each other? The <strong>local clustering coefficient</strong> of a node <em>v</em> with degree <em>k</em> is the fraction of pairs of its neighbors that are themselves connected:</p>
+<p style="text-align:center"><em>C(v) = (edges among neighbors of v) / (k (k − 1) / 2)</em></p>
+<p>Each such edge closes a <strong>triangle</strong> through <em>v</em>. Worked examples on the Kestrel graph:</p>
+<ul>
+  <li><strong>Jonas Vehl</strong> has neighbors Kestrel Labs and Project Tern, which are connected: 1 of 1 possible pair, <em>C = 1.0</em>.</li>
+  <li><strong>Project Sentinel</strong> has 5 neighbors (Kestrel, Tidewater, Priya, Halden Reef, bleaching event), so 10 possible pairs. Connected pairs: Kestrel–Priya and Halden Reef–bleaching event. <em>C = 2/10 = 0.2</em>.</li>
+  <li><strong>Kestrel Labs</strong> has 11 neighbors, 55 possible pairs, and 8 of them are connected (Jonas–Tern, Priya–Tern, Priya–Sentinel, Priya–Marlow, Tern–Deepcast, Marlow–Deepcast, Lena–Brightwater, Council–Port Avalon). <em>C = 8/55 ≈ 0.145</em>.</li>
+</ul>
+<p>Hubs have low clustering: they bridge groups that do not otherwise talk. Nodes deep inside a tight group have high clustering. The graph-wide averages are the <strong>average clustering</strong> (mean of <em>C(v)</em>, 0.52 here) and <strong>transitivity</strong> (3 × triangles / connected triples, 0.26 here); they differ because the average treats low-degree nodes and hubs equally. High clustering is the local signature of community structure.</p>
+
+<h3>A first look at communities and modularity</h3>
+<p>A <strong>community</strong> is a group of nodes with many edges inside the group and few edges to the rest of the graph. For Kestrel Labs, the running example expects roughly five: leadership and Tern; the reef science group; Marlow and Deepcast; Brightwater and Lena Park; and the city and regulation cluster. GraphRAG summarizes each community into a report so that global questions like “What are the main themes?” can be answered from summaries instead of from every chunk.</p>
+<p>To compare possible groupings you need a score. <strong>Modularity</strong> compares the fraction of edge weight inside each community with what you would expect if edges were placed at random while keeping every node's degree:</p>
+<p style="text-align:center"><em>Q = ∑<sub>c</sub> [ L<sub>c</sub> / m − γ (d<sub>c</sub> / 2m)² ]</em></p>
+<p>Here <em>L<sub>c</sub></em> is the number (or weight) of edges inside community <em>c</em>, <em>d<sub>c</sub></em> is the sum of degrees of its nodes, <em>m</em> is the total edge count, and <em>γ</em> is a resolution parameter (1 by default; larger values favor smaller communities). The first term is “how much of the graph is inside <em>c</em>”; the second is how much you would expect by chance. <em>Q</em> ranges up to 1, and values above about 0.3 usually indicate real structure.</p>
+<p>A worked piece: the community {Brightwater Capital, Lena Park} has one internal edge, and degrees 2 + 2 = 4. Its contribution is <em>1/27 − (4/54)² = 0.0370 − 0.0055 = 0.0316</em>. Summing all five expected communities gives <em>Q ≈ 0.26</em>. A single run of NetworkX's Louvain (<code>seed=42</code>, NetworkX 3.6) finds a four-community partition with <em>Q ≈ 0.33</em>: it moves Mira Okafor into the reef group (her tie to Tidewater), and merges Marlow and Deepcast into the Kestrel group, because the hub pulls them in. Other seeds give a three-community split with almost the same score (<em>Q</em> = 0.331) that instead files Kestrel Labs with Brightwater, Lena Park and the city cluster. Two partitions that disagree about where the hub belongs, separated by 0.002 in modularity, is a fair warning: higher modularity is not automatically a better set of themes, a point <a href="11-community-detection.html">Chapter 11</a> returns to along with how Louvain and Leiden search for high-<em>Q</em> partitions. <code>minigraphrag.communities.modularity(G, partition, resolution, weight)</code> implements exactly the formula above, with <code>resolution</code> as <em>γ</em>.</p>
+
+<h2>All of it in NetworkX</h2>
+<p>Here is the whole chapter as one runnable script. It builds the 16-node graph, then computes every quantity discussed. Install with <code>pip install networkx numpy scipy</code>; NetworkX 3's <code>pagerank</code> uses SciPy sparse matrices under the hood and raises <code>ModuleNotFoundError</code> without it, while everything else in the script runs on NetworkX alone.</p>
+
+<pre data-file="examples/ch04_kestrel_graph.py"><code class="language-python">import networkx as nx
+
+EDGES = [
+    ("Kestrel Labs", "Dr. Mira Okafor"), ("Kestrel Labs", "Jonas Vehl"), ("Kestrel Labs", "Priya Nair"),
+    ("Kestrel Labs", "Project Sentinel"), ("Kestrel Labs", "Project Tern"), ("Kestrel Labs", "Brightwater Capital"),
+    ("Kestrel Labs", "Lena Park"), ("Kestrel Labs", "Deepcast"), ("Kestrel Labs", "Marlow Dynamics"),
+    ("Kestrel Labs", "Port Avalon"), ("Kestrel Labs", "Port Avalon City Council"),
+    ("Dr. Mira Okafor", "Tidewater Institute"), ("Priya Nair", "Marlow Dynamics"),
+    ("Dr. Ana Ruiz", "Tidewater Institute"), ("Tidewater Institute", "Project Sentinel"),
+    ("Priya Nair", "Project Sentinel"), ("Project Sentinel", "Halden Reef"),
+    ("Project Sentinel", "2024 Halden Reef bleaching event"), ("2024 Halden Reef bleaching event", "Halden Reef"),
+    ("Dr. Ana Ruiz", "Halden Reef"), ("Lena Park", "Brightwater Capital"), ("Marlow Dynamics", "Deepcast"),
+    ("Jonas Vehl", "Project Tern"), ("Priya Nair", "Project Tern"), ("Project Tern", "Deepcast"),
+    ("Tidewater Institute", "Port Avalon"), ("Port Avalon City Council", "Port Avalon"),
+]
+
+G = nx.Graph()
+G.add_edges_from(EDGES)
+assert (G.number_of_nodes(), G.number_of_edges()) == (16, 27)
+assert sum(d for _, d in G.degree()) == 2 * G.number_of_edges()   # handshake lemma
+
+# Attributes live in plain dicts
+G.nodes["Kestrel Labs"]["type"] = "ORGANIZATION"
+G.edges["Marlow Dynamics", "Deepcast"].update(description="Marlow acquired Deepcast", weight=9)
+
+# Degree and degree centrality
+print(sorted(G.degree(), key=lambda x: -x[1])[:3])     # Kestrel Labs 11, Project Sentinel 5, ...
+print(round(nx.degree_centrality(G)["Kestrel Labs"], 3))  # 0.733
+
+# Adjacency matrix for a subgraph, in a fixed node order
+sub = G.subgraph(["Kestrel Labs", "Dr. Mira Okafor", "Jonas Vehl", "Priya Nair", "Project Tern"])
+A = nx.to_numpy_array(sub, nodelist=["Kestrel Labs", "Dr. Mira Okafor", "Jonas Vehl", "Priya Nair", "Project Tern"])
+print(A)
+
+# BFS layers, DFS order
+print([sorted(layer) for layer in nx.bfs_layers(G, "Kestrel Labs")])
+print(list(nx.dfs_preorder_nodes(G, "Kestrel Labs")))
+
+# k-hop neighborhood and ego graph
+two_hop = nx.single_source_shortest_path_length(G, "Halden Reef", cutoff=2)
+print(len(two_hop) - 1)                                   # 6
+ego = nx.ego_graph(G, "Halden Reef", radius=1)            # induced subgraph: nodes AND edges among them
+
+# Shortest paths (unweighted), all of them
+print(list(nx.all_shortest_paths(G, "Priya Nair", "Deepcast")))
+
+# Weighted: strengths become costs
+strength = {("Priya Nair", "Kestrel Labs"): 9, ("Priya Nair", "Project Tern"): 8,
+            ("Priya Nair", "Marlow Dynamics"): 6, ("Kestrel Labs", "Deepcast"): 8,
+            ("Project Tern", "Deepcast"): 7, ("Marlow Dynamics", "Deepcast"): 9}
+for (u, v), w in strength.items():
+    G.edges[u, v]["weight"] = w
+cost = lambda u, v, d: 1.0 / d.get("weight", 1)           # weight function: (u, v, attrs) -&gt; cost
+print(nx.dijkstra_path(G, "Priya Nair", "Deepcast", weight=cost))
+
+# Components, before and after removing the hub
+print(nx.number_connected_components(G))                  # 1
+H = G.copy(); H.remove_node("Kestrel Labs")
+print([sorted(c) for c in nx.connected_components(H)])    # two components
+
+# PageRank (uniform) and Personalized PageRank. weight=None: ignore strengths here.
+pr = nx.pagerank(G, alpha=0.85, weight=None)
+ppr = nx.pagerank(G, alpha=0.85, personalization={"Halden Reef": 1.0}, weight=None)
+print(sorted(pr.items(), key=lambda x: -x[1])[:5])
+print(sorted(ppr.items(), key=lambda x: -x[1])[:5])
+
+# Clustering
+print(round(nx.clustering(G, "Kestrel Labs"), 3), round(nx.average_clustering(G), 3), round(nx.transitivity(G), 3))
+
+# Communities and modularity
+parts = nx.community.louvain_communities(G, weight=None, seed=42)
+print(len(parts), round(nx.community.modularity(G, parts, weight=None), 3))</code></pre>
+
+<p>And a from-scratch power iteration, so you can see there is nothing hidden in <code>nx.pagerank</code>:</p>
+<pre data-file="examples/ch04_pagerank.py"><code class="language-python">def pagerank(adj: dict[str, list[str]], alpha: float = 0.85, iters: int = 50,
+             personalization: dict[str, float] | None = None, tol: float = 1e-10) -&gt; dict[str, float]:
+    nodes = list(adj)
+    n = len(nodes)
+    if personalization:
+        total = sum(personalization.values())
+        p = {v: personalization.get(v, 0.0) / total for v in nodes}
+    else:
+        p = {v: 1.0 / n for v in nodes}
+    r = dict(p) if personalization else {v: 1.0 / n for v in nodes}
+    for _ in range(iters):
+        nxt = {v: (1 - alpha) * p[v] for v in nodes}
+        dangling = sum(r[u] for u in nodes if not adj[u])
+        for u in nodes:
+            if adj[u]:
+                share = alpha * r[u] / len(adj[u])        # split evenly among neighbors
+                for v in adj[u]:
+                    nxt[v] += share
+        for v in nodes:                                   # dangling mass follows the teleport vector
+            nxt[v] += alpha * dangling * p[v]
+        if sum(abs(nxt[v] - r[v]) for v in nodes) &lt; tol:
+            return nxt
+        r = nxt
+    return r</code></pre>
+
+<h3>Complexity cheat sheet</h3>
+<table>
+  <thead><tr><th>Operation</th><th>Time</th><th>Notes for RAG-sized graphs</th></tr></thead>
+  <tbody>
+    <tr><td>Build adjacency list</td><td><em>O(n + m)</em></td><td>Dominated by extraction cost, not graph construction</td></tr>
+    <tr><td>Dense adjacency matrix</td><td><em>O(n²)</em> memory</td><td>Avoid past a few tens of thousands of nodes; use sparse</td></tr>
+    <tr><td>Degree of all nodes</td><td><em>O(n + m)</em></td><td>Cheap; precompute and store as rank</td></tr>
+    <tr><td>BFS, DFS, connected components</td><td><em>O(n + m)</em></td><td>Per query, restrict to k hops to stay local</td></tr>
+    <tr><td>k-hop neighborhood</td><td><em>O(size of the neighborhood)</em></td><td>Can approach the whole graph through hubs</td></tr>
+    <tr><td>Unweighted single-source shortest paths</td><td><em>O(n + m)</em></td><td>BFS with parent pointers</td></tr>
+    <tr><td>Dijkstra</td><td><em>O((n + m) log n)</em></td><td>Non-negative costs only</td></tr>
+    <tr><td>All simple paths up to length L</td><td>Exponential in L worst case</td><td>Always cap L and the number of paths</td></tr>
+    <tr><td>PageRank / PPR</td><td><em>O(k (n + m))</em> for k iterations</td><td>Tens of iterations; PPR per query is feasible on millions of edges</td></tr>
+    <tr><td>Local clustering, all nodes</td><td><em>O(∑ deg(v)²)</em></td><td>Hubs dominate the cost</td></tr>
+    <tr><td>Louvain / Leiden</td><td>Roughly linear in m per pass in practice</td><td>Offline, at indexing time (Chapter 11)</td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<p>Exercises 4.1 to 4.4 use this small graph, taken from the supply-chain corner of the Kestrel corpus. Nodes: Marlow Dynamics (MD), Deepcast (D), Kestrel Labs (K), Project Tern (T), Priya Nair (P), Lena Park (L). Undirected edges: MD–D, MD–P, D–K, D–T, K–T, P–T, K–L.</p>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 4.1 <span class="level">Warm-up</span></h4>
+  <p>(a) Write the adjacency list and the adjacency matrix in the order MD, D, K, T, P, L. (b) Give each node's degree and degree centrality, and check the handshake lemma. (c) Which node's removal disconnects the graph?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Adjacency list: MD: [D, P]; D: [MD, K, T]; K: [D, T, L]; T: [D, K, P]; P: [MD, T]; L: [K].</p>
+    <table>
+      <thead><tr><th></th><th>MD</th><th>D</th><th>K</th><th>T</th><th>P</th><th>L</th></tr></thead>
+      <tbody>
+        <tr><th>MD</th><td>0</td><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td></tr>
+        <tr><th>D</th><td>1</td><td>0</td><td>1</td><td>1</td><td>0</td><td>0</td></tr>
+        <tr><th>K</th><td>0</td><td>1</td><td>0</td><td>1</td><td>0</td><td>1</td></tr>
+        <tr><th>T</th><td>0</td><td>1</td><td>1</td><td>0</td><td>1</td><td>0</td></tr>
+        <tr><th>P</th><td>1</td><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td></tr>
+        <tr><th>L</th><td>0</td><td>0</td><td>1</td><td>0</td><td>0</td><td>0</td></tr>
+      </tbody>
+    </table>
+    <p>(b) Degrees: MD 2, D 3, K 3, T 3, P 2, L 1. With <em>n − 1 = 5</em>, degree centralities are 0.4, 0.6, 0.6, 0.6, 0.4, 0.2. Sum of degrees = 14 = 2 × 7 edges. The lemma holds.</p>
+    <p>(c) Kestrel Labs. It is Lena Park's only neighbor, so removing K leaves L isolated. A node whose removal increases the number of components is called an <strong>articulation point</strong> (<code>nx.articulation_points</code>). No other single removal disconnects the graph, because the remaining nodes lie on the cycles MD–D–T–P–MD and D–K–T–D.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 4.2 <span class="level">Warm-up</span></h4>
+  <p>Run BFS from Lena Park by hand, visiting neighbors in alphabetical order of their abbreviations. Write the queue after each dequeue, the BFS layers, and the shortest path from L to MD. Then run DFS from L with the same neighbor order and give the preorder.</p>
+  <details class="hint"><summary>Hint</summary><p>Mark a node as seen when you <em>enqueue</em> it, not when you dequeue it, or it can enter the queue twice.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>BFS. Start: queue [L], seen {L}.</p>
+    <ol>
+      <li>Dequeue L. Neighbors: K (new). Queue [K].</li>
+      <li>Dequeue K. Neighbors in order D, L, T: D new, L seen, T new. Queue [D, T].</li>
+      <li>Dequeue D. Neighbors K, MD, T: MD new. Queue [T, MD].</li>
+      <li>Dequeue T. Neighbors D, K, P: P new. Queue [MD, P].</li>
+      <li>Dequeue MD. Neighbors D, P, both seen. Queue [P].</li>
+      <li>Dequeue P. Neighbors MD, T, both seen. Queue empty.</li>
+    </ol>
+    <p>Visit order L, K, D, T, MD, P. Layers: {L}, {K}, {D, T}, {MD, P}. Parent pointers: MD was discovered by D, D by K, K by L, so the shortest path is L – K – D – MD, length 3. It is the only path of length 3 (the other route, L – K – T – P – MD, has length 4).</p>
+    <p>DFS (recursive, alphabetical): L → K → D (first unvisited neighbor of K) → K is seen, so MD → from MD, D seen, P → from P, MD seen, T → from T, all neighbors seen. Backtrack to the top; everything is visited. Preorder: L, K, D, MD, P, T. DFS reaches T at depth 5 even though it is 2 hops from L.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 4.3 <span class="level">Core</span></h4>
+  <p>Compute two steps of PageRank power iteration on the exercise graph with <em>α = 0.85</em>, uniform teleport, starting from <em>r<sup>(0)</sup> = 1/6</em> for every node. Give all six scores after step 1 and step 2 to four decimals, and check they sum to 1. Which node leads after step 1, which after step 2, and why do they swap?</p>
+  <details class="hint"><summary>Hint</summary><p>The teleport term is <em>(1 − 0.85)/6 = 0.025</em> for every node. For each node, add up <em>r(u)/deg(u)</em> over its neighbors, multiply by 0.85, add 0.025.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Degrees: MD 2, D 3, K 3, T 3, P 2, L 1. <em>r<sup>(0)</sup> = 0.16667</em>. What each node sends per neighbor: MD and P send 0.08333, D, K, T send 0.05556, L sends 0.16667.</p>
+    <p><strong>Step 1</strong></p>
+    <ul>
+      <li>MD ← D + P = 0.05556 + 0.08333 = 0.13889; × 0.85 = 0.11806; + 0.025 = <strong>0.1431</strong></li>
+      <li>D ← MD + K + T = 0.08333 + 0.05556 + 0.05556 = 0.19444; → 0.16528 + 0.025 = <strong>0.1903</strong></li>
+      <li>K ← D + T + L = 0.05556 + 0.05556 + 0.16667 = 0.27778; → 0.23611 + 0.025 = <strong>0.2611</strong></li>
+      <li>T ← D + K + P = 0.05556 + 0.05556 + 0.08333 = 0.19444 → <strong>0.1903</strong></li>
+      <li>P ← MD + T = 0.08333 + 0.05556 = 0.13889 → <strong>0.1431</strong></li>
+      <li>L ← K = 0.05556; → 0.04722 + 0.025 = <strong>0.0722</strong></li>
+    </ul>
+    <p>Sum: 0.1431 + 0.1903 + 0.2611 + 0.1903 + 0.1431 + 0.0722 = 1.0001 (rounding). K leads because L sends K its entire score.</p>
+    <p><strong>Step 2</strong>. Per-neighbor shares now: MD 0.14306/2 = 0.07153, D 0.19028/3 = 0.06343, K 0.26111/3 = 0.08704, T 0.06343, P 0.07153, L 0.07222/1 = 0.07222.</p>
+    <ul>
+      <li>MD ← D + P = 0.06343 + 0.07153 = 0.13495 → 0.11471 + 0.025 = <strong>0.1397</strong></li>
+      <li>D ← MD + K + T = 0.07153 + 0.08704 + 0.06343 = 0.22199 → 0.18869 + 0.025 = <strong>0.2137</strong></li>
+      <li>K ← D + T + L = 0.06343 + 0.06343 + 0.07222 = 0.19907 → 0.16921 + 0.025 = <strong>0.1942</strong></li>
+      <li>T ← D + K + P = 0.06343 + 0.08704 + 0.07153 = 0.22199 → <strong>0.2137</strong></li>
+      <li>P ← MD + T = 0.07153 + 0.06343 = 0.13495 → <strong>0.1397</strong></li>
+      <li>L ← K = 0.08704 → 0.07398 + 0.025 = <strong>0.0990</strong></li>
+    </ul>
+    <p>Sum: 1.0000. After step 2, D and T lead. In step 1, L's large initial share flowed entirely into K. But L's own score fell to 0.072 after step 1, so in step 2 K receives much less from L, while D and T receive part of K's inflated step-1 score. This back-and-forth is the oscillation you saw in the visualization. Converged values (from <code>nx.pagerank</code>) are K 0.2142, D 0.2054, T 0.2054, MD 0.1447, P 0.1447, L 0.0857: K ends slightly ahead, because it collects all of L's mass on every step.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 4.4 <span class="level">Core</span></h4>
+  <p>(a) Compute the local clustering coefficient of every node in the exercise graph. (b) Compute the modularity <em>Q</em> of the partition {MD, P} | {D, K, T, L} and of {MD, D, P} | {K, T, L}. Which is better, and does that match your intuition?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) The only triangle is D–K–T.</p>
+    <ul>
+      <li>D: neighbors MD, K, T; 3 pairs; connected pair K–T; <em>C = 1/3</em>. Same for K (neighbors D, T, L; connected D–T) and T (neighbors D, K, P; connected D–K): 1/3 each.</li>
+      <li>MD: neighbors D, P, not connected, <em>C = 0</em>. P: neighbors MD, T, not connected, <em>C = 0</em>.</li>
+      <li>L has degree 1, so no pairs exist; by convention <em>C = 0</em>.</li>
+    </ul>
+    <p>(b) <em>m = 7</em>, <em>2m = 14</em>.</p>
+    <p>Partition 1: {MD, P} has 1 internal edge (MD–P) and degree sum 4: <em>1/7 − (4/14)² = 0.14286 − 0.08163 = 0.06122</em>. {D, K, T, L} has 4 internal edges (D–K, D–T, K–T, K–L) and degree sum 10: <em>4/7 − (10/14)² = 0.57143 − 0.51020 = 0.06122</em>. <strong>Q = 0.1224</strong>.</p>
+    <p>Partition 2: {MD, D, P} has 2 internal edges (MD–D, MD–P) and degree sum 7: <em>2/7 − (7/14)² = 0.28571 − 0.25 = 0.03571</em>. {K, T, L} has 2 internal edges (K–T, K–L) and degree sum 7: same, 0.03571. <strong>Q = 0.0714</strong>.</p>
+    <p>Partition 1 is better. It keeps the triangle D–K–T together, and triangles are the strongest local evidence of a group. Both values are low, which is honest: a 6-node, 7-edge graph with one triangle does not have strong community structure. Real extracted graphs with hundreds of entities typically reach much higher modularity.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 4.5 <span class="level">Stretch</span></h4>
+  <p>Write <code>bounded_expand(G, seeds, max_hops, fanout, max_degree)</code> that returns the node set a retriever would use as context: BFS from the seeds, but at each node follow at most <code>fanout</code> neighbors ranked by edge weight (ties broken by name), and never expand <em>through</em> a node whose degree exceeds <code>max_degree</code> (the node itself may be included). Run it on the 16-node Kestrel graph from Halden Reef with <code>max_hops=3, fanout=3, max_degree=6</code> and all weights 1. Compare with the unbounded 3-hop neighborhood.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from collections import deque
+import networkx as nx
+
+def bounded_expand(G: nx.Graph, seeds, max_hops=2, fanout=5, max_degree=50, weight="weight"):
+    dist = {s: 0 for s in seeds}
+    queue = deque(seeds)
+    while queue:
+        u = queue.popleft()
+        if dist[u] == max_hops:
+            continue
+        if u not in seeds and G.degree(u) &gt; max_degree:
+            continue                     # include the hub, but don't expand through it
+        ranked = sorted(G[u], key=lambda v: (-G.edges[u, v].get(weight, 1.0), str(v)))
+        for v in ranked[:fanout]:
+            if v not in dist:
+                dist[v] = dist[u] + 1
+                queue.append(v)
+    return dist
+
+print(bounded_expand(G, ["Halden Reef"], max_hops=3, fanout=3, max_degree=6))</code></pre>
+    <p>Trace with all weights 1 (ties broken alphabetically, using the full names from the chapter's script):</p>
+    <ul>
+      <li>Halden Reef (hop 0) has neighbors 2024 Halden Reef bleaching event, Dr. Ana Ruiz, Project Sentinel; all three are kept (fanout 3) at hop 1.</li>
+      <li>The bleaching event (degree 2): neighbors Halden Reef and Project Sentinel, both seen.</li>
+      <li>Dr. Ana Ruiz (degree 2): adds Tidewater Institute at hop 2.</li>
+      <li>Project Sentinel (degree 5, below 6): its sorted neighbors are 2024…, Halden Reef, Kestrel Labs, Priya Nair, Tidewater Institute. The first three include two already seen, so only Kestrel Labs is added (hop 2). Priya Nair is cut by the fanout.</li>
+      <li>Tidewater Institute (degree 4): sorted neighbors Dr. Ana Ruiz, Dr. Mira Okafor, Port Avalon, Project Sentinel; top 3 adds Dr. Mira Okafor and Port Avalon at hop 3.</li>
+      <li>Kestrel Labs (degree 11 &gt; 6) is included but not expanded.</li>
+    </ul>
+    <p>Result: 8 nodes (Halden Reef, the bleaching event, Ana Ruiz, Project Sentinel, Tidewater, Kestrel Labs, Mira Okafor, Port Avalon) instead of all 16. The investors, competitors and council are gone because the hub was not expanded. Notice the cost: Priya Nair was dropped by alphabetical tie-breaking, not by relevance. That is why real retrievers rank neighbors by query similarity or edge weight rather than name, which you will do in Chapter 14.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">An entity graph has 200,000 nodes and 900,000 edges. Why do graph libraries store it as an adjacency list rather than a dense adjacency matrix?</p>
+  <ol>
+    <li>Adjacency matrices cannot represent undirected graphs</li>
+    <li>Adjacency lists answer “is (u, v) an edge?” faster than any matrix</li>
+    <li data-correct>A dense matrix needs 4 × 10<sup>10</sup> cells, while a list needs space proportional to n + m</li>
+    <li>PageRank only works on adjacency lists</li>
+  </ol>
+  <div class="explain">Memory is the deciding factor for sparse graphs. A dense matrix uses O(n²) cells regardless of how few edges exist. Edge lookup is actually O(1) in a matrix, and PageRank is naturally written with (sparse) matrices.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You expand 2 hops from “Halden Reef” and get far more context than you expected, most of it about investors. What is the most likely structural cause?</p>
+  <ol>
+    <li data-correct>The expansion passed through a high-degree hub such as Kestrel Labs</li>
+    <li>The graph is disconnected</li>
+    <li>BFS was used instead of DFS</li>
+    <li>The clustering coefficient of Halden Reef is too high</li>
+  </ol>
+  <div class="explain">Hubs connect to many parts of the graph, so any path that touches one reaches a large fraction of all nodes within one more hop. Cap fan-out, skip hubs, or use Personalized PageRank.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the PageRank update, what does the (1 − α) term do?</p>
+  <ol>
+    <li>It normalizes scores by degree</li>
+    <li>It removes dangling nodes from the graph</li>
+    <li>It counts the number of iterations remaining</li>
+    <li data-correct>It models teleporting to a node drawn from the teleport distribution, which guarantees convergence to a unique answer</li>
+  </ol>
+  <div class="explain">With probability 1 − α the surfer jumps according to the teleport vector: uniform for classic PageRank, concentrated on seed entities for Personalized PageRank. That jump keeps the walk from being trapped and makes the stationary distribution unique.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">GraphRAG sums 1–10 relationship strengths into edge weights. You run Dijkstra with those weights directly as costs. What goes wrong?</p>
+  <ol>
+    <li>Dijkstra fails on undirected graphs</li>
+    <li data-correct>Strong, frequently stated relations become the most expensive to traverse, so paths avoid them</li>
+    <li>Nothing, because larger weights are always better</li>
+    <li>Dijkstra returns a DFS order instead of a path</li>
+  </ol>
+  <div class="explain">Dijkstra minimizes total cost. Strengths mean “more connected”, so they must be converted to costs first, for example 1/w or −log of a normalized weight.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Node A has 4 neighbors and 6 edges among them. Node B has 12 neighbors and 3 edges among them. Which statement is correct?</p>
+  <ol>
+    <li>A has clustering 0.5 and B has clustering 0.25</li>
+    <li>B is more likely to sit inside a tight community</li>
+    <li data-correct>A has clustering 1.0, B has clustering 3/66 ≈ 0.045, and B looks like a hub bridging groups</li>
+    <li>Both have the same clustering because clustering ignores degree</li>
+  </ol>
+  <div class="explain">A: 6 / (4·3/2) = 6/6 = 1. B: 3 / (12·11/2) = 3/66. Low clustering at high degree is the signature of a bridge between groups, like Kestrel Labs (0.145).</div>
+</div>
+
+<div class="quiz">
+  <p class="q">After extraction, your graph has one component with 3,000 entities and 900 components of 2 to 3 entities. What should you check first?</p>
+  <ol>
+    <li>Whether PageRank converged</li>
+    <li>Whether the modularity is above 0.3</li>
+    <li>Whether DFS would find more nodes than BFS</li>
+    <li data-correct>Whether entity resolution failed to merge aliases, leaving duplicates stranded in tiny components</li>
+  </ol>
+  <div class="explain">Many small islands often mean “Sentinel” and “Project Sentinel” were never merged, so facts attached to an alias cannot be reached from the main graph. Traversal choice cannot reach another component at all.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Do I need a graph database to do GraphRAG?</summary>
+  <div><p>No. Microsoft GraphRAG stores its graph as Parquet tables and loads it into memory, and <code>minigraphrag</code> uses NetworkX. A graph database earns its keep when the graph is large, changes often, is shared by several services, or must be queried with ad hoc patterns (Cypher, Chapter 5). <a href="13-storage-indexing.html">Chapter 13</a> walks through the trade-off.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why does GraphRAG throw away edge direction?</summary>
+  <div><p>Its main consumers are community detection, which is defined on undirected graphs in its standard form, and context building, which includes an edge's description whichever way you arrived. The description text (“Marlow Dynamics acquired Deepcast in April 2025”) still carries the direction for the LLM. If you need direction for structured queries, keep a <code>DiGraph</code> or a typed knowledge graph alongside.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should I use PageRank or degree to rank entities?</summary>
+  <div><p>For a global, query-independent ranking, the two are strongly correlated on most extracted graphs, and degree is free. The meaningful upgrade is <em>personalized</em> PageRank, which ranks relative to the question's entities. That is the version worth the extra computation.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What damping factor should I use?</summary>
+  <div><p>0.85 is the traditional default from web search, and it is a sensible starting point. In retrieval with PPR, lower values keep mass close to the seeds and favor nearby facts (HippoRAG's paper uses 0.5); higher values let it reach further, which helps multi-hop questions but lets hubs dominate. Tune it on your evaluation set (Chapter 25).</p></div>
+</details>
+
+<details class="qa">
+  <summary>Are communities the same as connected components?</summary>
+  <div><p>No. A component is a hard boundary: no path leaves it. Communities live inside a component and are soft structure: dense inside, sparse between, but still connected. The whole Kestrel graph is one component with four or five communities.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a graph inspector for the Kestrel corpus</h3>
+  <p>Build a small script you will reuse all course long to sanity-check any graph you build, starting with the hand-built 16-node Kestrel graph and later with the graph extracted in Chapters 8 and 9.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>inspect.py graph.graphml</code> prints node and edge counts, degree distribution (min, median, max, top 10), number and sizes of connected components</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>It lists hubs (degree above the 95th percentile) and, for a given seed, the 1-, 2- and 3-hop neighborhood sizes</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>It prints the top 10 entities by PageRank and by Personalized PageRank from a seed given on the command line</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>It reports average clustering, transitivity, and the modularity of a Louvain partition with community sizes</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>It prints all shortest paths between two named entities, for example Priya Nair and Deepcast</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Your from-scratch <code>bfs_layers</code> and <code>pagerank</code> agree with NetworkX on the Kestrel graph (tests)</span></li>
+  </ul>
+  <p><strong>Done when</strong> running the inspector on the Kestrel graph reproduces this chapter's numbers: degrees 11 and 5 at the top, diameter 4, PageRank led by Kestrel Labs at about 0.186, and three shortest paths from Priya Nair to Deepcast.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Choose directed, weighted and multigraph variants based on what your edges mean; GraphRAG's entity graph is undirected and weighted, typed KGs are directed multigraphs.</li>
+    <li>Extracted graphs are sparse, so store them as adjacency lists or sparse matrices.</li>
+    <li>BFS gives layers and unweighted shortest paths in O(n + m); it is the skeleton of neighborhood retrieval.</li>
+    <li>Hubs make k-hop neighborhoods explode in a small-world graph; always bound expansion by fan-out, degree or token budget.</li>
+    <li>Weights must match the algorithm: strengths for PageRank and modularity, costs for Dijkstra.</li>
+    <li>PageRank is a random walk with teleport; personalizing the teleport turns it into query-relevance, the basis of HippoRAG.</li>
+    <li>Clustering coefficient and modularity quantify community structure, which GraphRAG summarizes for global questions.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Page, Brin, Motwani and Winograd. <a href="http://ilpubs.stanford.edu:8090/422/">The PageRank Citation Ranking: Bringing Order to the Web</a>. <span class="venue">Stanford InfoLab technical report, 1999</span></li>
+  <li>Dijkstra. A note on two problems in connexion with graphs. <span class="venue">Numerische Mathematik 1, 1959</span></li>
+  <li>Watts and Strogatz. <a href="https://www.nature.com/articles/30918">Collective dynamics of “small-world” networks</a>. <span class="venue">Nature, 1998</span></li>
+  <li>Newman and Girvan. <a href="https://arxiv.org/abs/cond-mat/0308217">Finding and evaluating community structure in networks</a>. <span class="venue">Physical Review E, 2004</span></li>
+  <li>Blondel, Guillaume, Lambiotte and Lefebvre. <a href="https://arxiv.org/abs/0803.0476">Fast unfolding of communities in large networks</a>. <span class="venue">Journal of Statistical Mechanics, 2008</span></li>
+  <li>Hagberg, Schult and Swart. <a href="https://networkx.org/documentation/stable/">Exploring network structure, dynamics, and function using NetworkX</a> (and the NetworkX documentation). <span class="venue">SciPy, 2008</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2405.14831">HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models</a>. <span class="venue">arXiv 2405.14831, 2024</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

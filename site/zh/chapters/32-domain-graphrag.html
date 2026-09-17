@@ -1,0 +1,1384 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domain GraphRAG: code, medicine, finance, law | Graph RAG from Scratch</title>
+<meta name="description" content="How GraphRAG changes when the corpus is a code repository, clinical records, financial filings or case law: schemas, extraction sources, retrieval patterns, evaluation and pitfalls.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/32-domain-graphrag.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="32-domain-graphrag" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Domain GraphRAG: code, medicine, finance, law</h1>
+  <p class="lede">The Kestrel pipeline was built for news articles and memos, where an LLM has to invent the graph from prose. Real domains usually hand you half the graph for free and punish different mistakes. This chapter shows what changes for code repositories, medicine, finance and law, and you build a working call graph of a Python package that answers “what breaks if I change this function?”</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Decide which parts of a domain graph should come from deterministic parsers, curated vocabularies or LLM extraction</li>
+      <li>Parse a Python package into a module, class and function graph with the <code>ast</code> module and run impact analysis over it</li>
+      <li>Design schemas and retrieval patterns for clinical, financial and legal corpora, including time, units and precedent</li>
+      <li>Choose domain-appropriate evaluation, from test-impact prediction to citation validity and numeric exact match</li>
+      <li>Recognize the failure modes that are specific to each domain before they reach users</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Same recipe, different ingredients</h2>
+<p>Every GraphRAG system you have built in this course has the same skeleton: turn sources into nodes and edges with provenance, organize them, retrieve a relevant piece of the graph for a question, turn it into context, and evaluate. The skeleton survives the move to any domain. Three things underneath it change:</p>
+<ul>
+  <li><strong>Where the edges come from.</strong> In the Kestrel corpus, the fact that Marlow Dynamics acquired Deepcast exists only as a sentence, so an LLM has to extract it (<a href="08-entity-relation-extraction.html">Chapter 8</a>). In a code repository, the fact that <code>extract_from_unit</code> calls <code>parse_extraction_output</code> is in the syntax tree, and a parser recovers it exactly. Domain data often comes with structure already attached: call graphs, controlled vocabularies, tagged financial statements, citation metadata.</li>
+  <li><strong>What a wrong answer costs.</strong> A slightly wrong community summary of Kestrel's themes is an annoyance. A missed caller before a refactor breaks production; a missed drug interaction harms a patient; a cited case that was overruled embarrasses a lawyer in court. The cost shapes how much you let the LLM infer and how often the system should refuse to answer.</li>
+  <li><strong>What “the same thing” means.</strong> Entity resolution (<a href="09-entity-resolution.html">Chapter 9</a>) becomes symbol resolution in code, concept normalization against a vocabulary in medicine, legal entity and ticker mapping in finance, and citation parsing in law. Each has its own identifiers, and you should use them instead of fuzzy string matching wherever they exist.</li>
+</ul>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 330" role="img" aria-labelledby="spectrum-title">
+      <title id="spectrum-title">How much of each domain graph can come from deterministic sources versus LLM extraction</title>
+      <text class="d-text bold" x="10" y="22">Where the graph's edges come from (illustrative)</text>
+      <rect class="d-box node" x="420" y="8" width="14" height="14" rx="2"/>
+      <text class="d-text small" x="440" y="20">parsers, metadata, vocabularies</text>
+      <rect class="d-box edge" x="420" y="28" width="14" height="14" rx="2"/>
+      <text class="d-text small" x="440" y="40">LLM extraction from prose</text>
+
+      <text class="d-text bold" x="10" y="78">Code repository</text>
+      <text class="d-text small" x="10" y="94">calls, imports, inheritance</text>
+      <rect class="d-box node" x="200" y="62" width="400" height="30" rx="4"/>
+      <rect class="d-box edge" x="600" y="62" width="70" height="30" rx="4"/>
+      <text class="d-text small" x="210" y="82">ast / compiler / language server</text>
+
+      <text class="d-text bold" x="10" y="130">Law</text>
+      <text class="d-text small" x="10" y="146">citations, courts, dates</text>
+      <rect class="d-box node" x="200" y="114" width="270" height="30" rx="4"/>
+      <rect class="d-box edge" x="470" y="114" width="200" height="30" rx="4"/>
+      <text class="d-text small" x="210" y="134">citation parser, docket metadata</text>
+      <text class="d-text small" x="480" y="134">treatment, holdings</text>
+
+      <text class="d-text bold" x="10" y="182">Finance</text>
+      <text class="d-text small" x="10" y="198">filings, tables, ownership</text>
+      <rect class="d-box node" x="200" y="166" width="230" height="30" rx="4"/>
+      <rect class="d-box edge" x="430" y="166" width="240" height="30" rx="4"/>
+      <text class="d-text small" x="210" y="186">filing sections, tagged tables</text>
+      <text class="d-text small" x="440" y="186">risks, narrative, calls</text>
+
+      <text class="d-text bold" x="10" y="234">Medicine</text>
+      <text class="d-text small" x="10" y="250">concepts, records, literature</text>
+      <rect class="d-box node" x="200" y="218" width="200" height="30" rx="4"/>
+      <rect class="d-box edge" x="400" y="218" width="270" height="30" rx="4"/>
+      <text class="d-text small" x="210" y="238">vocabularies, coded data</text>
+      <text class="d-text small" x="410" y="238">clinical notes, papers</text>
+
+      <text class="d-text bold" x="10" y="286">Kestrel corpus</text>
+      <text class="d-text small" x="10" y="302">news, blogs, memos</text>
+      <rect class="d-box node" x="200" y="270" width="50" height="30" rx="4"/>
+      <rect class="d-box edge" x="250" y="270" width="420" height="30" rx="4"/>
+      <text class="d-text small" x="260" y="290">almost everything is extracted by an LLM (Chapters 8 to 10)</text>
+    </svg>
+  </div>
+  <figcaption>The further left a domain's bar is filled, the more of its graph you can build exactly and cheaply. The shares are illustrative, not measured. The practical rule: parse what is parseable, link to curated identifiers where they exist, and spend LLM calls only on the relations that live in prose.</figcaption>
+</figure>
+
+<p>The table below is the chapter in one view. Each column gets its own section with code or a worked example.</p>
+
+<table>
+  <thead><tr><th>Concern</th><th>Code</th><th>Medicine</th><th>Finance</th><th>Law</th></tr></thead>
+  <tbody>
+    <tr><td>Core nodes</td><td>Modules, classes, functions, tests</td><td>Concepts (drugs, conditions), patients, events, sources</td><td>Companies, filings, sections, table cells, metrics, people</td><td>Cases, statutes and sections, courts, parties</td></tr>
+    <tr><td>Core edges</td><td>CONTAINS, IMPORTS, CALLS, INHERITS</td><td>IS_A, TREATS, INTERACTS_WITH, HAS_EVENT, SUPPORTED_BY</td><td>SUBSIDIARY_OF, REPORTED_IN, OFFICER_OF, metric facts with periods</td><td>CITES with treatment (follows, distinguishes, overrules), INTERPRETS</td></tr>
+    <tr><td>Deterministic sources</td><td>Parser, type checker, git history</td><td>Controlled vocabularies, coded records, drug labels</td><td>Filing structure, tagged financial data, identifiers</td><td>Citation strings, court hierarchy, decision dates</td></tr>
+    <tr><td>LLM extraction for</td><td>Docstrings, design docs, issue text</td><td>Free-text notes, literature findings</td><td>Narrative sections, risk factors, call transcripts</td><td>Holdings, treatment of cited cases</td></tr>
+    <tr><td>Signature retrieval</td><td>Reverse reachability (impact), symbol neighborhood</td><td>Concept expansion up a hierarchy, evidence on both sides</td><td>Document, section, unit paths; as-of queries</td><td>Citation walk with a good-law check</td></tr>
+    <tr><td>Evaluation</td><td>Tests actually broken, SWE-bench-style tasks</td><td>Clinician review, abstention quality, citation checks</td><td>Numeric exact match with tolerance, evidence localization</td><td>Citation existence and validity, holding accuracy</td></tr>
+    <tr><td>Worst pitfall</td><td>Dynamic dispatch hides callers</td><td>Negation and outdated guidance</td><td>Units, periods and restatements</td><td>Citing overruled authority</td></tr>
+  </tbody>
+</table>
+
+<h2>Code: repository graphs</h2>
+<p>Code is the friendliest domain for GraphRAG because the compiler has already done the extraction. A question like “what breaks if I change <code>parse_json_response</code>?” is a multi-hop question in exactly the sense of <a href="03-where-rag-breaks.html">Chapter 3</a>: the answer is spread across files that never mention each other, and embedding similarity between the question and a caller three hops away is low. A vector index over code chunks finds the function's definition. A graph finds who depends on it.</p>
+
+<h3>The schema</h3>
+<p>Start small. Four node kinds and four edge kinds answer most navigation and impact questions:</p>
+<table>
+  <thead><tr><th>Element</th><th>Meaning</th><th>Attributes worth storing</th></tr></thead>
+  <tbody>
+    <tr><td><code>module</code> node</td><td>One <code>.py</code> file, named by its dotted path</td><td>file path</td></tr>
+    <tr><td><code>class</code>, <code>function</code>, <code>method</code> nodes</td><td>Definitions, named by qualified name such as <code>minigraphrag.llm.CachedLLM.complete</code></td><td>file, first and last line, first docstring line</td></tr>
+    <tr><td><code>CONTAINS</code></td><td>Module contains class, class contains method</td><td></td></tr>
+    <tr><td><code>IMPORTS</code></td><td>Module imports another module of the same package</td><td></td></tr>
+    <tr><td><code>CALLS</code></td><td>Function or method calls a function, method, or class (instantiation)</td><td>line of the call site</td></tr>
+    <tr><td><code>INHERITS</code></td><td>Class derives from a class in the package</td><td></td></tr>
+  </tbody>
+</table>
+<p>The qualified name is the node id. It plays the role that canonical entity names played for Kestrel: it makes merging trivial and gives every answer a precise citation, the file and line range.</p>
+
+<h3>Pass one: collect definitions, imports and raw calls</h3>
+<p>Python's <code>ast</code> module turns source into a syntax tree. An <code>ast.NodeVisitor</code> walks it and calls <code>visit_ClassDef</code>, <code>visit_FunctionDef</code>, <code>visit_Call</code> and so on. We keep a stack of enclosing scopes so every definition gets a qualified name and every call is attributed to the function it appears in.</p>
+<p>We cannot resolve calls on the first pass. When <code>indexer.py</code> calls <code>extract_from_unit</code>, the definition may live in a file we have not parsed yet. So pass one only records the call's text, such as <code>"extract_from_unit"</code> or <code>"self._fill"</code>, plus the module's import table.</p>
+
+<pre data-file="code_graph.py"><code class="language-python">"""Parse a Python package into a code graph (modules, classes, functions)."""
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import networkx as nx
+
+
+def module_name(path: Path, root: Path) -&gt; str:
+    rel = path.relative_to(root.parent).with_suffix("")
+    parts = list(rel.parts)
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+class _Collector(ast.NodeVisitor):
+    """First pass: definitions, imports and raw (unresolved) call names per scope."""
+
+    def __init__(self, G: nx.MultiDiGraph, module: str, path: str):
+        self.G, self.module, self.path = G, module, path
+        self.scope = [module]          # stack of qualified names
+        self.imports: dict[str, str] = {}  # local alias -&gt; qualified target
+        self.raw_calls: list[tuple[str, str, int]] = []   # (caller, dotted callee text, line)
+        self.raw_bases: list[tuple[str, str]] = []
+        self.raw_imports: list[str] = []   # qualified names this module imports
+
+    def _define(self, node, kind: str) -&gt; str:
+        qname = f"{self.scope[-1]}.{node.name}"
+        self.G.add_node(qname, kind=kind, name=node.name, module=self.module, file=self.path,
+                        lineno=node.lineno, end_lineno=getattr(node, "end_lineno", node.lineno),
+                        doc=(ast.get_docstring(node) or "").split("\n")[0])
+        self.G.add_edge(self.scope[-1], qname, key="CONTAINS", rel="CONTAINS")
+        return qname
+
+    def visit_ClassDef(self, node):
+        qname = self._define(node, "class")
+        for base in node.bases:
+            self.raw_bases.append((qname, ast.unparse(base)))
+        self.scope.append(qname)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_FunctionDef(self, node):
+        kind = "method" if self.G.nodes[self.scope[-1]].get("kind") == "class" else "function"
+        qname = self._define(node, kind)
+        self.scope.append(qname)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Import(self, node):
+        for a in node.names:
+            self.imports[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+            self.raw_imports.append(a.name)
+
+    def visit_ImportFrom(self, node):
+        base = node.module or ""
+        if node.level:  # relative import: resolve against this module's package
+            pkg = self.module.split(".")
+            is_pkg = self.path.endswith("__init__.py")
+            pkg = pkg if is_pkg else pkg[:-1]
+            pkg = pkg[: len(pkg) - (node.level - 1)]
+            base = ".".join(pkg + ([node.module] if node.module else []))
+        for a in node.names:
+            target = f"{base}.{a.name}"
+            self.imports[a.asname or a.name] = target
+            self.raw_imports.append(target)
+
+    def visit_Call(self, node):
+        try:
+            text = ast.unparse(node.func)
+        except Exception:
+            text = ""
+        if text and self.scope[-1] != self.module:
+            self.raw_calls.append((self.scope[-1], text, node.lineno))
+        self.generic_visit(node)</code></pre>
+
+<h3>Pass two: resolve names, then query</h3>
+<p>Once every definition is a node, resolution is a lookup. For a call text like <code>P.format</code> or <code>parse_json_response</code> we try, in order: a method on the enclosing class (for <code>self.x</code>), whatever the name was imported as, and a definition in the same module. Anything else (built-ins, third-party libraries, calls on objects whose type we do not know) stays unresolved. That last category is the one that will bite you, and we measure it below.</p>
+
+<pre data-file="code_graph.py"><code class="language-python">def build_code_graph(*package_dirs: str | Path) -&gt; nx.MultiDiGraph:
+    """Parse one or more package directories (e.g. the package and its tests) into one graph."""
+    G = nx.MultiDiGraph()      # multi: a function can both CONTAIN and CALL the same nested function
+    collectors = []
+    for root in (Path(p).resolve() for p in package_dirs):
+        for path in sorted(root.rglob("*.py")):
+            mod, rel = module_name(path, root), str(path.relative_to(root.parent))
+            G.add_node(mod, kind="module", name=mod.split(".")[-1], module=mod, file=rel)
+            c = _Collector(G, mod, rel)
+            c.visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+            collectors.append(c)
+    # Second pass: resolve names now that every definition in the package is known.
+    for c in collectors:
+        for caller, text, line in c.raw_calls:
+            target = _resolve(G, c, caller, text)
+            if target:
+                G.add_edge(caller, target, key="CALLS", rel="CALLS", line=line)
+        for target in c.raw_imports:
+            # "from .llm import LLM" -&gt; the module that defines LLM; "from . import prompts" -&gt; prompts
+            while target and target not in G:
+                target = target.rpartition(".")[0]
+            if target and target != c.module:
+                G.add_edge(c.module, G.nodes[target]["module"], key="IMPORTS", rel="IMPORTS")
+        for cls, text in c.raw_bases:
+            target = _resolve(G, c, cls, text)
+            if target:
+                G.add_edge(cls, target, key="INHERITS", rel="INHERITS")
+    return G
+
+
+def _resolve(G: nx.MultiDiGraph, c: _Collector, scope: str, text: str) -&gt; str | None:
+    head, _, rest = text.partition(".")
+    candidates = []
+    if head == "self" and rest:                       # self.method() -&gt; enclosing class
+        cls = scope.rsplit(".", 1)[0]
+        candidates.append(f"{cls}.{rest}")
+    if head in c.imports:                             # imported name or module alias
+        candidates.append(c.imports[head] + (f".{rest}" if rest else ""))
+    candidates.append(f"{c.module}.{text}")           # same-module definition
+    for cand in candidates:
+        if cand in G and G.nodes[cand].get("kind") in ("function", "method", "class"):
+            return cand
+    return None                                       # builtins, third-party, dynamic: unresolved
+
+
+def impact_of(G: nx.MultiDiGraph, target: str, max_depth: int = 10) -&gt; dict[str, int]:
+    """Everything that directly or transitively calls `target`, with its distance."""
+    calls = nx.DiGraph((u, v) for u, v, d in G.edges(data=True) if d["rel"] == "CALLS")
+    if target not in calls:
+        return {}
+    dist = nx.single_source_shortest_path_length(calls.reverse(copy=False), target, cutoff=max_depth)
+    dist.pop(target)
+    return dict(sorted(dist.items(), key=lambda kv: (kv[1], kv[0])))</code></pre>
+
+<p>Impact analysis is <em>reverse reachability</em>: reverse every CALLS edge and run breadth-first search from the target. The BFS depth is a useful risk signal: distance 1 means the caller's own code touches the changed function; distance 3 means the effect travels through two intermediaries, each of which might absorb or amplify the change. We ran this against the course's own <code>minigraphrag</code> package while writing the chapter:</p>
+
+<pre data-file="terminal"><code class="language-bash">$ python code_graph.py code/minigraphrag minigraphrag.llm.parse_json_response
+226 518
+Counter({'function': 122, 'method': 53, 'module': 30, 'class': 21})
+Counter({'CALLS': 234, 'CONTAINS': 196, 'IMPORTS': 88})
+
+IMPACT minigraphrag.llm.parse_json_response
+  1 minigraphrag.evaluation.llm_judge_pairwise.ask
+  1 minigraphrag.reports.generate_report
+  1 minigraphrag.search.global_._map_reduce
+  1 minigraphrag.search.global_.drift_search
+  1 minigraphrag.search.global_.dynamic_community_selection
+  1 minigraphrag.search.lightrag.extract_keywords
+  1 minigraphrag.search.ppr.link_query_to_nodes
+  2 minigraphrag.cli.make_search
+  2 minigraphrag.reports.generate_all_reports
+  2 minigraphrag.search.global_.global_search
+  2 minigraphrag.search.hybrid.hybrid_search
+  2 minigraphrag.search.lightrag.lightrag_search
+  2 minigraphrag.search.ppr.hipporag_search
+  3 minigraphrag.cli.main
+  3 minigraphrag.indexer.build_index</code></pre>
+<p>The package keeps changing, so your counts will differ; the shape of the answer will not. A two-line helper that pulls JSON out of an LLM reply sits under community reports, three search methods, evaluation and the CLI. Nobody would guess that from reading <code>llm.py</code>.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+ "title": "What breaks if parse_json_response changes?",
+ "subtitle": "Reverse reachability over CALLS edges (a trimmed view of the real minigraphrag graph)",
+ "height": 470,
+ "directed": true,
+ "scoreDigits": 0,
+ "nodes": [
+  {
+   "id": "pjr",
+   "label": "parse_json_response",
+   "group": 6,
+   "x": 38,
+   "y": 8
+  },
+  {
+   "id": "gen_report",
+   "label": "generate_report",
+   "group": 1,
+   "x": 10,
+   "y": 30
+  },
+  {
+   "id": "map_reduce",
+   "label": "_map_reduce",
+   "group": 1,
+   "x": 22,
+   "y": 46
+  },
+  {
+   "id": "dyn",
+   "label": "dynamic_community_selection",
+   "group": 1,
+   "x": 38,
+   "y": 30
+  },
+  {
+   "id": "drift",
+   "label": "drift_search",
+   "group": 1,
+   "x": 52,
+   "y": 46
+  },
+  {
+   "id": "kw",
+   "label": "extract_keywords",
+   "group": 1,
+   "x": 64,
+   "y": 30
+  },
+  {
+   "id": "link",
+   "label": "link_query_to_nodes",
+   "group": 1,
+   "x": 78,
+   "y": 46
+  },
+  {
+   "id": "gar",
+   "label": "generate_all_reports",
+   "group": 1,
+   "x": 10,
+   "y": 68
+  },
+  {
+   "id": "gs",
+   "label": "global_search",
+   "group": 1,
+   "x": 33,
+   "y": 68
+  },
+  {
+   "id": "ls",
+   "label": "lightrag_search",
+   "group": 1,
+   "x": 55,
+   "y": 68
+  },
+  {
+   "id": "hs",
+   "label": "hipporag_search",
+   "group": 1,
+   "x": 76,
+   "y": 68
+  },
+  {
+   "id": "hy",
+   "label": "hybrid_search",
+   "group": 1,
+   "x": 93,
+   "y": 68
+  },
+  {
+   "id": "bi",
+   "label": "build_index",
+   "group": 1,
+   "x": 10,
+   "y": 90
+  },
+  {
+   "id": "local",
+   "label": "local_search",
+   "group": 3,
+   "x": 57,
+   "y": 8
+  }
+ ],
+ "edges": [
+  {
+   "source": "bi",
+   "target": "gar"
+  },
+  {
+   "source": "gar",
+   "target": "gen_report"
+  },
+  {
+   "source": "gen_report",
+   "target": "pjr"
+  },
+  {
+   "source": "gs",
+   "target": "map_reduce"
+  },
+  {
+   "source": "gs",
+   "target": "dyn"
+  },
+  {
+   "source": "map_reduce",
+   "target": "pjr"
+  },
+  {
+   "source": "dyn",
+   "target": "pjr"
+  },
+  {
+   "source": "drift",
+   "target": "pjr"
+  },
+  {
+   "source": "drift",
+   "target": "local"
+  },
+  {
+   "source": "ls",
+   "target": "kw"
+  },
+  {
+   "source": "kw",
+   "target": "pjr"
+  },
+  {
+   "source": "hs",
+   "target": "link"
+  },
+  {
+   "source": "hy",
+   "target": "link"
+  },
+  {
+   "source": "link",
+   "target": "pjr"
+  }
+ ],
+ "legend": {
+  "6": "Changed function",
+  "1": "Function in minigraphrag",
+  "3": "Function we will check"
+ },
+ "steps": [
+  {
+   "caption": "You plan to make <code>parse_json_response</code> raise on bad input instead of returning <code>{}</code>. Arrows point from caller to callee. Impact flows the <em>other</em> way: against the arrows.",
+   "active": [
+    "pjr"
+   ]
+  },
+  {
+   "caption": "Distance 1: every function with a CALLS edge into the target. This view shows six direct callers across reports, global search, LightRAG and PPR; the full run adds a seventh, the pairwise judge. Each of them currently assumes a dict comes back.",
+   "active": [
+    "gen_report",
+    "map_reduce",
+    "dyn",
+    "drift",
+    "kw",
+    "link"
+   ],
+   "visited": [
+    "pjr"
+   ],
+   "edges": [
+    "gen_report>pjr",
+    "map_reduce>pjr",
+    "dyn>pjr",
+    "drift>pjr",
+    "kw>pjr",
+    "link>pjr"
+   ],
+   "scores": {
+    "gen_report": 1,
+    "map_reduce": 1,
+    "dyn": 1,
+    "drift": 1,
+    "kw": 1,
+    "link": 1
+   }
+  },
+  {
+   "caption": "Distance 2: callers of the callers. The public search entry points appear here, so the change is user-visible even though none of them mentions JSON.",
+   "active": [
+    "gar",
+    "gs",
+    "ls",
+    "hs",
+    "hy"
+   ],
+   "visited": [
+    "pjr",
+    "gen_report",
+    "map_reduce",
+    "dyn",
+    "drift",
+    "kw",
+    "link"
+   ],
+   "edges": [
+    "gar>gen_report",
+    "gs>map_reduce",
+    "gs>dyn",
+    "ls>kw",
+    "hs>link",
+    "hy>link"
+   ],
+   "visitedEdges": [
+    "gen_report>pjr",
+    "map_reduce>pjr",
+    "dyn>pjr",
+    "drift>pjr",
+    "kw>pjr",
+    "link>pjr"
+   ],
+   "scores": {
+    "gen_report": 1,
+    "map_reduce": 1,
+    "dyn": 1,
+    "drift": 1,
+    "kw": 1,
+    "link": 1,
+    "gar": 2,
+    "gs": 2,
+    "ls": 2,
+    "hs": 2,
+    "hy": 2
+   }
+  },
+  {
+   "caption": "Distance 3: <code>build_index</code> reaches the target through report generation. A change you thought was about query parsing can break indexing.",
+   "active": [
+    "bi"
+   ],
+   "visited": [
+    "pjr",
+    "gen_report",
+    "map_reduce",
+    "dyn",
+    "drift",
+    "kw",
+    "link",
+    "gar",
+    "gs",
+    "ls",
+    "hs",
+    "hy"
+   ],
+   "edges": [
+    "bi>gar"
+   ],
+   "visitedEdges": [
+    "gen_report>pjr",
+    "map_reduce>pjr",
+    "dyn>pjr",
+    "drift>pjr",
+    "kw>pjr",
+    "link>pjr",
+    "gar>gen_report",
+    "gs>map_reduce",
+    "gs>dyn",
+    "ls>kw",
+    "hs>link",
+    "hy>link"
+   ],
+   "scores": {
+    "gen_report": 1,
+    "map_reduce": 1,
+    "dyn": 1,
+    "drift": 1,
+    "kw": 1,
+    "link": 1,
+    "gar": 2,
+    "gs": 2,
+    "ls": 2,
+    "hs": 2,
+    "hy": 2,
+    "bi": 3
+   }
+  },
+  {
+   "caption": "Is <code>local_search</code> affected? It shares an edge with <code>drift_search</code>, but the edge points from drift to local: local search is <em>called by</em> an affected function, it does not call one. Undirected neighborhood expansion would wrongly include it.",
+   "active": [
+    "local",
+    "drift"
+   ],
+   "visited": [
+    "pjr"
+   ],
+   "edges": [
+    "drift>local"
+   ],
+   "scores": {
+    "drift": 1
+   }
+  },
+  {
+   "caption": "The answer: 12 affected functions in this trimmed view (the full run finds 15, adding the pairwise judge and two CLI functions), ordered by distance, each with a file and line to cite. Feed this list, plus the source of the closest callers, to the LLM.",
+   "visited": [
+    "pjr",
+    "gen_report",
+    "map_reduce",
+    "dyn",
+    "drift",
+    "kw",
+    "link",
+    "gar",
+    "gs",
+    "ls",
+    "hs",
+    "hy",
+    "bi"
+   ],
+   "visitedEdges": [
+    "gen_report>pjr",
+    "map_reduce>pjr",
+    "dyn>pjr",
+    "drift>pjr",
+    "kw>pjr",
+    "link>pjr",
+    "gar>gen_report",
+    "gs>map_reduce",
+    "gs>dyn",
+    "ls>kw",
+    "hs>link",
+    "hy>link",
+    "bi>gar"
+   ],
+   "scores": {
+    "gen_report": 1,
+    "map_reduce": 1,
+    "dyn": 1,
+    "drift": 1,
+    "kw": 1,
+    "link": 1,
+    "gar": 2,
+    "gs": 2,
+    "ls": 2,
+    "hs": 2,
+    "hy": 2,
+    "bi": 3
+   }
+  }
+ ]
+}
+</script>
+</div>
+
+<h3>From graph to answer</h3>
+<p>The graph gives you the set; the LLM turns it into an explanation (“<code>generate_report</code> calls <code>data.get(...)</code> on the result and has no <code>try</code> around the parse, so a raise there aborts report generation and, with it, <code>build_index</code>”). Context construction follows <a href="22-context-construction.html">Chapter 22</a>: a compact table of callers ranked by distance, then source excerpts for the closest ones, then the question. It uses the same <code>LLM.complete(prompt, system=None, json=False)</code> interface as the rest of <code>minigraphrag</code>.</p>
+
+<pre data-file="code_qa.py"><code class="language-python">from pathlib import Path
+
+from code_graph import build_code_graph, impact_of
+
+REPO = Path("code")   # the directory that contains the package
+
+CODE_QA_PROMPT = """You answer questions about a Python repository.
+Use only the symbols and source excerpts below. Cite symbols by their qualified name.
+If the context does not contain the answer, say what is missing.
+
+---Target---
+{target}
+
+---Callers (distance: symbol, file:line)---
+{callers}
+
+---Source excerpts---
+{excerpts}
+
+---Question---
+{question}"""
+
+
+def source_of(G, qname: str, max_lines: int = 25) -&gt; str:
+    d = G.nodes[qname]
+    lines = (REPO / d["file"]).read_text().splitlines()[d["lineno"] - 1 : d["end_lineno"]]
+    body = "\n".join(lines[:max_lines]) + ("\n    ..." if len(lines) &gt; max_lines else "")
+    return f"# {qname} ({d['file']}:{d['lineno']})\n{body}"
+
+
+def answer_impact_question(llm, G, target: str, question: str, max_excerpts: int = 4) -&gt; str:
+    impact = impact_of(G, target)
+    callers = "\n".join(f"{k}: {n}, {G.nodes[n]['file']}:{G.nodes[n]['lineno']}" for n, k in impact.items())
+    direct = [n for n, k in impact.items() if k == 1][:max_excerpts]   # closest callers first
+    excerpts = "\n\n".join(source_of(G, n) for n in [target, *direct])
+    prompt = CODE_QA_PROMPT.format(target=target, callers=callers or "(none found)",
+                                   excerpts=excerpts, question=question)
+    return llm.complete(prompt)</code></pre>
+
+<p>Budget matters here as much as anywhere: source excerpts are expensive. Ranking by distance and truncating each function to its first 25 lines keeps a 15-caller answer under a few thousand tokens. If you need more, rank distance-1 callers by how the return value is used (assigned and indexed vs. ignored) before including their full bodies.</p>
+
+<h3>Where static call graphs lie</h3>
+<p>Our resolver returns <code>None</code> rather than guessing, which makes the gap measurable. On the same run the collector saw 1,507 call expressions and resolved 279 of them to package symbols. Most of the other 1,228 are harmless: <code>len</code> alone accounts for 88, then <code>sorted</code>, <code>set</code>, <code>dict.get</code>, <code>str.join</code> and NetworkX methods. But 17 of them were <code>.complete(...)</code> on an <code>llm</code> value. That parameter is typed as the <code>LLM</code> protocol, and the graph has no idea whether it will be <code>MockLLM</code>, <code>CachedLLM</code> or <code>AnthropicLLM</code> at run time. Ask the graph “what calls <code>CachedLLM.complete</code>?” and it answers “nothing”, which is exactly wrong.</p>
+<table>
+  <thead><tr><th>Blind spot</th><th>Example</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Dynamic dispatch through protocols or base classes</td><td><code>llm.complete(prompt)</code></td><td>Use type annotations: link calls on a parameter typed <code>LLM</code> to every class implementing <code>complete</code>, marked as a weaker <code>MAY_CALL</code> edge</td></tr>
+    <tr><td>Re-exports</td><td><code>from .search import local_search</code> in <code>__init__.py</code></td><td>Follow import chains until you reach a definition</td></tr>
+    <tr><td>Decorators, registries, callbacks</td><td>Functions registered in a dict and called by key</td><td>Add edges from registration sites; or fall back to runtime traces from the test suite</td></tr>
+    <tr><td>String-based and dynamic imports</td><td><code>importlib.import_module(name)</code></td><td>Flag as unresolved; do not pretend completeness</td></tr>
+    <tr><td>Staleness</td><td>The graph was built three commits ago</td><td>Store a content hash per file; re-parse only changed files on each commit (<a href="27-incremental-temporal.html">Chapter 27</a>)</td></tr>
+  </tbody>
+</table>
+<p>Language servers and type checkers such as pyright resolve much more than a hundred-line visitor, and tools like tree-sitter give you one parser interface across languages. The graph design stays the same; only pass two gets smarter.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Report what you could not resolve</span>
+  <p>An impact answer that silently omits dynamic callers is worse than no answer, because it sounds complete. Keep the unresolved call texts on each node and have the answer say, for example, “3 call sites through the <code>LLM</code> protocol could not be resolved statically.”</p>
+</div>
+
+<h3>What the research systems add</h3>
+<p>Four papers show how far the idea goes, each at a different granularity.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Ouyang et al., RepoGraph (2024)</span>
+  <p>RepoGraph is a plug-in module that manages a repository-level structure for AI software-engineering systems and serves them as repository-wide navigation. Plugged into four existing methods on SWE-bench, it improved all four and, by the abstract's account, produced a new state of the art among open-source frameworks; the authors also test it on CrossCodeEval. The design lesson: the graph plugs into an agent that already exists.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Liu et al., CodexGraph (2024)</span>
+  <p>CodexGraph extracts a code graph into a graph database with a unified schema and lets an LLM agent write and run graph queries against it, instead of relying on similarity retrieval or task-specific tools. It is evaluated on CrossCodeEval, SWE-bench and EvoCodeBench. This is <a href="20-text2cypher.html">Text2Cypher</a> applied to code, with all the validation lessons of that chapter.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Liu et al., GraphCoder (2024) and Du et al., CodeGRAG (2024)</span>
+  <p>Both go below the function level. GraphCoder builds a code context graph of control flow and data and control dependence between statements, and uses coarse-to-fine retrieval to find context-similar snippets for repository-level code completion. CodeGRAG builds graphical views of code blocks from control and data flow, and injects them either as a structured prompt for tuning-free models or as soft prompts from a GNN expert. Statement-level graphs help generation; symbol-level graphs, like ours, help navigation and impact questions.</p>
+</div>
+
+<p>A CodexGraph-style query for impact analysis over the same schema, if you load it into Neo4j with <code>qname</code> as a property:</p>
+<pre data-file="queries/impact.cypher"><code class="language-cypher">MATCH p = (caller:Function)-[:CALLS*1..3]-&gt;(f:Function {qname: $target})
+RETURN caller.qname AS caller, caller.file AS file, min(length(p)) AS distance
+ORDER BY distance, caller
+LIMIT 50</code></pre>
+
+<h3>Evaluating a code graph assistant</h3>
+<p>Code gives you something no other domain does: a free, objective oracle. Pick commits from history that changed one function and broke tests. Predict the impact set before looking, then compare with the tests that actually failed. Precision and recall of the predicted affected tests are honest metrics. For question answering (“where is the chunk size configured?”), ground truth can come from the graph itself, and you can grade the LLM's explanation separately with a pairwise judge (<a href="25-evaluation.html">Chapter 25</a>). Capstone 2 builds this harness end to end.</p>
+
+<h2>Medicine: trusted sources and safety</h2>
+<p>Clinical questions combine three kinds of knowledge that live in different places: facts about a specific patient (notes, labs, medication lists), general medical knowledge (guidelines, drug labels, papers) and definitions (controlled vocabularies such as SNOMED CT, RxNorm, ICD-10 and MeSH, which give every concept a stable code and an IS_A hierarchy). A medical GraphRAG system is mostly the work of linking these three layers so that an answer about a patient can be traced to an authoritative source.</p>
+
+<h3>What the graph is</h3>
+<ul>
+  <li><strong>Concept nodes</strong> keyed by vocabulary codes, not by surface strings. “Warfarin”, “Coumadin” and a misspelling in a note all resolve to one code. This is entity resolution done by a curated authority rather than by fuzzy matching.</li>
+  <li><strong>Hierarchy edges</strong> (<code>IS_A</code>) from the vocabulary: warfarin IS_A vitamin K antagonist IS_A anticoagulant. Retrieval uses these to find a guideline written about the class when the question names the drug.</li>
+  <li><strong>Knowledge edges</strong> (<code>TREATS</code>, <code>CONTRAINDICATED_WITH</code>, <code>INTERACTS_WITH</code>), each linked to the source passage that asserts it.</li>
+  <li><strong>Patient event nodes</strong> (a prescription on a date, a lab value, a diagnosis), linked to concepts and to the exact note span or record row they came from.</li>
+</ul>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="med-title">
+      <title id="med-title">Three linked layers: user documents, credible sources, controlled vocabulary</title>
+      <defs><marker id="med-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box edge" x="10" y="12" width="440" height="72" rx="8"/>
+      <text class="d-text bold" x="24" y="34">Layer 1: user documents</text>
+      <text class="d-text small" x="24" y="52">Patient notes, discharge summaries, lab rows</text>
+      <circle class="d-node warm" cx="300" cy="50" r="11"/>
+      <circle class="d-node warm" cx="360" cy="50" r="11"/>
+      <circle class="d-node warm" cx="420" cy="50" r="11"/>
+      <text class="d-text small" x="24" y="72">entities: “on warfarin”, “INR 4.1”</text>
+
+      <rect class="d-box comm" x="10" y="114" width="440" height="72" rx="8"/>
+      <text class="d-text bold" x="24" y="136">Layer 2: credible medical sources</text>
+      <text class="d-text small" x="24" y="154">Guidelines, drug labels, peer-reviewed papers</text>
+      <circle class="d-node alt" cx="330" cy="152" r="11"/>
+      <circle class="d-node alt" cx="400" cy="152" r="11"/>
+      <text class="d-text small" x="24" y="174">findings with citations</text>
+
+      <rect class="d-box node" x="10" y="216" width="440" height="72" rx="8"/>
+      <text class="d-text bold" x="24" y="238">Layer 3: controlled vocabulary</text>
+      <text class="d-text small" x="24" y="256">Codes, definitions, IS_A hierarchy</text>
+      <circle class="d-node" cx="340" cy="254" r="11"/>
+      <circle class="d-node" cx="410" cy="254" r="11"/>
+      <text class="d-text small" x="24" y="276">warfarin IS_A anticoagulant</text>
+
+      <line class="d-line dash" x1="300" y1="61" x2="330" y2="141" marker-end="url(#med-arrow)"/>
+      <line class="d-line dash" x1="420" y1="61" x2="400" y2="141" marker-end="url(#med-arrow)"/>
+      <line class="d-line dash" x1="330" y1="163" x2="340" y2="243" marker-end="url(#med-arrow)"/>
+      <line class="d-line dash" x1="400" y1="163" x2="410" y2="243" marker-end="url(#med-arrow)"/>
+
+      <text class="d-text bold" x="474" y="40">Why link the layers</text>
+      <text class="d-text small" x="474" y="62">A claim from a note is only as</text>
+      <text class="d-text small" x="474" y="78">good as the source that backs it.</text>
+      <text class="d-text small" x="474" y="110">Top-down: precise retrieval</text>
+      <text class="d-text small" x="474" y="126">through the linked layers.</text>
+      <text class="d-text small" x="474" y="158">Bottom-up: refine the response</text>
+      <text class="d-text small" x="474" y="174">with broader linked context.</text>
+      <text class="d-text small" x="474" y="206">Every answer sentence should</text>
+      <text class="d-text small" x="474" y="222">trace to layer 2 or a patient</text>
+      <text class="d-text small" x="474" y="238">record, and use layer 3 terms.</text>
+    </svg>
+  </div>
+  <figcaption>The triple-linked structure described by Medical Graph RAG: entities from user documents are linked to credible sources, which are linked to controlled vocabulary definitions. The right-hand notes paraphrase the paper's U-Retrieval idea at a high level.</figcaption>
+</figure>
+
+<div class="callout paper">
+  <span class="callout-title">Wu et al., Medical Graph RAG (2024)</span>
+  <p>MedGraphRAG proposes Triple Graph Construction, which connects user documents to credible medical sources and controlled vocabularies, and U-Retrieval, which combines top-down precise retrieval with bottom-up response refinement. The stated goal is safety: evidence-based answers that include source documentation and definitions. It is evaluated on nine medical QA benchmarks, two health fact-checking benchmarks and one dataset the authors collected themselves.</p>
+</div>
+
+<h3>Retrieval patterns</h3>
+<p>Two patterns matter more in medicine than elsewhere.</p>
+<p><strong>Expand up, not down.</strong> If the question is about warfarin, a guideline about anticoagulants applies, so walk IS_A edges upward from the question's concepts, with a small hop limit and a preference for closer ancestors. Walking downward is dangerous: a finding about warfarin does not apply to every anticoagulant. This is a metapath constraint (<a href="21-hybrid-design-patterns.html">Chapter 21</a>) with a safety reason behind it.</p>
+<p><strong>Seek evidence on both sides, then decide narrowly.</strong> A retrieved note that says “no evidence of bleeding” mentions bleeding; a lab value from last year is about the right patient but the wrong time; a forum post is on topic but not authoritative. Relevance is not admissibility. A 2026 system for longitudinal clinical records makes this explicit.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Lin et al., Evidence-Admissible GraphRAG for clinical event verification (2026)</span>
+  <p>MedEventGraph-RAG represents event occurrences in a patient-specific graph linked to source evidence (structured rows, note spans, timestamps, numerical trajectories). It retrieves candidate event chains with evidence from both supporting and contradicting sides, filters that evidence through a query-specific contract (patient identity, scope, occurrence binding, source traceability), and has a separate assessor output supported, conflicting, refuted or insufficient. The authors argue that separating broad discovery from narrow assessment reduces unsupported conclusions.</p>
+</div>
+
+<p>Here is a teaching version of that contract. It is deliberately boring code: the safety comes from refusing to let the LLM see, or reason from, evidence that fails a deterministic check.</p>
+
+<pre data-file="examples/medical_gate.py"><code class="language-python">from dataclasses import dataclass
+from datetime import date
+
+@dataclass
+class Evidence:
+    text: str
+    source_type: str              # "note", "lab", "guideline", "drug_label", "paper"
+    source_uri: str | None        # where a clinician can read it
+    patient_id: str | None = None # None for literature, labels and guidelines
+    observed: date | None = None
+    stance: str = "supports"      # "supports" or "contradicts" the claim being checked
+    negated: bool = False         # "no evidence of bleeding" mentions bleeding but negates it
+
+TRUSTED_GENERAL = {"guideline", "drug_label", "paper"}
+
+def admissible(ev: Evidence, patient_id: str, window: tuple[date, date]) -&gt; tuple[bool, str]:
+    if not ev.source_uri:
+        return False, "untraceable"
+    if ev.patient_id is not None and ev.patient_id != patient_id:
+        return False, "different patient"
+    if ev.patient_id is None and ev.source_type not in TRUSTED_GENERAL:
+        return False, "untrusted general source"
+    if ev.patient_id is not None and ev.observed and not (window[0] &lt;= ev.observed &lt;= window[1]):
+        return False, "outside time window"
+    return True, "ok"
+
+def decide(evidence: list[Evidence], patient_id: str, window: tuple[date, date]):
+    admitted = [e for e in evidence if admissible(e, patient_id, window)[0]]
+    support = [e for e in admitted if e.stance == "supports" and not e.negated]
+    against = [e for e in admitted if e.stance == "contradicts" or e.negated]
+    if not admitted:
+        return "insufficient", []
+    if support and against:
+        return "conflicting", admitted
+    return ("supported" if support else "refuted"), admitted</code></pre>
+
+<p>The LLM still does the hard parts: deciding stance, detecting negation and hedging (“possible”, “ruled out”), and writing the explanation. But the verdict categories and the admissibility rules are code you can test and audit.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "A safety-gated clinical answer",
+  "perRow": 3,
+  "stages": [
+    {"label": "Parse the question", "detail": "Identify concepts, the patient in scope and the time window. Ask for clarification if the patient or window is ambiguous rather than guessing."},
+    {"label": "Normalize to codes", "detail": "Map drug and condition mentions to vocabulary codes. Brand names, abbreviations and misspellings collapse to one concept node."},
+    {"label": "Expand and retrieve", "detail": "Walk IS_A edges upward a few hops to find applicable guidelines and labels; pull patient events linked to the same concepts."},
+    {"label": "Seek both sides", "detail": "Retrieve contradicting evidence on purpose: negated mentions, later lab values, discontinued prescriptions, newer guideline versions."},
+    {"label": "Admit evidence", "detail": "Apply the deterministic contract: right patient, inside the window, traceable source, trusted type. Log every rejection with its reason."},
+    {"label": "Answer or abstain", "detail": "Return supported, refuted, conflicting or insufficient, with citations to note spans and source documents. Conflicting and insufficient go to a clinician, not to a confident paragraph."}
+  ]
+}
+</script>
+</div>
+
+<h3>Evaluation and pitfalls</h3>
+<p>Benchmarks such as medical multiple-choice QA test knowledge, not safety. For a deployed system, measure: citation validity (does every cited span exist and say what the answer claims?), abstention quality (on questions with deliberately missing evidence, does it say “insufficient”?), and clinician agreement on a sample, with disagreements triaged by cause. The pitfalls are sharp:</p>
+<ul>
+  <li><strong>Negation and uncertainty</strong> turn mentions into their opposites. Extraction must carry a polarity attribute, and retrieval must treat negated mentions as contradicting evidence.</li>
+  <li><strong>Stale knowledge.</strong> Guidelines are revised. Treat guideline versions as temporal facts (<a href="27-incremental-temporal.html">Chapter 27</a>) and prefer the current version explicitly.</li>
+  <li><strong>The model's own knowledge.</strong> A strong LLM will “helpfully” fill gaps from pretraining. The prompt should require every claim to cite a context item, and a post-check should flag uncited sentences.</li>
+  <li><strong>Privacy.</strong> Patient graphs are protected health information. Per-patient partitioning and access control on nodes, edges and summaries are requirements, not options; <a href="29-production-ops.html">Chapter 29</a> covers how summaries leak across access boundaries.</li>
+</ul>
+
+<h2>Finance: filings, tables and time</h2>
+<p>Financial questions are entity-heavy, table-heavy and time-bound. “How did segment revenue change between fiscal 2023 and 2024, and what did management say caused it?” needs the right company, the right two periods, a number from a table in each filing, a calculation, and a passage from the narrative section. Chunking a 10-K into 300-token windows destroys most of what makes that answerable: tables split across chunks, section headings lost, fiscal years detached from numbers.</p>
+
+<h3>What the graph is</h3>
+<p>Two graphs, joined by entity nodes:</p>
+<ul>
+  <li><strong>An evidence graph of the documents.</strong> Filing → section → text unit or table unit, with metadata nodes for company and fiscal year. This is a lexical graph (<a href="06-graph-shapes.html">Chapter 6</a>) that preserves the structure financial documents already have.</li>
+  <li><strong>A domain graph of entities and facts.</strong> Companies, subsidiaries, officers and directors, investors, and metric facts. A metric fact is not an edge but a node with attributes: value, unit, scale, period start and end, whether it is restated, and the table cell it came from.</li>
+</ul>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="fin-title">
+      <title id="fin-title">Typed financial evidence graph: document to section to text and table units, with company and fiscal year metadata</title>
+      <defs><marker id="fin-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box comm" x="20" y="20" width="130" height="40" rx="6"/>
+      <text class="d-text small" x="32" y="45">Company: ACME Corp</text>
+      <rect class="d-box comm" x="20" y="80" width="130" height="40" rx="6"/>
+      <text class="d-text small" x="32" y="105">Fiscal year: 2024</text>
+      <rect class="d-box node" x="200" y="50" width="130" height="40" rx="6"/>
+      <text class="d-text bold" x="214" y="75">Annual report</text>
+      <rect class="d-box node" x="380" y="16" width="130" height="36" rx="6"/>
+      <text class="d-text small" x="392" y="39">Section: MD&amp;A</text>
+      <rect class="d-box node" x="380" y="88" width="130" height="36" rx="6"/>
+      <text class="d-text small" x="392" y="111">Section: Segments</text>
+      <rect class="d-box edge" x="550" y="16" width="120" height="36" rx="6"/>
+      <text class="d-text small" x="562" y="39">Text unit</text>
+      <rect class="d-box edge" x="550" y="88" width="120" height="36" rx="6"/>
+      <text class="d-text small" x="562" y="111">Table unit</text>
+      <line class="d-line" x1="150" y1="40" x2="200" y2="62" marker-end="url(#fin-arrow)"/>
+      <line class="d-line" x1="150" y1="100" x2="200" y2="80" marker-end="url(#fin-arrow)"/>
+      <line class="d-line hot" x1="330" y1="62" x2="380" y2="38" marker-end="url(#fin-arrow)"/>
+      <line class="d-line hot" x1="330" y1="80" x2="380" y2="104" marker-end="url(#fin-arrow)"/>
+      <line class="d-line hot" x1="510" y1="34" x2="550" y2="34" marker-end="url(#fin-arrow)"/>
+      <line class="d-line hot" x1="510" y1="106" x2="550" y2="106" marker-end="url(#fin-arrow)"/>
+      <line class="d-line dash" x1="610" y1="52" x2="610" y2="88"/>
+      <text class="d-text small" x="616" y="75">aligned</text>
+      <rect class="d-box ghost" x="20" y="150" width="650" height="88" rx="8"/>
+      <text class="d-text bold" x="36" y="174">Metric fact node (from the table unit)</text>
+      <text class="d-text mono" x="36" y="198">metric=segment_revenue  value=412.0  unit=USD  scale=millions</text>
+      <text class="d-text mono" x="36" y="220">period=FY2024  restated=false  source=table unit, row 3, col 2</text>
+    </svg>
+  </div>
+  <figcaption>Retrieval follows document, section, unit paths instead of free-floating chunks, and every number carries its unit, scale, period and cell. The company here is a placeholder; Kestrel Labs is private and does not file annual reports.</figcaption>
+</figure>
+
+<div class="callout paper">
+  <span class="callout-title">Chen et al., HC-RAG (2026)</span>
+  <p>HC-RAG organizes filings into a typed financial evidence graph with document, section, text unit, table unit and metadata nodes. It retrieves through document-section-unit paths, aligns text and table evidence in a shared retrieval space, and routes evidence by query intent: calculation, trend, fact or comparison. The authors also release Multi-Doc-2025, 2,327 expert-verified QA pairs over 179 SEC 10-K filings from 87 S&amp;P 500 companies across fiscal years 2022 to 2024, labelled with intent, difficulty and structural evidence attributes. They report better answer quality and evidence localization, with the largest gains in long-document, table-related and cross-document settings.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Sarmah et al., HybridRAG (2024)</span>
+  <p>HybridRAG combines knowledge-graph retrieval with vector retrieval for question answering over financial earnings call transcripts, motivated by domain terminology and complex document formats that trouble vector-only RAG. Evaluated on transcripts that already come as question-and-answer pairs, it reports that the combination beats either retriever alone at both the retrieval and the generation stage. It is an early, concrete example of the hybrid pattern from <a href="21-hybrid-design-patterns.html">Chapter 21</a> in a financial setting.</p>
+</div>
+
+<h3>Temporal facts and the double-counting trap</h3>
+<p>The Kestrel corpus has a tiny financial subgraph that already shows the main modeling trap. Brightwater Capital led a $12M Series A in March 2022 and a $40M Series B in September 2025, and the Series A also had two angel groups participating. If you store the amount on each investor's <code>INVESTED_IN</code> edge, adding the angels means summing edges counts $12M three times. Make the round a node that holds the amount and date; investors connect to the round, and the round connects to the company. This is the n-ary fact problem of <a href="31-multimodal-hypergraph.html">Chapter 31</a> showing up with money attached.</p>
+
+<pre data-file="examples/funding_facts.py"><code class="language-python">import networkx as nx
+from datetime import date
+
+G = nx.MultiDiGraph()
+G.add_node("KESTREL LABS", type="ORGANIZATION")
+G.add_node("BRIGHTWATER CAPITAL", type="ORGANIZATION")
+rounds = [
+    ("round:kestrel-series-a", "Series A", 12_000_000, date(2022, 3, 15), "02_brightwater_series_a"),
+    ("round:kestrel-series-b", "Series B", 40_000_000, date(2025, 9, 23), "10_brightwater_series_b"),
+]
+for rid, name, amount, when, doc in rounds:
+    # One node per round: the amount lives on the round, not on each investor edge.
+    G.add_node(rid, type="FUNDING_ROUND", name=name, amount_usd=amount, date=when, source_doc=doc)
+    G.add_edge(rid, "KESTREL LABS", key="RAISED_BY")
+    G.add_edge("BRIGHTWATER CAPITAL", rid, key="LED")
+
+def total_raised(G, company: str, as_of: date) -&gt; int:
+    return sum(G.nodes[r]["amount_usd"] for r, _, k in G.in_edges(company, keys=True)
+               if k == "RAISED_BY" and G.nodes[r]["date"] &lt;= as_of)
+
+print(total_raised(G, "KESTREL LABS", date(2023, 1, 1)))    # 12000000
+print(total_raised(G, "KESTREL LABS", date(2025, 12, 31)))  # 52000000</code></pre>
+<p>The as-of query returns $52M at the end of 2025, which matches the Series B press release's own statement of total funding raised. That agreement is a useful consistency check: when a document states an aggregate, compare it with the aggregate your graph computes, and flag disagreements for review.</p>
+
+<h3>Retrieval, evaluation and pitfalls</h3>
+<p>Route by intent, as HC-RAG does. A fact question (“who chairs the audit committee?”) is a local lookup. A calculation (“what was the operating margin?”) should retrieve the two table cells and hand the arithmetic to code, not the LLM. A trend question needs the same metric across periods, which is an as-of query repeated. A comparison needs balanced retrieval across companies, so that one company's detailed filing does not crowd out the other in the token budget.</p>
+<p>Evaluate numbers with exact match after normalizing unit and scale, with a small relative tolerance for rounding, and score evidence localization separately: did the system cite the right table and period? A right number from the wrong year is a lucky failure.</p>
+<ul>
+  <li><strong>Units and scale.</strong> Tables state “in thousands” once in a header. Carry scale into every fact at extraction time.</li>
+  <li><strong>Fiscal vs. calendar periods.</strong> A fiscal 2024 that ends in June is not calendar 2024. Store period start and end dates, not labels.</li>
+  <li><strong>Restatements.</strong> A later filing may revise an earlier number. Both are true facts about different reports; the bi-temporal model of <a href="27-incremental-temporal.html">Chapter 27</a> (valid time vs. reported time) handles this directly.</li>
+  <li><strong>Entity identity.</strong> Subsidiaries, former names and tickers. Resolve to registry identifiers where available rather than names.</li>
+</ul>
+
+<h2>Law: citation graphs and precedent</h2>
+<p>Legal research is graph traversal that lawyers have done by hand for centuries. Statutes are interpreted by cases; cases cite earlier cases; and each citation has a <em>treatment</em>. A later court may follow a precedent, distinguish it (agree with the rule but find the facts different), criticize it, or, if it has the authority, overrule it. Citators exist precisely to answer “is this case still good law?” A legal GraphRAG system that retrieves by similarity alone will happily quote a well-written opinion that was overruled last year.</p>
+
+<h3>What the graph is</h3>
+<ul>
+  <li><strong>Nodes</strong>: cases (with court, jurisdiction and decision date), statutes and their sections, regulations, and optionally holdings extracted from opinions.</li>
+  <li><strong>Edges</strong>: <code>CITES</code> with a treatment attribute (<code>FOLLOWS</code>, <code>DISTINGUISHES</code>, <code>OVERRULES</code>, <code>REVERSES</code>), <code>INTERPRETS</code> from a case to a statute section, <code>APPEAL_OF</code> between decisions in the same matter, and a court hierarchy that decides who can overrule whom.</li>
+  <li><strong>Sources</strong>: citation strings are highly regular and can be parsed deterministically; court and date come from metadata. The treatment of a citation is the part that needs an LLM (or a human editor), because it lives in the prose around the citation.</li>
+</ul>
+
+<p>The example below is invented for this chapter and is not part of the Kestrel corpus. It asks a question the Port Avalon City Council, which contracted Kestrel Labs for Ocean Health Act compliance monitoring, might plausibly ask its lawyers.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Following a citation chain, and checking it is still good law",
+  "subtitle": "Fictional cases interpreting the Ocean Health Act",
+  "height": 400,
+  "directed": true,
+  "nodes": [
+    {"id": "s4", "label": "Ocean Health Act s.4", "group": 5, "x": 50, "y": 10},
+    {"id": "anglers", "label": "Avalon Anglers (2025)", "group": 1, "x": 22, "y": 45},
+    {"id": "guardians", "label": "Reef Guardians (2026, appeal)", "group": 2, "x": 72, "y": 45},
+    {"id": "coastal", "label": "Coastal Trust (2025)", "group": 1, "x": 12, "y": 85},
+    {"id": "seaway", "label": "Seaway Marina (2026)", "group": 1, "x": 52, "y": 85},
+    {"id": "pilots", "label": "Harbor Pilots (2026)", "group": 1, "x": 86, "y": 85}
+  ],
+  "edges": [
+    {"source": "anglers", "target": "s4", "label": "interprets"},
+    {"source": "guardians", "target": "s4", "label": "interprets"},
+    {"source": "coastal", "target": "anglers", "label": "follows"},
+    {"source": "guardians", "target": "anglers", "label": "overrules"},
+    {"source": "seaway", "target": "guardians", "label": "follows"},
+    {"source": "pilots", "target": "guardians", "label": "distinguishes"}
+  ],
+  "legend": {"5": "Statute section", "1": "Trial court decision", "2": "Appellate decision"},
+  "steps": [
+    {"caption": "Question: <em>does the quarterly monitoring duty in s.4 of the Ocean Health Act cover Halden Reef, 40 km offshore?</em> Entity linking seeds the statute section.", "active": ["s4"]},
+    {"caption": "One hop along INTERPRETS edges finds two decisions construing s.4. A similarity retriever would find both, since both quote the section at length.", "active": ["anglers", "guardians"], "visited": ["s4"], "edges": ["anglers>s4", "guardians>s4"]},
+    {"caption": "<strong>Avalon Anglers</strong> (trial court, 2025) read s.4 narrowly: only reefs inside municipal waters. <strong>Coastal Trust</strong> followed it. Two agreeing cases look like a settled answer: <em>no duty</em>.", "active": ["anglers", "coastal"], "visited": ["s4"], "edges": ["coastal>anglers"], "visitedEdges": ["anglers>s4"]},
+    {"caption": "The good-law check: look at <em>incoming</em> citations with negative treatment. <strong>Reef Guardians</strong>, a later appellate decision, overrules Avalon Anglers. Anglers is bad law; Coastal Trust, which relied on it, needs caution.", "active": ["guardians"], "visited": ["anglers", "coastal"], "edges": ["guardians>anglers"], "visitedEdges": ["coastal>anglers"]},
+    {"caption": "Now follow treatment of Reef Guardians. <strong>Seaway Marina</strong> follows it. <strong>Harbor Pilots</strong> distinguishes it on facts (a privately leased reef bed), which marks a limit of the rule rather than undermining it.", "active": ["seaway", "pilots"], "visited": ["guardians"], "edges": ["seaway>guardians", "pilots>guardians"]},
+    {"caption": "Answer path: s.4 is interpreted by Reef Guardians (appellate, good law), followed by Seaway Marina. Answer: <em>yes, the duty covers reefs in regional waters</em>, citing both, noting Avalon Anglers was overruled and the Harbor Pilots exception.", "active": ["s4", "guardians", "seaway"], "visited": ["pilots", "anglers"], "edges": ["guardians>s4", "seaway>guardians"], "visitedEdges": ["pilots>guardians", "guardians>anglers"]}
+  ]
+}
+</script>
+</div>
+
+<h3>Ranking by authority</h3>
+<p>Ranking legal sources mixes three signals that similarity search does not see:</p>
+<ul>
+  <li><strong>Validity</strong>: a hard filter. Overruled or reversed decisions are never presented as supporting authority. They may still be retrieved, labeled, to explain history.</li>
+  <li><strong>Binding force</strong>: decisions from higher courts in the same jurisdiction bind lower ones; other jurisdictions are only persuasive. This is a path constraint over the court hierarchy.</li>
+  <li><strong>Influence and recency</strong>: how often and how recently a case is followed. PageRank over the citation graph (<a href="17-ppr-hipporag.html">Chapter 17</a>) is a reasonable influence prior, but raw citation counts favor old cases, and negative citations also count as citations. Weight edges by treatment before running it.</li>
+</ul>
+<p>In Cypher, the good-law filter is a negative pattern over incoming edges:</p>
+<pre data-file="queries/good_law.cypher"><code class="language-cypher">MATCH (c:Case)-[:INTERPRETS]-&gt;(:Section {id: $section})
+WHERE NOT EXISTS {
+  MATCH (later:Case)-[t:CITES]-&gt;(c)
+  WHERE t.treatment IN ['OVERRULES', 'REVERSES']
+    AND later.court_level &gt;= c.court_level
+    AND later.decided &gt;= c.decided
+}
+RETURN c.name, c.court, c.decided
+ORDER BY c.court_level DESC, c.decided DESC</code></pre>
+
+<h3>Evaluation and pitfalls</h3>
+<p>The first metric is citation existence: every cited authority must exist and be quoted accurately, which you can check deterministically against the graph. The second is citation validity: no bad law presented as support. The third, holding accuracy, needs expert review on a sample. Pitfalls:</p>
+<ul>
+  <li><strong>Holding vs. dicta.</strong> An opinion says many things; only the holding binds. Extraction prompts should separate them and cite paragraph numbers.</li>
+  <li><strong>Jurisdiction mixing.</strong> A persuasive out-of-jurisdiction case ranked above a binding local one is a wrong answer even if every sentence is true.</li>
+  <li><strong>Treatment extraction errors.</strong> Misreading “declined to follow” as “followed” flips validity. Treat LLM-extracted treatments as claims with confidence, and prefer editorial citator data where you have it.</li>
+  <li><strong>Time.</strong> “Good law” is as of a date. Store decision dates and answer as of the question's date, rather than assuming today.</li>
+</ul>
+
+<h2>Other domains: threat intelligence, science and support</h2>
+
+<h3>Cyber threat intelligence</h3>
+<p>Threat reports describe attackers, malware, techniques, infrastructure and indicators such as IP addresses and file hashes. A natural schema maps these to a standard vocabulary: MITRE ATT&amp;CK for tactics and techniques, CVE identifiers for vulnerabilities. The interesting design question is which facts to retrieve. Indicators are trivial to extract but easy for attackers to rotate; behaviors and techniques are harder to extract but durable. Security teams call this ordering the Pyramid of Pain.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Kabra et al., Operationalizing Cyber Threat Intelligence with GraphRAG (2026)</span>
+  <p>The authors fed threat reports into Microsoft GraphRAG and into a vector-only RAG with the same model and instructions, and asked both to write detection plans. In a detailed case study of one APT28 report, the GraphRAG plan kept firing on all of its detections after every IP address, domain and file hash was rotated, while the vector RAG plan kept 29%. Across nine reports from four vendors, GraphRAG plans consistently reached higher, harder-to-evade levels of the pyramid, even when the two systems ended up close on total score. They also found that the wording of the generation prompt mattered almost as much as the retrieval back end.</p>
+</div>
+
+<h3>Scientific literature</h3>
+<p>Papers form a citation graph, and research questions often need to combine a claim in one paper with the method in a paper it cites. The lexical-plus-domain design of this course applies directly, with one twist: citations carry context (the sentence around a citation says <em>why</em> it is cited), which is a free edge description.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Hu et al., CG-RAG (2025)</span>
+  <p>CG-RAG proposes a contextual graph representation of citation graphs that captures explicit and implicit connections within and across documents, and Lexical-Semantic Graph Retrieval (LeSeGR), which integrates sparse and dense retrieval signals with graph encoding. It targets research question answering and reports gains over RAG combined with a range of retrieval methods.</p>
+</div>
+
+<h3>Customer support</h3>
+<p>Support tickets have internal structure (summary, steps to reproduce, resolution) and relations between tickets (duplicates, clones, “caused by”). Xu et al. build a knowledge graph from historical issues that keeps both the intra-issue structure and the inter-issue relations, then retrieve sub-graphs for new customer queries. Their abstract reports a 77.6% improvement in MRR over the baseline and, after about six months in production at LinkedIn's customer service team, a 28.6% drop in median per-issue resolution time. It is a reminder that “structure-aware chunking” (<a href="07-chunking-text-units.html">Chapter 7</a>) and a domain graph are often the same design decision.</p>
+
+<h2>What transfers from Kestrel, and a checklist for a new domain</h2>
+<p>Almost every technique in this course survives the move to a specialized domain. What changes is which technique does the heavy lifting.</p>
+<table>
+  <thead><tr><th>Kestrel technique</th><th>Code</th><th>Medicine</th><th>Finance</th><th>Law</th></tr></thead>
+  <tbody>
+    <tr><td>LLM extraction (Ch. 8)</td><td>Mostly replaced by the parser; used for docs and issues</td><td>Notes and papers, with polarity</td><td>Narrative sections and calls</td><td>Treatments and holdings</td></tr>
+    <tr><td>Entity resolution (Ch. 9)</td><td>Symbol resolution</td><td>Vocabulary codes</td><td>Registry identifiers, tickers</td><td>Citation normalization</td></tr>
+    <tr><td>Claims and time (Ch. 10, 27)</td><td>Commit history</td><td>Event dates, guideline versions</td><td>Periods, restatements</td><td>Decision dates, good law as of</td></tr>
+    <tr><td>Communities and reports (Ch. 11, 12)</td><td>Package and subsystem summaries</td><td>Topic summaries per condition</td><td>Sector or segment summaries</td><td>Doctrine area summaries</td></tr>
+    <tr><td>Local search (Ch. 14)</td><td>Symbol neighborhood</td><td>Patient timeline around a concept</td><td>Company profile</td><td>Case with its citing cases</td></tr>
+    <tr><td>Paths and PPR (Ch. 17, 18)</td><td>Reverse reachability for impact</td><td>Upward IS_A expansion</td><td>Ownership chains</td><td>Citation chains, influence</td></tr>
+    <tr><td>Text2Cypher (Ch. 20)</td><td>CodexGraph-style agents</td><td>Cohort queries over coded data</td><td>Metric lookups</td><td>Good-law filters</td></tr>
+  </tbody>
+</table>
+
+<div class="callout tip">
+  <span class="callout-title">Checklist before you build a domain graph</span>
+  <p>1. List twenty real questions users ask, and mark which need multi-hop, global, temporal or numeric reasoning. 2. For each node and edge type the questions need, write down its cheapest trustworthy source: parser, curated identifier, metadata, or LLM. 3. Decide the identifier for “the same thing” before extracting anything. 4. Decide what the system does when evidence is missing or conflicting. 5. Find the domain's free oracle (tests, citators, stated totals, clinician review) and build evaluation on it first.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 32.1 <span class="level">Warm-up</span></h4>
+  <p>A small repository has these CALLS edges (caller → callee): <code>cli.main → index.run</code>, <code>index.run → extract.parse</code>, <code>index.run → chunk.split</code>, <code>index.run → report.build</code>, <code>report.build → context.fit</code>, <code>query.local → context.fit</code>, <code>query.global → report.load</code>, <code>test_parse → extract.parse</code>. By hand, compute the impact set of changing <code>context.fit</code>, with distances. Which tests would you run, and what does the result tell you about the test suite?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Reverse the edges and run BFS from <code>context.fit</code>:</p>
+    <ul>
+      <li>Distance 1: <code>report.build</code>, <code>query.local</code> (both call <code>context.fit</code> directly).</li>
+      <li>Distance 2: <code>index.run</code> (calls <code>report.build</code>). Nothing calls <code>query.local</code>.</li>
+      <li>Distance 3: <code>cli.main</code> (calls <code>index.run</code>).</li>
+    </ul>
+    <p>Impact set: {report.build: 1, query.local: 1, index.run: 2, cli.main: 3}. Not affected: <code>extract.parse</code>, <code>chunk.split</code>, <code>query.global</code>, <code>report.load</code>. <code>extract.parse</code> and <code>chunk.split</code> are <em>called by</em> an affected function, which is the wrong direction: a change to <code>context.fit</code> cannot break code that <code>index.run</code> calls.</p>
+    <p>The only test, <code>test_parse</code>, reaches <code>extract.parse</code>, which is not in the impact set, so no existing test exercises the change. The graph has just told you something valuable: <code>context.fit</code> is untested along every path. Write a test for <code>query.local</code> or <code>report.build</code> before refactoring.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 32.2 <span class="level">Core</span></h4>
+  <p>Extend the code graph to select tests. Parse the package and its <code>tests/</code> directory into one graph, and write <code>tests_to_run(G, target)</code> that returns the test functions whose code transitively reaches <code>target</code>. Make sure a test that reaches the target through a helper function is included.</p>
+  <details class="hint"><summary>Hint</summary><p><code>build_code_graph</code> already accepts several directories and resolves calls across all of them in pass two. A test that calls a helper that calls the target is just another node in the reverse BFS.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from code_graph import build_code_graph, impact_of
+
+def tests_to_run(G, target: str) -&gt; list[str]:
+    if target not in G:
+        raise KeyError(f"unknown symbol: {target}")
+    affected = set(impact_of(G, target)) | {target}
+    return sorted(n for n in affected
+                  if G.nodes[n]["kind"] == "function" and G.nodes[n]["name"].startswith("test_"))
+
+G = build_code_graph("code/minigraphrag", "code/tests")
+print(tests_to_run(G, "minigraphrag.llm.parse_json_response"))</code></pre>
+    <p>Run against the course repository while this chapter was written, it selected six tests, including <code>tests.test_llm.test_parse_json_response_handles_fences</code>, <code>tests.test_reports.test_generate_report_structure</code> and the end-to-end CLI test in <code>tests.test_search_e2e</code>. We also checked a small synthetic test module containing <code>test_parse_fenced</code> (calls <code>parse_json_response</code> directly), <code>test_report</code> (calls a <code>helper</code> that calls <code>generate_report</code>, which calls the target) and <code>test_unrelated</code>. For that module the result was <code>['tests.test_llm.test_parse_fenced', 'tests.test_llm.test_report']</code>: the helper path is found because reverse BFS does not care whether an intermediate node is a test. Two caveats to state in your tool's output: pytest fixtures are called by the framework, not by the test body, so a target reached only through a fixture is missed; and calls through <code>llm.complete</code> are unresolved, so tests that exercise a specific LLM class through the protocol are missed. Running the full suite nightly covers both gaps.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 32.3 <span class="level">Core</span></h4>
+  <p>Using the funding model from the finance section, answer by hand and then in code: (a) the total raised by Kestrel Labs as of 1 January 2023 and as of 31 December 2025; (b) what the total as of 31 December 2025 would be if you had instead stored <code>amount_usd</code> on <code>INVESTED_IN</code> edges and recorded Brightwater plus the two angel groups as Series A investors; (c) a validation rule that would have caught (b).</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) As of 2023-01-01 only the Series A (15 March 2022) counts: $12M. As of 2025-12-31 both rounds count: $12M + $40M = $52M, which matches the Series B press release's statement that total funding reached $52 million. The code in the chapter prints <code>12000000</code> and <code>52000000</code>.</p>
+    <p>(b) Series A would appear on three edges with $12M each, $36M, plus Series B on Brightwater's edge, $40M: $76M. It overstates by $24M, and adding more participants makes it worse. (If Series B also had edges for the two new infrastructure funds the corpus mentions, it would be $156M.)</p>
+    <p>(c) Two rules. Structural: amounts belong to round nodes, and investor edges carry only role (led, participated). Numeric: whenever a document states an aggregate (“brings total funding raised to $52 million”), extract it as a claim and compare it with the computed aggregate; flag any difference beyond rounding.</p>
+    <pre><code class="language-python">def check_stated_total(G, company, stated_usd, as_of, tolerance=0.01):
+    computed = total_raised(G, company, as_of)
+    ok = abs(computed - stated_usd) &lt;= tolerance * stated_usd
+    return ok, computed</code></pre>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 32.4 <span class="level">Core</span></h4>
+  <p>Write <code>citator_status(G, case)</code> for the fictional citation graph in the legal visualization. It should return “bad law” if a decision from the same or a higher court, decided in the same year or later, overrules or reverses the case; “caution” if the case follows a case that is bad law; otherwise “good law”, plus a list of reasons such as distinguishing cases. Run it on all five cases.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import networkx as nx
+
+LEVEL = {"trial": 1, "appeal": 2, "supreme": 3}
+NEGATIVE = {"OVERRULES": "overruled", "REVERSES": "reversed"}
+
+def citator_status(G: nx.MultiDiGraph, case: str) -&gt; tuple[str, list[str]]:
+    d = G.nodes[case]
+    reasons = []
+    for citing, _, e in G.in_edges(case, data=True):
+        c = G.nodes[citing]
+        if (e["treatment"] in NEGATIVE and LEVEL[c["court"]] &gt;= LEVEL[d["court"]]
+                and c["year"] &gt;= d["year"]):
+            return "bad law", [f"{NEGATIVE[e['treatment']]} by {citing} ({c['year']})"]
+        if e["treatment"] == "DISTINGUISHES":
+            reasons.append(f"distinguished by {citing}")
+    for _, cited, e in G.out_edges(case, data=True):
+        if e["treatment"] == "FOLLOWS" and citator_status(G, cited)[0] == "bad law":
+            reasons.append(f"relies on {cited}, which is bad law")
+    return ("caution" if any("relies on" in r for r in reasons) else "good law"), reasons
+
+G = nx.MultiDiGraph()
+for name, court, year in [("Avalon Anglers v. City", "trial", 2025),
+                          ("Coastal Trust v. Harbor Board", "trial", 2025),
+                          ("Reef Guardians v. City", "appeal", 2026),
+                          ("Seaway Marina v. City", "trial", 2026),
+                          ("Harbor Pilots v. City", "trial", 2026)]:
+    G.add_node(name, kind="case", court=court, year=year)
+G.add_node("Ocean Health Act s.4", kind="statute")
+for src, dst, t in [("Avalon Anglers v. City", "Ocean Health Act s.4", "INTERPRETS"),
+                    ("Reef Guardians v. City", "Ocean Health Act s.4", "INTERPRETS"),
+                    ("Coastal Trust v. Harbor Board", "Avalon Anglers v. City", "FOLLOWS"),
+                    ("Reef Guardians v. City", "Avalon Anglers v. City", "OVERRULES"),
+                    ("Seaway Marina v. City", "Reef Guardians v. City", "FOLLOWS"),
+                    ("Harbor Pilots v. City", "Reef Guardians v. City", "DISTINGUISHES")]:
+    G.add_edge(src, dst, key=t, treatment=t)
+
+for n, d in G.nodes(data=True):
+    if d["kind"] == "case":
+        print(n, citator_status(G, n))</code></pre>
+    <p>Output:</p>
+    <pre><code>Avalon Anglers v. City ('bad law', ['overruled by Reef Guardians v. City (2026)'])
+Coastal Trust v. Harbor Board ('caution', ['relies on Avalon Anglers v. City, which is bad law'])
+Reef Guardians v. City ('good law', ['distinguished by Harbor Pilots v. City'])
+Seaway Marina v. City ('good law', [])
+Harbor Pilots v. City ('good law', [])</code></pre>
+    <p>Two design notes. The court-level check matters: a trial court cannot overrule an appellate decision, so an extracted “OVERRULES” edge from a lower court is an extraction error to flag, not a validity signal. And the recursion in the caution rule can loop on cyclic citation data (rare but possible with same-day decisions); add a visited set in production.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 32.5 <span class="level">Stretch</span></h4>
+  <p>Implement upward concept expansion for medical retrieval. Given a vocabulary graph with IS_A edges (warfarin → vitamin K antagonist → anticoagulant; apixaban → factor Xa inhibitor → anticoagulant) and guidelines indexed by concept (g1: anticoagulant, g2: apixaban, g3: vitamin K antagonist), return the guidelines applicable to a question about warfarin, most specific first. Then explain, with an example, why the same function must never expand downward.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import networkx as nx
+
+V = nx.DiGraph()   # edge child -&gt; parent means child IS_A parent
+V.add_edges_from([("warfarin", "vitamin K antagonist"), ("vitamin K antagonist", "anticoagulant"),
+                  ("apixaban", "factor Xa inhibitor"), ("factor Xa inhibitor", "anticoagulant")])
+guidelines = {"g1": {"anticoagulant"}, "g2": {"apixaban"}, "g3": {"vitamin K antagonist"}}
+
+def expand_up(V, concept: str, max_hops: int = 3) -&gt; dict[str, int]:
+    if concept not in V:
+        return {concept: 0}
+    return nx.single_source_shortest_path_length(V, concept, cutoff=max_hops)
+
+def guidelines_for(V, concept: str) -&gt; list[str]:
+    up = expand_up(V, concept)          # {'warfarin': 0, 'vitamin K antagonist': 1, 'anticoagulant': 2}
+    hits = [(min(up[c] for c in cs if c in up), g) for g, cs in guidelines.items() if cs &amp; up.keys()]
+    return [g for _, g in sorted(hits)]
+
+print(guidelines_for(V, "warfarin"))    # ['g3', 'g1']</code></pre>
+    <p>Warfarin reaches “vitamin K antagonist” at distance 1 and “anticoagulant” at distance 2, so g3 (more specific) ranks before g1, and g2 is correctly excluded. Following edges <em>out</em> of the child is what makes the walk upward.</p>
+    <p>Why never downward: expanding “anticoagulant” down would retrieve g2, a guideline written about apixaban specifically, for a question about anticoagulants in general or, via a sibling path, about warfarin. Drug-specific guidance (dosing, reversal agents, monitoring such as INR for warfarin) does not transfer to siblings. Upward expansion applies general rules to specific cases, which is sound; downward or sideways expansion applies specific rules to other cases, which is exactly the kind of plausible, dangerous error a medical system must not make. Record the expansion distance in the context so the answer can say “this guidance is for the drug class.”</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why can a code graph's CALLS edges be built without an LLM, while Kestrel's ACQUIRED edges cannot?</p>
+  <ol>
+    <li>Code is shorter than news articles</li>
+    <li>LLMs cannot read code</li>
+    <li data-correct>Calls are explicit in the syntax tree and can be recovered by a parser; acquisitions exist only as statements in prose</li>
+    <li>Graph databases only support code schemas</li>
+  </ol>
+  <div class="explain">The compiler's grammar already structures code, so a parser extracts relationships exactly. Natural-language facts have no such grammar, which is why Chapter 8 needed extraction prompts.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the impact visualization, <code>drift_search</code> calls both <code>parse_json_response</code> and <code>local_search</code>. Is <code>local_search</code> in the impact set of a change to <code>parse_json_response</code>?</p>
+  <ol>
+    <li data-correct>No: it is called by an affected function but does not itself reach the target</li>
+    <li>Yes: it is two hops away in the undirected graph</li>
+    <li>Yes: every neighbor of an affected function is affected</li>
+    <li>Only if it is in the same module</li>
+  </ol>
+  <div class="explain">Impact follows CALLS edges backwards from the target. Undirected neighborhood expansion, which is fine for Kestrel's local search, gives wrong answers here.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A clinical note says “no evidence of GI bleeding.” How should a medical GraphRAG system treat it when checking whether the patient had a bleed?</p>
+  <ol>
+    <li>As supporting evidence, since it mentions GI bleeding</li>
+    <li>Ignore it, since negated sentences carry no information</li>
+    <li>As supporting evidence with low confidence</li>
+    <li data-correct>As admissible contradicting evidence, carried with a negation flag and its source span</li>
+  </ol>
+  <div class="explain">A negated mention is evidence against the claim. Similarity search ranks it highly because the words match; polarity must be extracted and used when deciding.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Your finance graph reports total Series A funding of $36M for a $12M round. What is the most likely modeling error?</p>
+  <ol>
+    <li>The embedding model confused Series A and Series B</li>
+    <li data-correct>The round amount was stored on each investor edge and summed across three participants</li>
+    <li>The fiscal year was wrong</li>
+    <li>The LLM hallucinated two extra rounds</li>
+  </ol>
+  <div class="explain">An n-ary fact (round, company, investors, amount, date) was flattened into binary edges. Model the round as a node that holds the amount.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Two trial court decisions agree on an interpretation of a statute, and both are highly similar to the question. What must a legal GraphRAG system check before citing them?</p>
+  <ol>
+    <li>That their embeddings are above a similarity threshold</li>
+    <li>That they have the highest PageRank in the citation graph</li>
+    <li data-correct>Incoming citations with negative treatment from courts with authority to overrule them</li>
+    <li>That they were decided in the same year</li>
+  </ol>
+  <div class="explain">Validity is decided by later treatment, found on incoming CITES edges, and constrained by the court hierarchy. Similarity and influence are ranking signals, not validity checks.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the cyber threat intelligence study by Kabra et al., what distinguished GraphRAG's detection plans from vector RAG's?</p>
+  <ol>
+    <li>They contained more IP addresses and file hashes</li>
+    <li>They were produced by a larger language model</li>
+    <li>They required no prompt at all</li>
+    <li data-correct>They relied more on durable, higher-level behaviors, so they kept firing after indicators were rotated</li>
+  </ol>
+  <div class="explain">Both systems used the same model and instructions. GraphRAG plans reached higher levels of the Pyramid of Pain, and the authors report that prompt wording mattered a great deal.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I still embed code chunks if I have a call graph?</summary>
+  <div><p>Yes. The graph answers structural questions (who calls, what inherits, what imports), and embeddings answer conceptual ones (“where do we handle rate limits?”) where the user does not know a symbol name. The usual pattern is hybrid: embed function bodies and docstrings, use vector or BM25 search to find seed symbols, then expand over the graph. That is local search (Chapter 14) with symbols as entities.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Do I need a medical vocabulary license to build this?</summary>
+  <div><p>Some vocabularies are freely available and others require a license or an agreement depending on your country and use. Check the terms before you ship. For prototyping, a small hand-built IS_A hierarchy for the drugs and conditions in your test questions is enough to validate the retrieval logic, as in Exercise 32.5.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can an LLM do the arithmetic in financial answers if I give it the right table cells?</summary>
+  <div><p>It often gets simple arithmetic right, but “often” is the wrong standard for numbers someone will act on. Have the LLM produce the formula and the cell references, compute the result in code, and put both the formula and the result in the answer. This also makes answers auditable.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should domain graphs use community reports and global search at all?</summary>
+  <div><p>Sometimes. Package-level summaries of a large repository, sector summaries across many filings, and doctrine-area summaries in law are useful for orientation questions. But domain users ask more precise questions than “what are the themes?”, and summaries lose the exact provenance these domains require. Build local, path and query-based retrieval first; add community reports when you see orientation questions in your logs.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I keep a code graph current as the repository changes?</summary>
+  <div><p>Hash each file's contents. On each commit, re-parse only changed files, delete their old definition nodes and outgoing edges, re-add them, and then re-run pass two for calls <em>into</em> the changed files from unchanged ones, since a renamed function breaks resolution elsewhere. This is the incremental update pattern of Chapter 27 with a parser instead of an LLM, so it is cheap enough to run in CI.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: an impact bot for your own repository</h3>
+  <p>Turn the code graph into a tool that comments on a change before it is merged. This is the foundation you will extend in <a href="c2-code-graph.html">Capstone 2</a>.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>codegraph build &lt;dirs&gt;</code> writes the graph as JSON (nodes with file and line ranges, edges with relation and call line)</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span><code>codegraph impact &lt;qualified name&gt;</code> prints callers by distance and lists unresolved call sites that might hide more callers</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>git diff</code> mode: map changed line ranges to the functions that contain them, then union their impact sets and select tests</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An LLM explanation step using <code>LLM.complete</code> with the caller table and the closest callers' source, citing file and line</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An evaluation over 10 historical commits that broke tests: precision and recall of predicted affected tests against the tests that actually failed</span></li>
+  </ul>
+  <p><strong>Done when</strong> the bot's test selection catches the failing tests in most of your historical commits, and you can explain each miss by a specific blind spot from the table in this chapter.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>The GraphRAG skeleton transfers unchanged; what changes is where edges come from, what counts as the same entity, and what a wrong answer costs.</li>
+    <li>Parse what is parseable and link to curated identifiers; spend LLM extraction only on relations that live in prose.</li>
+    <li>Code graphs answer impact questions with reverse reachability, but static resolution misses dynamic dispatch, so report what you could not resolve.</li>
+    <li>Medicine needs trusted-source linking, upward-only concept expansion, evidence on both sides and a deterministic admissibility gate that can abstain.</li>
+    <li>Finance needs typed document structure, n-ary fact nodes with units and periods, and arithmetic done in code.</li>
+    <li>Law needs treatment-labeled citation edges and a good-law check before anything is cited; relevance is not authority.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Ouyang et al. <a href="https://arxiv.org/abs/2410.14684">RepoGraph: Enhancing AI Software Engineering with Repository-level Code Graph</a>. <span class="venue">arXiv 2410.14684, 2024</span></li>
+  <li>Liu et al. <a href="https://arxiv.org/abs/2408.03910">CodexGraph: Bridging Large Language Models and Code Repositories via Code Graph Databases</a>. <span class="venue">arXiv 2408.03910, 2024</span></li>
+  <li>Du et al. <a href="https://arxiv.org/abs/2405.02355">CodeGRAG: Bridging the Gap between Natural Language and Programming Language via Graphical Retrieval Augmented Generation</a>. <span class="venue">arXiv 2405.02355, 2024</span></li>
+  <li>Liu et al. <a href="https://arxiv.org/abs/2406.07003">GraphCoder: Enhancing Repository-Level Code Completion via Code Context Graph-based Retrieval and Language Model</a>. <span class="venue">arXiv 2406.07003, 2024</span></li>
+  <li>Wu et al. <a href="https://arxiv.org/abs/2408.04187">Medical Graph RAG: Towards Safe Medical Large Language Model via Graph Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2408.04187, 2024</span></li>
+  <li>Lin et al. <a href="https://arxiv.org/abs/2608.22062">Search Broadly, Seek Evidence on Both Sides, Decide Narrowly: Evidence-Admissible GraphRAG for Longitudinal Clinical Event Verification</a>. <span class="venue">arXiv 2608.22062, 2026</span></li>
+  <li>Chen et al. <a href="https://arxiv.org/abs/2608.12335">HC-RAG: Evidence-Centric Retrieval-Augmented Generation over Heterogeneous Financial Filings</a>. <span class="venue">arXiv 2608.12335, 2026</span></li>
+  <li>Sarmah et al. <a href="https://arxiv.org/abs/2408.04948">HybridRAG: Integrating Knowledge Graphs and Vector Retrieval Augmented Generation for Efficient Information Extraction</a>. <span class="venue">arXiv 2408.04948, 2024</span></li>
+  <li>Kabra, Paliwal and Hanawal. <a href="https://arxiv.org/abs/2608.13050">Operationalizing Cyber Threat Intelligence with GraphRAG</a>. <span class="venue">arXiv 2608.13050, 2026</span></li>
+  <li>Hu et al. <a href="https://arxiv.org/abs/2501.15067">CG-RAG: Research Question Answering by Citation Graph Retrieval-Augmented LLMs</a>. <span class="venue">arXiv 2501.15067, 2025</span></li>
+  <li>Xu et al. <a href="https://arxiv.org/abs/2404.17723">Retrieval-Augmented Generation with Knowledge Graphs for Customer Service Question Answering</a>. <span class="venue">arXiv 2404.17723, 2024</span></li>
+  <li>Python Software Foundation. <a href="https://docs.python.org/3/library/ast.html">ast: Abstract Syntax Trees</a>. <span class="venue">Python documentation</span></li>
+  <li>NetworkX developers. <a href="https://networkx.org/documentation/stable/">NetworkX documentation</a>. <span class="venue">networkx.org</span></li>
+  <li>MITRE. <a href="https://attack.mitre.org/">MITRE ATT&amp;CK knowledge base</a>. <span class="venue">attack.mitre.org</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

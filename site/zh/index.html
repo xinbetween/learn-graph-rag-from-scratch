@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>从零构建 Graph RAG</title>
+<meta name="description" content="从第一性原理出发构建图检索增强生成的实践课程：讲解、交互图、原理图、附解答的练习、测验、项目和综合项目。">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/index.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/index.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/index.html">
+<link rel="stylesheet" href="../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-root="..">
+<main class="home" id="main">
+  <div class="wrap">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">34 章 · 4 个综合项目 · 3,462 行 Python · 无需 API 密钥</div>
+        <h1>从零构建 <span class="hl">Graph RAG</span></h1>
+        <p class="lede">向量检索找到的是看起来像问题的段落。当答案分散在多篇文档里、问题针对整个语料、或者某个事实已经发生变化时，它就会断线。这门课一步一步地构建另一条路：从文本中抽取图，对图聚类、生成摘要，再按实体、路径和社区来检索。</p>
+        <p class="sub">每一章从四个角度讲透一个机制：一张原理图、一个交互图、带解析的测验，以及基于一个可离线运行的小型参考实现的练习。</p>
+        <div class="btnrow">
+          <a class="btn primary" id="continue" href="chapters/00-welcome.html">从第 00 章开始 →</a>
+          <a class="btn" href="#curriculum">查看课程大纲</a>
+        </div>
+        <div class="termline"><span class="p">$</span>cd code &amp;&amp; pip install -e . &amp;&amp; python -m minigraphrag index --input data/corpus</div>
+      </div>
+
+      <figure class="hero-fig" aria-labelledby="hf-title">
+        <span class="mono-label">第 0 章 · 完整流程</span>
+        <svg viewBox="0 0 620 262" role="img" aria-labelledby="hf-title">
+          <title id="hf-title">GraphRAG 流程：文档在离线阶段被分块、抽取成图、聚类并生成摘要；每个问题被路由到基于该索引的局部搜索或全局搜索，并给出带引用的答案。示例路径连接了三篇文档：Marlow Dynamics 收购了 Deepcast，Deepcast 为 Kestrel Labs 供货，Kestrel Labs 启动了 Project Tern。</title>
+          <defs>
+            <marker id="hfa" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="hf-arrow"/></marker>
+            <marker id="hfh" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="hf-arrow hot"/></marker>
+          </defs>
+          <text class="hf-cap" x="4" y="10">索引 · 离线执行一次</text>
+          <g>
+            <rect class="hf-box sunk" x="4" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="46" y="36" text-anchor="middle">文档</text><text class="hf-s" x="46" y="49" text-anchor="middle">12 篇 .md</text>
+            <rect class="hf-box" x="108" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="150" y="36" text-anchor="middle">分块</text><text class="hf-s" x="150" y="49" text-anchor="middle">文本单元</text>
+            <rect class="hf-box hot" x="212" y="16" width="92" height="46" rx="5"/><text class="hf-t hot" x="258" y="36" text-anchor="middle">抽取</text><text class="hf-s" x="258" y="49" text-anchor="middle">LLM → 实体</text>
+            <rect class="hf-box" x="324" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="366" y="36" text-anchor="middle">图</text><text class="hf-s" x="366" y="49" text-anchor="middle">17 个节点</text>
+            <rect class="hf-box" x="428" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="470" y="36" text-anchor="middle">社区</text><text class="hf-s" x="470" y="49" text-anchor="middle">Leiden</text>
+            <rect class="hf-box" x="532" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="574" y="36" text-anchor="middle">报告</text><text class="hf-s" x="574" y="49" text-anchor="middle">摘要</text>
+            <path class="hf-line" d="M88 39 H106" marker-end="url(#hfa)"/><path class="hf-line" d="M192 39 H210" marker-end="url(#hfa)"/>
+            <path class="hf-line hot" d="M304 39 H322" marker-end="url(#hfh)"/><path class="hf-line" d="M408 39 H426" marker-end="url(#hfa)"/><path class="hf-line" d="M512 39 H530" marker-end="url(#hfa)"/>
+          </g>
+          <text class="hf-cap" x="4" y="92">查询 · 每个问题</text>
+          <g>
+            <rect class="hf-box sunk" x="4" y="102" width="110" height="38" rx="4"/><text class="hf-t" x="59" y="118" text-anchor="middle">问题</text><text class="hf-s" x="59" y="131" text-anchor="middle">“为什么做 Tern？”</text>
+            <rect class="hf-box hot" x="146" y="98" width="170" height="46" rx="5"/><text class="hf-t hot" x="231" y="118" text-anchor="middle">检索图</text><text class="hf-s" x="231" y="131" text-anchor="middle">局部 · 全局 · PPR · 路径</text>
+            <rect class="hf-box" x="348" y="102" width="110" height="38" rx="4"/><text class="hf-t" x="403" y="118" text-anchor="middle">上下文</text><text class="hf-s" x="403" y="131" text-anchor="middle">表格 + ID</text>
+            <rect class="hf-box good" x="490" y="102" width="126" height="38" rx="4"/><text class="hf-t good" x="553" y="118" text-anchor="middle">答案</text><text class="hf-s" x="553" y="131" text-anchor="middle">附带引用</text>
+            <path class="hf-line" d="M114 121 H144" marker-end="url(#hfa)"/><path class="hf-line hot" d="M316 121 H346" marker-end="url(#hfh)"/><path class="hf-line" d="M458 121 H488" marker-end="url(#hfa)"/>
+            <path class="hf-line hot" d="M366 58 V76 H270 V96" marker-end="url(#hfh)"/>
+            <path class="hf-line" d="M574 58 V80 H290 V96" stroke-dasharray="3 3"/>
+          </g>
+          <text class="hf-cap" x="4" y="174">“KESTREL LABS 为什么启动 PROJECT TERN？”背后的路径</text>
+          <g>
+            <rect class="hf-box" x="4" y="184" width="110" height="26" rx="13"/><text class="hf-t" x="59" y="201" text-anchor="middle">Marlow Dynamics</text>
+            <rect class="hf-box" x="170" y="184" width="84" height="26" rx="13"/><text class="hf-t" x="212" y="201" text-anchor="middle">Deepcast</text>
+            <rect class="hf-box" x="310" y="184" width="100" height="26" rx="13"/><text class="hf-t" x="360" y="201" text-anchor="middle">Kestrel Labs</text>
+            <rect class="hf-box hot" x="466" y="184" width="100" height="26" rx="13"/><text class="hf-t hot" x="516" y="201" text-anchor="middle">Project Tern</text>
+            <path class="hf-line hot" d="M114 197 H168" marker-end="url(#hfh)"/><text class="hf-s" x="141" y="191" text-anchor="middle">收购</text><text class="hf-note" x="141" y="221" text-anchor="middle">文档 07</text>
+            <path class="hf-line hot" d="M254 197 H308" marker-end="url(#hfh)"/><text class="hf-s" x="281" y="191" text-anchor="middle">供货</text><text class="hf-note" x="281" y="221" text-anchor="middle">文档 08</text>
+            <path class="hf-line hot" d="M410 197 H464" marker-end="url(#hfh)"/><text class="hf-s" x="437" y="191" text-anchor="middle">启动</text><text class="hf-note" x="437" y="221" text-anchor="middle">文档 09</text>
+          </g>
+          <text class="hf-note" x="4" y="243">灰色 = 建索引时计算一次 · 橙色 = 每次查询要做的工作</text>
+          <text class="hf-warn" x="4" y="257">Top-k 向量检索只能找回这三篇文档中的一篇；第 03 章解释原因。</text>
+        </svg>
+      </figure>
+    </section>
+  </div>
+
+  <section class="band">
+    <div class="wrap principles">
+      <div><div class="n">01</div><h3>从向量检索失效的地方出发。</h3><p>多跳问题、针对整个语料的问题、随时间变化的事实，是普通 RAG 失效的地方。课程中的每一项技术，都作为对其中某种失效的修补来引入。</p></div>
+      <div><div class="n">02</div><h3>图是索引，不是答案。</h3><p>实体、关系、社区和报告存在的意义，是让检索找到正确的证据。能不能找到，取决于抽取质量、实体消解和 token 预算。</p></div>
+      <div><div class="n">03</div><h3>先自己实现一个小的，再去读框架。</h3><p>每个阶段都是 <code>minigraphrag</code> 中的一个短模块。亲手写过之后，Microsoft GraphRAG、LightRAG、HippoRAG 和 Graphiti 读起来就是你已经熟悉的代码的不同变体。</p></div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <section>
+      <div class="sec-head">
+        <div><span class="mono-label">适合谁</span><h2>谁能从这门课中收获最多</h2></div>
+        <p>前置要求：会 Python，至少调用过一次 LLM API。不需要 GPU，也不需要 API 密钥；参考代码可以用模拟模型端到端运行。</p>
+      </div>
+      <div class="who">
+        <a href="chapters/03-where-rag-breaks.html"><h3>你的 RAG 系统答不好多跳问题</h3><p>准确看清 top-k 检索为什么会漏掉起连接作用的文档，再用实体图、个性化 PageRank 和路径检索修好它。</p><span class="go">03, 17–18 · RAG 在哪里失效 →</span></a>
+        <a href="chapters/28-frameworks-in-practice.html"><h3>你正在选择 GraphRAG 框架</h3><p>从抽取什么、如何检索、建索引花多少钱三个方面，比较 Microsoft GraphRAG、LightRAG、neo4j-graphrag、LlamaIndex 和 Graphiti。</p><span class="go">26, 28 · 框架与成本 →</span></a>
+        <a href="chapters/14-local-search.html"><h3>读过 GraphRAG 论文，想弄清细节</h3><p>局部搜索的预算分配、map-reduce 全局搜索、DRIFT、社区报告和补漏抽取，每一项都在同一份语料上实现并测量。</p><span class="go">12, 14–15 · 局部搜索与全局搜索 →</span></a>
+        <a href="chapters/11-community-detection.html"><h3>你习惯通过动手实验来学习</h3><p>一步一步地观察 Louvain 的每次移动，在个性化 PageRank 交互图中开关种子节点，看 map-reduce 搜索丢弃得分低于阈值的社区报告。验证一个猜想只需要几秒钟。</p><span class="go">11 · 试试 Louvain →</span></a>
+      </div>
+    </section>
+
+    <section id="curriculum">
+      <div class="sec-head">
+        <div><span class="mono-label">课程大纲</span><h2>七个部分、三十四章、四个综合项目</h2></div>
+        <p>每一部分都从上一部分留下的局限开始。第一遍请按顺序读；之后可以直接跳到你需要的检索方法。</p>
+      </div>
+      <div id="layers"></div>
+    </section>
+  </div>
+
+  <section class="band">
+    <div class="wrap">
+      <span class="mono-label">每一章都包含</span>
+      <div class="every">
+        <div><h3>原理图</h3><p>跟随文本经过抽取、图经过聚类、问题经过检索，一直到模型实际看到的 token。</p></div>
+        <div><h3>交互图</h3><p>在 Kestrel Labs 图上逐步演示 BFS、Louvain、PageRank、map-reduce 搜索和排序融合。</p></div>
+        <div><h3>测验与练习</h3><p>带解析的测验题，以及从热身到进阶、附完整解答的练习。</p></div>
+        <div><h3>可以运行的代码</h3><p>各章代码都基于 <code>minigraphrag</code>：一个带 pytest 测试套件的参考实现，用模拟模型代替 LLM，在笔记本电脑上即可离线运行。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <section>
+      <div class="cta">
+        <div><h2>从路线图和工具箱开始。</h2><p>第 00 章搭建参考代码，介绍 Kestrel Labs 语料，并提出贯穿整门课程要回答的七个问题。</p></div>
+        <a class="btn primary" id="cta-btn" href="chapters/00-welcome.html">00 · 欢迎 →</a>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../assets/js/site.js?v=fe74656c"></script>
+<script src="../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+(function () {
+  const G = window.GRFS, api = window.GRFSViz.api, esc = api.escapeHtml;
+  const box = document.getElementById("layers");
+  CURRICULUM.parts.forEach((part, pi) => {
+    const col = api.groupColor(pi + 1);
+    const chs = part.chapters.map((c) => G.flat.find((f) => f.slug === c.slug));
+    const ids = chs.map((c) => G.chapterId(c)).filter(Boolean);
+    const rng = ids.length ? (ids.length > 1 ? ids[0] + "–" + ids[ids.length - 1] : ids[0]) : "";
+    const layer = document.createElement("div");
+    layer.className = "layer";
+    layer.innerHTML = '<div class="layer-head"><span class="dia" style="background:' + col + '"></span><h3>' + esc(part.title) + '</h3><span class="rng">' + rng + '</span><span class="bl">' + esc(part.blurb) + '</span></div><div class="cards"></div>' +
+      (part.bridge ? '<p class="bridge">' + esc(part.bridge) + "</p>" : "");
+    const cards = layer.querySelector(".cards");
+    chs.forEach((ch) => {
+      const a = document.createElement("a");
+      a.className = "ccard";
+      a.href = G.href(ch.slug);
+      const mins = ch.minutes ? (ch.minutes >= 120 ? G.T.hours(Math.round(ch.minutes / 60)) : G.T.minutes(ch.minutes)) : (G.lang === "zh" ? "参考" : "reference");
+      a.innerHTML = '<span class="top"><span><span class="id" style="color:' + col + '">' + esc(G.chapterId(ch) || "REF") + "</span>" + (G.progress[ch.slug] ? '<span class="done-mark" title="' + (G.lang === "zh" ? "已完成" : "Completed") + '">✓</span>' : "") + '</span><span class="min">' + mins + '</span></span><span class="t">' + esc(ch.title) + '</span><span class="d">' + esc(ch.summary) + "</span>";
+      cards.appendChild(a);
+    });
+    box.appendChild(layer);
+  });
+
+  const firstUndone = G.learnable.find((c) => !G.progress[c.slug]);
+  if (G.learnable.some((c) => G.progress[c.slug]) && firstUndone) {
+    const label = G.chapterId(firstUndone) + " · " + firstUndone.title + " →";
+    const btn = document.getElementById("continue");
+    btn.href = G.href(firstUndone.slug);
+    btn.textContent = (G.lang === "zh" ? "继续学习 " : "Continue with ") + G.chapterId(firstUndone) + " →";
+    const cta = document.getElementById("cta-btn");
+    cta.href = G.href(firstUndone.slug);
+    cta.textContent = label;
+  }
+})();
+</script>
+</body>
+</html>

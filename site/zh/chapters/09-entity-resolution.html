@@ -1,0 +1,1060 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entity resolution, merging and summarization | Graph RAG from Scratch</title>
+<meta name="description" content="Merge name variants into one node with normalization, blocking, string and embedding similarity and LLM adjudication, then combine descriptions, provenance and edge weights.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/09-entity-resolution.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/09-entity-resolution.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/09-entity-resolution.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="09-entity-resolution" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Entity resolution, merging and summarization</h1>
+  <p class="lede">Extraction gives you “Okafor”, “Dr. Mira Okafor” and “the CEO” as three strangers. This chapter turns name variants into one node per real-world thing, then merges their descriptions, provenance and edge weights into a graph that multi-hop retrieval can actually walk.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain how duplicate nodes split degree, break paths and fragment communities, with concrete Kestrel examples</li>
+      <li>Build a resolution cascade: normalization, blocking, string and embedding scoring, type constraints and LLM adjudication</li>
+      <li>Compute Levenshtein, Jaro-Winkler and token set scores by hand and say which name variants each one catches or misses</li>
+      <li>Turn pairwise matches into clusters without chaining unrelated entities together</li>
+      <li>Merge descriptions, source ids and relationship weights, and summarize long description lists within a token budget</li>
+      <li>Measure resolution quality with pairwise and B-cubed precision and recall</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why duplicates hurt</h2>
+<p>In <a href="08-entity-relation-extraction.html">Chapter 8</a> the extractor read one text unit at a time. It has no memory across chunks, so it names things the way each chunk names them. Across the twelve Kestrel documents you will see the CEO written as “Dr. Mira Okafor” in a press release, “Okafor” in a newspaper quote, “Mira Okafor” in a blog post and “the CEO” in a podcast transcript. Tidewater Institute shows up as “Tidewater Institute”, “Tidewater” and “TWI”. The reef program appears as “Project Sentinel”, “Sentinel” and “Sentinel drones”.</p>
+<p><strong>Entity resolution</strong> (also called entity matching, record linkage or deduplication) is the step that decides which of these surface forms refer to the same real-world thing and collapses them into one node. If you skip it, three things go wrong, and each one damages a different retrieval method later in the course.</p>
+
+<h3>Split degree</h3>
+<p>Degree is the number of edges touching a node. GraphRAG uses it as an entity's <em>rank</em>: high-degree entities go first when a context window is tight (<a href="12-community-reports.html">Chapter 12</a>, <a href="14-local-search.html">Chapter 14</a>). Suppose Okafor's facts are spread over three nodes: “DR. MIRA OKAFOR” has edges to Kestrel Labs and Brightwater Capital, “OKAFOR” has an edge to Tidewater Institute, and “MIRA OKAFOR” has an edge to Priya Nair. Each node has degree 1 or 2, so none of them looks important, and a ranking that keeps the top ten entities may drop all three. After merging, one node has degree 4 and ranks where it should.</p>
+
+<h3>Broken paths</h3>
+<p>Multi-hop questions are answered by walking edges. A walk cannot jump from one alias to another. Take canonical question 2: <em>“Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?”</em> The research note says “Sentinel drones” detected the bleaching. The launch post says Kestrel Labs runs “Project Sentinel”. A funding article says Lena Park sits on the “Kestrel” board. Unless those aliases are merged, there is no path from the bleaching event to Brightwater Capital at all. Step through the visualization to see it.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "A path that only exists after resolution",
+  "subtitle": "Canonical question 2 on the extracted graph",
+  "height": 400,
+  "nodes": [
+    {"id": "bleach", "label": "2024 bleaching event", "group": 5, "x": 9, "y": 48},
+    {"id": "halden", "label": "Halden Reef", "group": 6, "x": 9, "y": 86},
+    {"id": "sdrones", "label": "Sentinel drones", "group": 4, "x": 29, "y": 20},
+    {"id": "psent", "label": "Project Sentinel", "group": 4, "x": 33, "y": 62},
+    {"id": "twi", "label": "Tidewater Institute", "group": 1, "x": 36, "y": 90},
+    {"id": "kestrel", "label": "Kestrel", "group": 1, "x": 58, "y": 20},
+    {"id": "klabs", "label": "Kestrel Labs", "group": 1, "x": 60, "y": 62},
+    {"id": "okafor", "label": "Dr. Mira Okafor", "group": 3, "x": 66, "y": 90},
+    {"id": "park", "label": "Lena Park", "group": 3, "x": 80, "y": 20},
+    {"id": "bw", "label": "Brightwater Capital", "group": 2, "x": 88, "y": 58}
+  ],
+  "edges": [
+    {"source": "sdrones", "target": "bleach", "label": "detected"},
+    {"source": "bleach", "target": "halden", "label": "occurred at"},
+    {"source": "psent", "target": "halden", "label": "monitors"},
+    {"source": "twi", "target": "psent", "label": "partner on"},
+    {"source": "klabs", "target": "psent", "label": "runs"},
+    {"source": "okafor", "target": "klabs", "label": "CEO of"},
+    {"source": "park", "target": "kestrel", "label": "board member"},
+    {"source": "park", "target": "bw", "label": "partner at"},
+    {"source": "sdrones", "target": "psent", "label": "same as?"},
+    {"source": "kestrel", "target": "klabs", "label": "same as?"}
+  ],
+  "steps": [
+    {"caption": "The graph as extraction left it. Ten nodes, but <span class=\"viz-chip node\">Sentinel drones</span> and <span class=\"viz-chip node\">Project Sentinel</span> are one program, and <span class=\"viz-chip node\">Kestrel</span> and <span class=\"viz-chip node\">Kestrel Labs</span> are one company. The two “same as?” links are not in the graph yet; they are what resolution will propose.", "dim": false, "showAllLabels": true},
+    {"caption": "Start a breadth-first search at the bleaching event, following only real edges. It reaches the drones, the reef, Project Sentinel, Tidewater Institute, Kestrel Labs and Okafor. It never reaches <strong>Lena Park</strong> or <strong>Brightwater Capital</strong>: the board-member edge hangs off the alias “Kestrel”.", "active": ["bleach"], "visited": ["sdrones", "halden", "psent", "twi", "klabs", "okafor"], "visitedEdges": ["sdrones>bleach", "bleach>halden", "psent>halden", "twi>psent", "klabs>psent", "okafor>klabs"]},
+    {"caption": "Worse, the edge that answers the question semantically, <em>detected</em>, sits on “Sentinel drones”, which has no <em>runs</em> edge to any company. Even the reachable part of the graph cannot say which company's drones did the detecting.", "active": ["sdrones", "klabs"], "visited": ["bleach", "psent"], "edges": ["sdrones>bleach", "klabs>psent"]},
+    {"caption": "Resolution proposes two merges: the program aliases (one is a token subset of the other, same type PROJECT) and the company aliases (same logic, type ORGANIZATION).", "active": ["sdrones", "psent", "kestrel", "klabs"], "edges": ["sdrones>psent", "kestrel>klabs"]},
+    {"caption": "After merging, each alias edge collapses into a single node, and the path exists: bleaching event ← detected ← <strong>Project Sentinel</strong> ← runs ← <strong>Kestrel Labs</strong> ← board member ← Lena Park → partner at → <strong>Brightwater Capital</strong>. Four real hops, every one citable.", "active": ["bleach", "bw"], "visited": ["sdrones", "psent", "kestrel", "klabs", "park"], "edges": ["sdrones>bleach", "sdrones>psent", "klabs>psent", "kestrel>klabs", "park>kestrel", "park>bw"]}
+  ]
+}
+</script>
+</div>
+
+<h3>Fragmented communities</h3>
+<p>Community detection (<a href="11-community-detection.html">Chapter 11</a>) groups nodes that are densely connected to each other. A low-degree alias node such as “TWI” with a single edge to Halden Reef is easy to pull into whichever community its one neighbor belongs to, far from the “Tidewater Institute” node that holds the rest of the institute's edges. The community report for the reef science cluster then describes “TWI” as a separate organization, and global search (<a href="15-global-search.html">Chapter 15</a>) may list it as a distinct actor. Duplicates lose information and, worse, invent entities that don't exist.</p>
+
+<div class="callout note">
+  <span class="callout-title">What the big frameworks do by default</span>
+  <p>Microsoft GraphRAG merges extracted entities by grouping on the exact (title, type) pair, and relationships on the exact (source, target) pair, summing weights. There is no fuzzy matching in that step. Uppercasing names in the extraction prompt and a good worked example do a surprising amount of the work, but “OKAFOR” and “DR. MIRA OKAFOR” stay separate. LightRAG also merges on the exact entity name. Everything in this chapter is what you add on top when exact matching is not enough.</p>
+</div>
+
+<h2>The resolution cascade</h2>
+<p>Comparing every name with every other name using an LLM is correct in spirit and ruinous in practice. Real systems use a cascade: cheap, safe steps first, expensive and risky ones only for what is left. The ordering also keeps the process explainable, because each merge can be traced to the rule that caused it.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 330" role="img" aria-labelledby="cascade-title">
+      <title id="cascade-title">The entity resolution cascade from raw names to merged nodes</title>
+      <defs>
+        <marker id="c9arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box" x="10" y="14" width="150" height="62" rx="6"/>
+      <text class="d-text bold" x="22" y="38">1. Normalize</text>
+      <text class="d-text small" x="22" y="58">case, titles, punctuation</text>
+      <rect class="d-box" x="190" y="14" width="150" height="62" rx="6"/>
+      <text class="d-text bold" x="202" y="38">2. Block</text>
+      <text class="d-text small" x="202" y="58">only compare likely pairs</text>
+      <rect class="d-box node" x="370" y="14" width="150" height="62" rx="6"/>
+      <text class="d-text bold" x="382" y="38">3. Score pairs</text>
+      <text class="d-text small" x="382" y="58">string, embedding, type</text>
+      <rect class="d-box edge" x="520" y="120" width="150" height="62" rx="6"/>
+      <text class="d-text bold" x="532" y="144">4. Adjudicate</text>
+      <text class="d-text small" x="532" y="164">LLM on the gray zone</text>
+      <rect class="d-box comm" x="370" y="226" width="150" height="62" rx="6"/>
+      <text class="d-text bold" x="382" y="250">5. Cluster</text>
+      <text class="d-text small" x="382" y="270">pairs to groups, no chains</text>
+      <rect class="d-box good" x="190" y="226" width="150" height="62" rx="6"/>
+      <text class="d-text bold" x="202" y="250">6. Merge</text>
+      <text class="d-text small" x="202" y="270">descriptions, ids, weights</text>
+      <rect class="d-box" x="10" y="226" width="150" height="62" rx="6"/>
+      <text class="d-text bold" x="22" y="250">7. Summarize</text>
+      <text class="d-text small" x="22" y="270">one description per node</text>
+      <line class="d-line" x1="160" y1="45" x2="186" y2="45" marker-end="url(#c9arrow)"/>
+      <line class="d-line" x1="340" y1="45" x2="366" y2="45" marker-end="url(#c9arrow)"/>
+      <path class="d-line" d="M520,45 L595,45 L595,116" marker-end="url(#c9arrow)"/>
+      <path class="d-line" d="M595,182 L595,257 L524,257" marker-end="url(#c9arrow)"/>
+      <path class="d-line dash" d="M445,76 L445,222" marker-end="url(#c9arrow)"/>
+      <text class="d-text small" x="437" y="140" text-anchor="end">clear matches and</text>
+      <text class="d-text small" x="437" y="154" text-anchor="end">clear non-matches</text>
+      <line class="d-line" x1="370" y1="257" x2="344" y2="257" marker-end="url(#c9arrow)"/>
+      <line class="d-line" x1="190" y1="257" x2="164" y2="257" marker-end="url(#c9arrow)"/>
+      <text class="d-text small" x="10" y="318">Cost per name rises left to right along the top row; most pairs never reach step 4.</text>
+    </svg>
+  </div>
+  <figcaption>The cascade. Scores above a high threshold merge directly, scores below a low threshold are rejected, and only the uncertain middle band goes to an LLM. Clustering then turns accepted pairs into groups, and merging builds one node per group.</figcaption>
+</figure>
+
+<h3>Step 1: normalization</h3>
+<p>Normalization rewrites a name into a <em>key</em> so that trivially different spellings collide. It is deterministic, free and explainable, so push it as far as it safely goes. Keep the original spelling too: you will want it for the display name and as an alias.</p>
+<table>
+  <thead><tr><th>Rule</th><th>Example</th><th>Risk</th></tr></thead>
+  <tbody>
+    <tr><td>Case folding</td><td>“Kestrel labs” → KESTREL LABS</td><td>None in practice for entity names</td></tr>
+    <tr><td>Strip honorifics and leading articles</td><td>“Dr. Mira Okafor” → MIRA OKAFOR; “the Ocean Health Act” → OCEAN HEALTH ACT</td><td>“The Hague” or a band named “The Tides” lose a meaningful word</td></tr>
+    <tr><td>Drop punctuation, collapse whitespace</td><td>“Kestrel Labs, Inc.” → KESTREL LABS INC</td><td>“C++” and “C” collide</td></tr>
+    <tr><td>Drop possessives</td><td>“Okafor's” → OKAFOR</td><td>Low</td></tr>
+    <tr><td>Strip legal suffixes (optional)</td><td>KESTREL LABS INC → KESTREL LABS</td><td>Merges a parent and a subsidiary that differ only by suffix</td></tr>
+    <tr><td>Unicode normalization (NFKC, remove accents)</td><td>“Nair” with a stray non-breaking space → NAIR</td><td>Low; do it before everything else</td></tr>
+  </tbody>
+</table>
+
+<pre data-file="minigraphrag/resolution.py"><code class="language-python">import re
+
+_TITLES = {"DR", "MR", "MRS", "MS", "PROF", "THE"}
+
+def normalize_name(name: str) -&gt; str:
+    """Uppercase, drop titles/punctuation/possessives, collapse whitespace."""
+    name = re.sub(r"['’]S\b", "", name.upper())
+    tokens = re.findall(r"[A-Z0-9]+", name)
+    while tokens and tokens[0] in _TITLES:
+        tokens = tokens[1:]
+    return " ".join(tokens)</code></pre>
+
+<pre><code class="language-python">&gt;&gt;&gt; normalize_name("Dr. Mira Okafor")
+'MIRA OKAFOR'
+&gt;&gt;&gt; normalize_name("Okafor's")
+'OKAFOR'
+&gt;&gt;&gt; normalize_name("the CEO")
+'CEO'          # still not OKAFOR: that needs context</code></pre>
+
+<p>Normalization alone gets this far on Kestrel: “Dr. Mira Okafor” and “Mira Okafor” now share a key. “Okafor”, “TWI”, “Sentinel” and “the CEO” do not. Those need the next steps.</p>
+
+<h3>Step 2: blocking</h3>
+<p>With <em>n</em> distinct names, comparing every pair costs <em>n</em>(<em>n</em> − 1)/2 comparisons. The Kestrel corpus yields a few hundred raw names, so that is tens of thousands of cheap string comparisons, which is fine. A corpus of 50,000 distinct names gives about 1.25 billion pairs. Even at a microsecond per comparison that is twenty minutes of string scoring, and an embedding or LLM step on that many pairs is out of the question.</p>
+<p><strong>Blocking</strong> partitions names into small, overlapping buckets and compares only names that share a bucket. A good blocking key is cheap to compute and almost never separates true matches. Common keys:</p>
+<ul>
+  <li><strong>Token blocking</strong>: one bucket per normalized token. “MIRA OKAFOR” lands in buckets MIRA and OKAFOR, so it meets “OKAFOR”. Drop very frequent tokens (PROJECT, LABS, INSTITUTE) or cap bucket size, otherwise one bucket holds everything.</li>
+  <li><strong>Type blocking</strong>: only compare names of compatible types. This is also a correctness constraint, discussed below.</li>
+  <li><strong>Character n-gram or prefix blocking</strong>: buckets on the first three letters or on shared trigrams catch typos like “MARLOWE” vs. “MARLOW”.</li>
+  <li><strong>Sorted neighborhood</strong>: sort keys alphabetically and compare each name only with the next <em>w</em> names.</li>
+  <li><strong>Embedding blocking</strong>: for each name, retrieve its <em>k</em> nearest neighbors in an approximate nearest neighbor index. Cost is roughly <em>n</em> · <em>k</em> comparisons instead of <em>n</em>²/2.</li>
+</ul>
+<p>The arithmetic that makes blocking work: if 50,000 names fall into token buckets whose largest has 200 members after capping, and each name sits in about 2.5 buckets, the number of within-bucket pairs is bounded by about 50,000 × 2.5 × 199 / 2 ≈ 12 million, a hundred times fewer than all pairs, and most buckets are far smaller than the cap. Union several blocking schemes (token plus embedding neighbors) to recover the matches any single scheme misses. “TWI” shares no token with “TIDEWATER INSTITUTE”, so only an acronym rule or an embedding neighbor puts them in one block.</p>
+
+<pre data-file="examples/ch09_blocking.py"><code class="language-python">from collections import defaultdict
+from itertools import combinations
+from minigraphrag.resolution import normalize_name
+
+STOP_TOKENS = {"PROJECT", "LABS", "INSTITUTE", "CAPITAL", "INC", "OF", "AND"}
+
+def candidate_pairs(entities, max_bucket: int = 200) -&gt; set[tuple[str, str]]:
+    """Token blocking: only names sharing a rare-enough token are compared."""
+    buckets = defaultdict(set)
+    for e in entities:
+        key = normalize_name(e.name)
+        for tok in key.split():
+            if tok not in STOP_TOKENS:
+                buckets[tok].add(key)
+        initials = "".join(t[0] for t in key.split())
+        if len(key.split()) &gt; 1:
+            buckets["ACR:" + initials].add(key)      # "TIDEWATER INSTITUTE" -&gt; ACR:TI
+        if " " not in key and 2 &lt;= len(key) &lt;= 6:
+            buckets["ACR:" + key].add(key)           # "TWI" -&gt; ACR:TWI (loose: see exercise 9.3)
+    pairs = set()
+    for tok, members in buckets.items():
+        if len(members) &gt; max_bucket:
+            continue                                 # a stop word we did not anticipate
+        pairs.update(combinations(sorted(members), 2))
+    return pairs</code></pre>
+
+<p>The acronym bucket above is deliberately naive: “TIDEWATER INSTITUTE” has initials TI, not TWI, so it would miss the pair. The minigraphrag resolver instead checks acronyms letter by letter (T-ide-W-ater I-nstitute), and a good exercise is to turn that check into a blocking key.</p>
+
+<h2>Scoring candidate pairs</h2>
+<p>A blocked pair needs a score that says how likely the two names are to be the same entity. No single measure works for every kind of variant, so it pays to know exactly what each one rewards.</p>
+
+<h3>Levenshtein edit distance</h3>
+<p>The <strong>Levenshtein distance</strong> is the minimum number of single-character insertions, deletions and substitutions that turn one string into the other. It is computed with dynamic programming: <em>D</em>[<em>i</em>][<em>j</em>] is the distance between the first <em>i</em> characters of <em>a</em> and the first <em>j</em> characters of <em>b</em>, and</p>
+<p style="text-align:center"><em>D</em>[<em>i</em>][<em>j</em>] = min( <em>D</em>[<em>i</em>−1][<em>j</em>] + 1, <em>D</em>[<em>i</em>][<em>j</em>−1] + 1, <em>D</em>[<em>i</em>−1][<em>j</em>−1] + [<em>a<sub>i</sub></em> ≠ <em>b<sub>j</sub></em>] )</p>
+<p>Here is the table for a plausible transcription slip, “VEHL” vs. “VAHLE”. Rows are prefixes of VEHL, columns prefixes of VAHLE.</p>
+<table>
+  <thead><tr><th></th><th>“”</th><th>V</th><th>A</th><th>H</th><th>L</th><th>E</th></tr></thead>
+  <tbody>
+    <tr><th>“”</th><td>0</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr>
+    <tr><th>V</th><td>1</td><td><strong>0</strong></td><td>1</td><td>2</td><td>3</td><td>4</td></tr>
+    <tr><th>E</th><td>2</td><td>1</td><td><strong>1</strong></td><td>2</td><td>3</td><td>3</td></tr>
+    <tr><th>H</th><td>3</td><td>2</td><td>2</td><td><strong>1</strong></td><td>2</td><td>3</td></tr>
+    <tr><th>L</th><td>4</td><td>3</td><td>3</td><td>2</td><td><strong>1</strong></td><td><strong>2</strong></td></tr>
+  </tbody>
+</table>
+<p>The bold cells trace the cheapest alignment: match V, substitute E→A, match H, match L, insert E. Distance 2. To compare strings of different lengths, turn it into a similarity: 1 − distance / max(len). For VEHL vs. VAHLE that is 1 − 2/5 = 0.60. For the typo “KESTREL” vs. “KESTRAL” it is 1 − 1/7 = 0.857.</p>
+<p>Levenshtein is good at typos and OCR slips. It is bad at everything else that matters for entity names: “OKAFOR” vs. “MIRA OKAFOR” needs five insertions, a similarity of only 0.545, and swapped letters cost two edits, not one (the Damerau variant counts a transposition as one).</p>
+
+<h3>Jaro-Winkler</h3>
+<p><strong>Jaro similarity</strong> counts characters that match within a sliding window and penalizes matched characters that appear in a different order. With string lengths |<em>a</em>| and |<em>b</em>|, <em>m</em> matching characters (a character matches if it is equal and no farther apart than ⌊max(|<em>a</em>|, |<em>b</em>|)/2⌋ − 1 positions) and <em>t</em> half the number of matched characters that are out of order:</p>
+<p style="text-align:center">Jaro = ⅓ ( <em>m</em>/|<em>a</em>| + <em>m</em>/|<em>b</em>| + (<em>m</em> − <em>t</em>)/<em>m</em> )</p>
+<p><strong>Winkler's</strong> adjustment rewards a shared prefix of length <em>ℓ</em> (capped at 4) with a scaling factor <em>p</em> = 0.1. In Winkler's original rule, and in RapidFuzz, the bonus applies only when Jaro is already above 0.7:</p>
+<p style="text-align:center">JW = Jaro + <em>ℓ</em> · <em>p</em> · (1 − Jaro)</p>
+<p>Worked on “KESTREL” vs. “KESTRAL”: both have length 7, so the window is ⌊7/2⌋ − 1 = 2. K, E, S, T, R and L match at the same positions; the second E has no E within two positions in KESTRAL. So <em>m</em> = 6, and the matched characters are in the same order, so <em>t</em> = 0. Jaro = ⅓(6/7 + 6/7 + 6/6) = 0.905. The shared prefix KEST gives <em>ℓ</em> = 4, so JW = 0.905 + 4 × 0.1 × 0.095 = 0.943.</p>
+<p>Jaro-Winkler was designed for person names in census record linkage, where the start of a name is more reliable than the end. That same bias toward shared beginnings is its trap in a knowledge graph: “PROJECT SENTINEL” vs. “PROJECT TERN” scores 0.903, most of it from the eight matching characters of “PROJECT ” and the rest from the prefix bonus, and “DR. MIRA OKAFOR” vs. “DR. ANA RUIZ” scores 0.826 if you forget to strip titles. Meanwhile “JONAS VEHL” vs. “VEHL” scores 0.0: the window is 4 and every VEHL character sits 6 positions away from its partner.</p>
+
+<h3>Token set ratio</h3>
+<p>Token-based measures ignore word order and handle the most common alias pattern in extracted graphs: one name is the other with words added or removed. The <strong>token set ratio</strong> (popularized by the fuzzywuzzy and rapidfuzz libraries) splits both names into token sets, then builds three strings: <em>t₀</em> = the sorted intersection, <em>t₁</em> = <em>t₀</em> plus the sorted tokens only in <em>a</em>, <em>t₂</em> = <em>t₀</em> plus the sorted tokens only in <em>b</em>. It returns the best plain similarity ratio among the pairs (<em>t₀</em>, <em>t₁</em>), (<em>t₀</em>, <em>t₂</em>) and (<em>t₁</em>, <em>t₂</em>).</p>
+<p>Worked on “PORT AVALON” vs. “PORT AVALON CITY COUNCIL”: the intersection is {AVALON, PORT}, so <em>t₀</em> = “AVALON PORT”. Nothing is only in the first name, so <em>t₁</em> = “AVALON PORT” too, and ratio(<em>t₀</em>, <em>t₁</em>) = 100. The score is a perfect 100 for a city and its council. The same logic gives 100 for “OKAFOR” vs. “MIRA OKAFOR” (correct), “TIDEWATER” vs. “TIDEWATER INSTITUTE” (correct) and “HALDEN REEF” vs. “HALDEN REEF BLEACHING EVENT” (a location and an event, wrong). Any name that is a token subset of another scores 100, which is exactly why token scores must be paired with type constraints.</p>
+
+<table>
+  <thead><tr><th>Pair (normalized where noted)</th><th>Levenshtein sim.</th><th>Jaro-Winkler</th><th>Token set</th><th>Same entity?</th></tr></thead>
+  <tbody>
+    <tr><td>KESTREL / KESTRAL</td><td>0.857</td><td>0.943</td><td>86</td><td>Yes (typo)</td></tr>
+    <tr><td>MARLOW DYNAMICS / MARLOWE DYNAMICS</td><td>0.938</td><td>0.987</td><td>97</td><td>Yes (typo)</td></tr>
+    <tr><td>OKAFOR / MIRA OKAFOR</td><td>0.545</td><td>0.480</td><td>100</td><td>Yes</td></tr>
+    <tr><td>JONAS VEHL / VEHL</td><td>0.400</td><td>0.000</td><td>100</td><td>Yes</td></tr>
+    <tr><td>TWI / TIDEWATER INSTITUTE</td><td>0.158</td><td>0.608</td><td>18</td><td>Yes (acronym)</td></tr>
+    <tr><td>DEEPCAST / DEEP CAST</td><td>0.889</td><td>0.978</td><td>47</td><td>Yes (spacing)</td></tr>
+    <tr><td>PROJECT SENTINEL / PROJECT TERN</td><td>0.625</td><td>0.903</td><td>74</td><td>No</td></tr>
+    <tr><td>PORT AVALON / PORT AVALON CITY COUNCIL</td><td>0.458</td><td>0.892</td><td>100</td><td>No (location vs. organization)</td></tr>
+    <tr><td>DR. MIRA OKAFOR / DR. ANA RUIZ (titles kept)</td><td>0.400</td><td>0.826</td><td>52</td><td>No</td></tr>
+  </tbody>
+</table>
+<p>The scores in this table come from RapidFuzz. Libraries agree on the formula but not on every detail of counting transpositions when the strings differ in length, so a textbook implementation prints 0.424 rather than 0.480 for OKAFOR / MIRA OKAFOR, and 0.894 rather than 0.903 for the two projects. Pick one library and set thresholds with it; don't carry a threshold from one library to another. The KESTREL worked example comes out the same everywhere.</p>
+<p>Read the table column by column. Every measure has a true match it scores low and a false match it scores high. That is why production resolvers combine several signals, route by pattern (typo, subset, acronym) and gate everything on type.</p>
+
+<h3>Embedding similarity of name plus description</h3>
+<p>Strings cannot tell you that “the CEO” is Okafor. Descriptions can. Each extracted entity carries a description written from its chunk, so embed <code>"NAME: description"</code> and compare vectors with cosine similarity. “THE CEO: chief executive of Kestrel Labs who worked at Tidewater Institute before founding the company” lands near “DR. MIRA OKAFOR: co-founder and CEO of Kestrel Labs, formerly a senior researcher at Tidewater Institute”.</p>
+<p>Embeddings have the opposite failure profile to strings. They catch paraphrased aliases and miss nothing because of spelling, but they happily match <em>related</em> entities: “Jonas Vehl: co-founder and CTO of Kestrel Labs” and “Priya Nair: CTO of Kestrel Labs since March 2026” are close in embedding space and are different people. Use a high threshold for automatic merges and treat embedding similarity mainly as a blocking signal and a way to route pairs to adjudication. The minigraphrag resolver accepts an optional <code>embedder</code> with a deliberately strict default threshold of 0.95.</p>
+
+<h3>Type compatibility constraints</h3>
+<p>A type constraint is the cheapest precision booster you have: two names can only merge if their types are compatible. It blocks PORT AVALON (LOCATION) from merging with PORT AVALON CITY COUNCIL (ORGANIZATION) and HALDEN REEF (LOCATION) from merging with the 2024 HALDEN REEF BLEACHING EVENT (EVENT), both of which score 100 on token set ratio.</p>
+<p>Two refinements matter in practice. First, extractors make type errors, so use the <em>majority</em> type over all mentions of a name rather than the first one seen. Second, some type pairs are legitimately compatible: a PROJECT and a PRODUCT can be the same thing, and an unknown or empty type should be compatible with anything. Encode compatibility as a small table rather than strict equality once your schema grows.</p>
+
+<h3>LLM adjudication for the gray zone</h3>
+<p>After scoring, most pairs are clear. The uncertain middle band (say, embedding similarity between 0.80 and 0.95, or a token subset whose shorter name is a single generic word) goes to an LLM with both names, types and descriptions. Asking for a structured verdict with a reason makes the decision auditable and cacheable.</p>
+
+<pre data-file="examples/ch09_adjudicate.py"><code class="language-python">import json
+from minigraphrag.llm import parse_json_response
+
+ADJUDICATE_PROMPT = """You decide whether two records extracted from the same corpus
+refer to the same real-world entity.
+
+Record A: name={name_a} | type={type_a} | description={desc_a}
+Record B: name={name_b} | type={type_b} | description={desc_b}
+
+Rules:
+- Same entity means the same person, organization, project, place, event or law,
+  not merely related ones (a company and its CEO are different entities).
+- A role such as "the CEO" matches a person only if the descriptions place that person
+  in that role in the same organization at the same time.
+- If the evidence is insufficient, answer "unsure".
+Return JSON: {{"verdict": "same" | "different" | "unsure", "reason": "&lt;one sentence&gt;"}}"""
+
+def adjudicate(llm, a, b) -&gt; str:
+    prompt = ADJUDICATE_PROMPT.format(
+        name_a=a.name, type_a=a.type, desc_a=a.description,
+        name_b=b.name, type_b=b.type, desc_b=b.description)
+    data = parse_json_response(llm.complete(prompt, json=True))
+    return data.get("verdict", "unsure")     # treat anything unexpected as unsure</code></pre>
+
+<p>Three practical notes. Order the pair canonically (alphabetically) before building the prompt so the cache hits regardless of which record came first. Treat “unsure” as “different”: a missed merge costs a little recall, while a wrong merge corrupts every fact on both nodes. And count the calls. If adjudication handles more than a few percent of blocked pairs, your thresholds are too timid or your blocking is too loose.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Peeters, Steiner and Bizer, Entity Matching using Large Language Models (2025)</span>
+  <p>This EDBT paper compares hosted and open LLMs with fine-tuned pre-trained language models (the BERT-style matchers behind systems such as Ditto) on standard entity-matching benchmarks. The finding that matters for GraphRAG: the best LLMs need no or only a few training examples to match PLMs fine-tuned on thousands, and they hold up better on entities they have not seen before. Fine-tuned small models remain far cheaper per decision. That is the case for the cascade: cheap scorers for the bulk, an LLM for the hard remainder.</p>
+</div>
+
+<h2>From pairs to clusters without chaining</h2>
+<p>Scoring answers “are these two the same?”. You need groups: every name that refers to Okafor in one set. The textbook way to turn accepted pairs into groups is the <strong>transitive closure</strong>: if A matches B and B matches C, then A, B and C are one entity. A <strong>union-find</strong> (disjoint-set) structure computes it in nearly linear time.</p>
+
+<pre data-file="examples/ch09_union_find.py"><code class="language-python">class UnionFind:
+    def __init__(self, items):
+        self.parent = {x: x for x in items}
+        self.size = {x: 1 for x in items}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]   # path halving
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self.size[ra] &lt; self.size[rb]:                  # union by size
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        self.size[ra] += self.size[rb]
+
+def cluster_pairs(names, accepted_pairs):
+    uf = UnionFind(names)
+    for a, b in accepted_pairs:
+        uf.union(a, b)
+    groups = {}
+    for n in names:
+        groups.setdefault(uf.find(n), set()).add(n)
+    return list(groups.values())</code></pre>
+
+<p>Transitive closure has a nasty property: <strong>chaining</strong>. Similarity is not transitive. “SENTINEL” matches “PROJECT SENTINEL” (token subset), “PROJECT SENTINEL” matches “PROJECT TERN” (Jaro-Winkler 0.903 from the shared prefix), and “PROJECT TERN” matches “TERN” (token subset). Each pair looks defensible at a threshold of 0.88, and union-find welds Kestrel's reef program and its sonar project into one node. The relationship “Project Tern replaces Deepcast sonar in Project Sentinel” becomes a self-loop and disappears. One weak link is enough, and the bigger the cluster, the more chances for one.</p>
+
+<p>Try it. The graph below has fifteen raw names from the Kestrel extraction and the pairs a scorer proposed, labeled with their best score (1.00 for token subsets and identical keys, 0.95 for an acronym rule, Jaro-Winkler or embedding scores otherwise). Colors show the clusters you get. Lower the threshold, switch between transitive union-find and the canonical-star strategy used by minigraphrag, and toggle the type constraint.</p>
+
+<div class="viz" data-viz="ch09-chaining">
+<script type="application/json">
+{
+  "title": "Union-find chaining vs. canonical stars",
+  "subtitle": "Drag the threshold and watch clusters grow",
+  "height": 420,
+  "threshold": 0.85,
+  "nodes": [
+    {"id": "DMO", "label": "Dr. Mira Okafor", "type": "PERSON", "gold": "okafor", "x": 12, "y": 12},
+    {"id": "DAR", "label": "Dr. Ana Ruiz", "type": "PERSON", "gold": "ruiz", "x": 38, "y": 12},
+    {"id": "MO", "label": "Mira Okafor", "type": "PERSON", "gold": "okafor", "x": 7, "y": 38},
+    {"id": "O", "label": "Okafor", "type": "PERSON", "gold": "okafor", "x": 27, "y": 38},
+    {"id": "CEO", "label": "the CEO", "type": "PERSON", "gold": "okafor", "x": 44, "y": 38},
+    {"id": "TI", "label": "Tidewater Institute", "type": "ORGANIZATION", "gold": "twi", "x": 68, "y": 12},
+    {"id": "TW", "label": "Tidewater", "type": "ORGANIZATION", "gold": "twi", "x": 58, "y": 38},
+    {"id": "TWI", "label": "TWI", "type": "ORGANIZATION", "gold": "twi", "x": 84, "y": 38},
+    {"id": "PS", "label": "Project Sentinel", "type": "PROJECT", "gold": "sentinel", "x": 40, "y": 64},
+    {"id": "S", "label": "Sentinel", "type": "PROJECT", "gold": "sentinel", "x": 24, "y": 90},
+    {"id": "SD", "label": "Sentinel drones", "type": "PROJECT", "gold": "sentinel", "x": 44, "y": 90},
+    {"id": "PT", "label": "Project Tern", "type": "PROJECT", "gold": "tern", "x": 66, "y": 64},
+    {"id": "TE", "label": "Tern", "type": "PROJECT", "gold": "tern", "x": 88, "y": 64},
+    {"id": "PA", "label": "Port Avalon", "type": "LOCATION", "gold": "pa", "x": 64, "y": 90},
+    {"id": "PAC", "label": "Port Avalon City Council", "type": "ORGANIZATION", "gold": "pac", "x": 85, "y": 90}
+  ],
+  "pairs": [
+    {"a": "MO", "b": "DMO", "score": 1.0},
+    {"a": "O", "b": "MO", "score": 1.0},
+    {"a": "O", "b": "DMO", "score": 1.0},
+    {"a": "DMO", "b": "DAR", "score": 0.83},
+    {"a": "CEO", "b": "DMO", "score": 0.80},
+    {"a": "TW", "b": "TI", "score": 1.0},
+    {"a": "TWI", "b": "TI", "score": 0.95},
+    {"a": "S", "b": "PS", "score": 1.0},
+    {"a": "S", "b": "SD", "score": 1.0},
+    {"a": "SD", "b": "PS", "score": 0.77},
+    {"a": "PS", "b": "PT", "score": 0.90},
+    {"a": "TE", "b": "PT", "score": 1.0},
+    {"a": "PA", "b": "PAC", "score": 1.0}
+  ]
+}
+</script>
+</div>
+
+<p>At the default threshold of 0.85 with union-find and no type check, the Sentinel and Tern names form one five-name cluster and Port Avalon swallows its council. Pairwise precision is 0.59. Switching to canonical stars breaks the chain (a short name cannot attach through another short name, and “Sentinel” is ambiguous between two longer names so it stays alone), but “Project Tern” still attaches to “Project Sentinel” because that single pair scores above threshold. Ticking the type constraint removes the Port Avalon merge. Now raise the threshold to 0.91 with the type constraint still on: the Sentinel–Tern pair drops out and both strategies are clean. Stars reach precision 1.00 at recall 0.54; union-find reaches precision 1.00 at recall 0.77, because it lets “Sentinel” link both of its longer names.</p>
+<p>Union-find is not wrong, then; it is <em>fragile</em>. With perfect pair scores it gives the best recall. With one bad pair above the threshold it welds two whole clusters together, while a star strategy limits the damage to one name. Drop the threshold to 0.80 with union-find and the type constraint still on: “Dr. Ana Ruiz” joins Okafor's cluster through a 0.83 title-prefix score, and every gold pair is found at a precision of 0.57. Real pair scores are never perfect, which is why production resolvers prefer strategies that fail small.</p>
+
+<h3>Strategies that resist chaining</h3>
+<table>
+  <thead><tr><th>Strategy</th><th>How it works</th><th>Chaining risk</th><th>Cost</th></tr></thead>
+  <tbody>
+    <tr><td>Transitive closure (union-find)</td><td>Connected components of the match graph</td><td>High: one bad edge merges two clusters</td><td>Near linear</td></tr>
+    <tr><td>Canonical star</td><td>Sort names longest first; each shorter name attaches to exactly one existing canonical name or becomes canonical</td><td>Low: depth is one; ambiguous names stay separate</td><td>Near linear with blocking</td></tr>
+    <tr><td>Center or merge-center clustering</td><td>Process pairs by descending score; a node joins a cluster only through its center</td><td>Low</td><td>Sort of all pairs</td></tr>
+    <tr><td>Complete or average linkage</td><td>Merge clusters only if all (or on average) cross pairs are similar</td><td>Very low</td><td>Needs many pair scores</td></tr>
+    <tr><td>Correlation clustering</td><td>Minimize disagreements with positive and negative pair labels</td><td>Very low</td><td>NP-hard; greedy approximations used</td></tr>
+    <tr><td>Cluster size cap plus review</td><td>Any cluster above a size limit is split or sent to an LLM or a person</td><td>Contained</td><td>Extra calls for big clusters</td></tr>
+  </tbody>
+</table>
+
+<h3>The minigraphrag resolver</h3>
+<p>The reference implementation takes the canonical-star route with a cascade of explainable rules. It groups raw names by normalized key, sorts keys longest first, and lets each key attach to an existing canonical key only when exactly one candidate passes a rule: token containment, an acronym match, a fuzzy string ratio of at least <code>alias_threshold</code>, or (optionally) embedding similarity above <code>embedding_threshold</code>. Candidates must have compatible majority types.</p>
+
+<pre data-file="minigraphrag/resolution.py"><code class="language-python">def resolve_entities(
+    entities: list[Entity],
+    alias_threshold: float = 0.9,
+    embedder=None,
+    embedding_threshold: float = 0.95,
+) -&gt; dict[str, str]:
+    """Return {raw entity name: canonical name} for every name in `entities`."""
+    # Group raw names by normalised form; remember the most common type per group.
+    groups: dict[str, set[str]] = defaultdict(set)
+    types: dict[str, Counter] = defaultdict(Counter)
+    descriptions: dict[str, str] = {}
+    for e in entities:
+        key = normalize_name(e.name) or e.name
+        groups[key].add(e.name)
+        types[key][e.type] += 1
+        descriptions.setdefault(key, e.description)
+
+    def gtype(key: str) -&gt; str:
+        return types[key].most_common(1)[0][0] if types[key] else ""
+
+    def compatible(a: str, b: str) -&gt; bool:
+        ta, tb = gtype(a), gtype(b)
+        return ta == tb or not ta or not tb
+
+    # Longer names first: they become canonical, shorter names try to attach to them.
+    keys = sorted(groups, key=lambda k: (-len(k.split()), -len(k), k))
+    parent: dict[str, str] = {}
+    canon: list[str] = []
+    vectors = None
+    if embedder is not None:
+        vectors = dict(zip(keys, embedder.embed([f"{k}: {descriptions[k]}" for k in keys])))
+
+    for key in keys:
+        tokens = set(key.split())
+        candidates = []
+        for c in canon:
+            if not compatible(key, c):
+                continue
+            if (tokens &lt; set(c.split()) or _is_acronym(key, c)
+                    or _similarity(key, c) &gt;= alias_threshold
+                    or (vectors is not None and float(np.dot(vectors[key], vectors[c])) &gt;= embedding_threshold)):
+                candidates.append(c)
+        if len(candidates) == 1:
+            parent[key] = candidates[0]
+        else:
+            canon.append(key)
+
+    mapping = {}
+    for key, raws in groups.items():
+        root = key
+        while root in parent:
+            root = parent[root]
+        # The canonical display name is the longest raw spelling in the root group.
+        display = max(groups[root], key=lambda r: (len(r), r))
+        for raw in raws:
+            mapping[raw] = display
+    return mapping</code></pre>
+
+<p>Run on the Kestrel aliases, it maps OKAFOR and MIRA OKAFOR to DR. MIRA OKAFOR, TWI and TIDEWATER to TIDEWATER INSTITUTE, VEHL to JONAS VEHL, TERN to PROJECT TERN, KESTREL to KESTREL LABS and BLEACHING EVENT to 2024 HALDEN REEF BLEACHING EVENT. It keeps PORT AVALON and PORT AVALON CITY COUNCIL apart (types differ), keeps SENTINEL separate (it is a subset of both PROJECT SENTINEL and SENTINEL DRONES) and leaves THE CEO alone (no string rule can link it). Every one of those outcomes is the conservative choice.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Choosing the display name</span>
+  <p>“Longest raw spelling” is a simple rule with a sharp edge: when the variants are a typo pair it picks the longer typo. On a toy input with both “MARLOW DYNAMICS” and “MARLOWE DYNAMICS”, the display name becomes the misspelling, and likewise “DEEP CAST” wins over “DEEPCAST”. A better rule picks the most frequent spelling across mentions and breaks ties by length, or checks a curated list of canonical names when you have one. Whatever you choose, keep every raw spelling as an alias on the node so search can still match them.</p>
+</div>
+
+<h2>Merging nodes and edges</h2>
+<p>Once every raw name maps to a canonical name, building the graph is a group-by. The rule GraphRAG popularized is to keep <em>everything</em> at merge time and compress later: lists of descriptions, lists of source text unit ids, and summed relationship weights.</p>
+
+<h3>What each merged attribute means</h3>
+<ul>
+  <li><strong>descriptions</strong>: every distinct description of the entity from every chunk. Chunk 3 says Deepcast is a sonar supplier signing a deal with Kestrel; chunk 7 says it was acquired by Marlow Dynamics; chunk 8 says it will not renew Kestrel's agreement. All three belong in the profile.</li>
+  <li><strong>source_ids</strong>: the text units that mention the entity. This is provenance for citations and the basis of <em>frequency</em>, the number of distinct chunks mentioning an entity.</li>
+  <li><strong>aliases</strong>: raw spellings that were rewritten to this node. Useful for keyword matching at query time and for debugging bad merges.</li>
+  <li><strong>type</strong>: majority vote over mentions.</li>
+  <li><strong>weight</strong> on edges: the sum of relationship strengths across all records of that pair. A relation stated in five chunks outweighs one mentioned once, which is what community detection should see.</li>
+</ul>
+
+<h3>Relationship deduplication and direction</h3>
+<p>Relationships need three extra decisions after name rewriting:</p>
+<ol>
+  <li><strong>Self-loops.</strong> If “KESTREL” and “KESTREL LABS” both appear in one relationship record (“Kestrel, formerly styled Kestrel Labs…”), resolution turns it into a self-loop. Drop it.</li>
+  <li><strong>Direction.</strong> One chunk yields DEEPCAST → KESTREL LABS (“supplied”), another yields KESTREL LABS → DEEPCAST (“bought sonar from”). minigraphrag builds an undirected graph, so both land on the same edge. Microsoft GraphRAG groups relationships on the (source, target) pair as extracted, so reversed pairs stay separate records until the graph is clustered as undirected. If you need directed semantics (ACQUIRED is not symmetric), store direction per description rather than per edge.</li>
+  <li><strong>Endpoints never declared as entities.</strong> A relationship may mention a name that has no entity record. Create the node with empty descriptions (GraphRAG's behavior and minigraphrag's) or drop the edge (stricter). Either way, apply the name map first, since “KESTREL” may be undeclared while “KESTREL LABS” is declared.</li>
+</ol>
+
+<pre data-file="minigraphrag/graph_build.py"><code class="language-python">def build_graph(
+    extractions: list[ExtractionResult],
+    llm: LLM | None = None,
+    name_map: dict[str, str] | None = None,
+    summarize_max_tokens: int = 150,
+) -&gt; nx.Graph:
+    """Merge extractions into an undirected weighted graph.
+
+    `name_map` (from `resolve_entities`) rewrites aliases to canonical names
+    before merging. If `llm` is given, descriptions are summarised.
+    """
+    name_map = name_map or {}
+    canon = lambda n: name_map.get(n, n)  # noqa: E731
+    G = nx.Graph()
+    type_votes: dict[str, Counter] = {}
+
+    for ex in extractions:
+        for e in ex.entities:
+            n = canon(e.name)
+            if n not in G:
+                G.add_node(n, descriptions=[], source_ids=[], aliases=[])
+            d = G.nodes[n]
+            if e.description and e.description not in d["descriptions"]:
+                d["descriptions"].append(e.description)
+            if e.source_id and e.source_id not in d["source_ids"]:
+                d["source_ids"].append(e.source_id)
+            if e.name != n and e.name not in d["aliases"]:
+                d["aliases"].append(e.name)
+            type_votes.setdefault(n, Counter())[e.type] += 1
+
+        for r in ex.relationships:
+            u, v = canon(r.source), canon(r.target)
+            if u == v:
+                continue  # an alias pair collapsed into a self-loop
+            for n in (u, v):  # relationships may mention entities not extracted separately
+                if n not in G:
+                    G.add_node(n, descriptions=[], source_ids=[], aliases=[])
+            if not G.has_edge(u, v):
+                G.add_edge(u, v, descriptions=[], source_ids=[], weight=0.0)
+            d = G.edges[u, v]
+            if r.description and r.description not in d["descriptions"]:
+                d["descriptions"].append(r.description)
+            if r.source_id and r.source_id not in d["source_ids"]:
+                d["source_ids"].append(r.source_id)
+            d["weight"] += r.strength
+
+    for n, d in G.nodes(data=True):
+        d["type"] = type_votes[n].most_common(1)[0][0] if n in type_votes else ""
+        d["description"] = " ".join(d["descriptions"])
+        d["frequency"] = len(d["source_ids"])
+    for _, _, d in G.edges(data=True):
+        d["description"] = " ".join(d["descriptions"])
+
+    if llm is not None:
+        summarize_descriptions(llm, G, summarize_max_tokens)
+    add_rank_attributes(G)
+    return G</code></pre>
+
+<p>Wiring it together takes three lines, and the order matters: resolve over <em>all</em> extracted entities first, so every chunk's spelling votes on types and canonical names, then build.</p>
+
+<pre data-file="examples/ch09_pipeline.py"><code class="language-python">from minigraphrag.resolution import resolve_entities
+from minigraphrag.graph_build import build_graph
+
+all_entities = [e for ex in extractions for e in ex.entities]
+name_map = resolve_entities(all_entities, alias_threshold=0.9)
+G = build_graph(extractions, llm=llm, name_map=name_map, summarize_max_tokens=150)</code></pre>
+
+<div class="callout example">
+  <span class="callout-title">Worked merge: Deepcast and Kestrel Labs</span>
+  <p>Chunk <code>03-0</code> yields DEEPCAST → KESTREL LABS, “Deepcast will supply sonar modules to Kestrel Labs”, strength 8. Chunk <code>08-0</code> yields DEEPCAST → KESTREL, “Deepcast will not renew its supply agreement with Kestrel”, strength 7, and KESTREL LABS → DEEPCAST, “Every sonar module in the Kestrel fleet came from Deepcast”, strength 6. With KESTREL mapped to KESTREL LABS, all three land on one undirected edge: three descriptions, <code>source_ids = ["03-0", "08-0"]</code> (chunk 08-0 is recorded once) and weight 8 + 7 + 6 = 21. Note the double counting: one chunk contributed 13 of the 21 points. Summing is GraphRAG's rule and it is usually fine, but if a few verbose chunks dominate your weights, cap each chunk's contribution per edge.</p>
+</div>
+
+<h2>Summarizing descriptions</h2>
+<p>A hub like Kestrel Labs collects dozens of descriptions: one per chunk that mentions it. Concatenating them is wasteful (lots of repetition) and eventually impossible (local search needs to fit many entities into a few thousand tokens). So GraphRAG runs one more LLM step: summarize the description list of every node and edge that has more than one description into a single paragraph.</p>
+
+<h3>The prompt</h3>
+<pre data-file="minigraphrag/prompts.py"><code class="language-python">SUMMARIZE_DESCRIPTIONS_PROMPT = """You are a helpful assistant responsible for generating a comprehensive summary of the data provided below.
+Given one entity or relationship, and a list of descriptions, all related to the same entity or relationship, concatenate all of these into a single, comprehensive description. Make sure to include information collected from all the descriptions.
+If the provided descriptions are contradictory, resolve the contradictions (prefer the most recent dated information) and provide a single, coherent summary.
+Write in third person, include the entity names, and keep the summary under {max_tokens} tokens.
+
+#######
+-Data-
+Entities: {entity_name}
+Description List: {description_list}
+#######
+Output:
+"""</code></pre>
+
+<p>This is a close adaptation of Microsoft GraphRAG's summarize-descriptions prompt. Two changes are deliberate. The GraphRAG prompt says to resolve contradictions but not how; minigraphrag adds “prefer the most recent dated information”, because in Kestrel the contradictions are mostly changes over time (Vehl was CTO, then Nair was). And the length limit is expressed in tokens to match the budget code. GraphRAG's prompt limits length in words, with a default <code>max_length</code> of 500.</p>
+
+<pre data-file="minigraphrag/graph_build.py"><code class="language-python">def summarize_descriptions(llm: LLM, graph: nx.Graph, max_tokens: int = 150) -&gt; nx.Graph:
+    """Replace multi-description nodes/edges with one LLM summary (single descriptions are kept as is)."""
+
+    def summarise(name: str, descriptions: list[str]) -&gt; str:
+        if len(descriptions) &lt;= 1 and count_tokens(" ".join(descriptions)) &lt;= max_tokens:
+            return " ".join(descriptions)
+        prompt = P.SUMMARIZE_DESCRIPTIONS_PROMPT.format(
+            entity_name=name, description_list=json.dumps(sorted(descriptions)), max_tokens=max_tokens
+        )
+        return llm.complete(prompt).strip()
+
+    for n, d in graph.nodes(data=True):
+        d["description"] = summarise(n, d.get("descriptions", []))
+    for u, v, d in graph.edges(data=True):
+        d["description"] = summarise(json.dumps([u, v]), d.get("descriptions", []))
+    return graph</code></pre>
+
+<p>Sorting the description list before formatting is a small but important detail: the prompt is then identical across runs regardless of extraction order, so a prompt-hash cache (Chapter 26) hits on re-indexing.</p>
+
+<h3>Token limits on both sides</h3>
+<p>There are two budgets. The <strong>output</strong> budget (<code>max_tokens</code> here, <code>max_length</code> in GraphRAG) controls how long each profile is, which directly controls how many entities fit into a local search context later. The <strong>input</strong> budget matters for hubs: a node mentioned in 300 chunks has a description list longer than any sensible prompt. GraphRAG handles this with a rolling summary: it adds sorted descriptions until the input budget (<code>max_input_tokens</code>, default 4,000) would be exceeded, summarizes that batch, then continues with the summary plus the remaining descriptions. minigraphrag's version has no input budget, which is fine for Kestrel and a real limitation for large corpora; you add it in Exercise 9.5.</p>
+<p>The cost is easy to estimate before you run it. Only nodes and edges with two or more descriptions need a call. If a corpus produces 8,000 entities and 11,000 relationships and about 30% of each have multiple descriptions, that is about 5,700 calls, each with a few hundred input tokens and up to 150 output tokens. Summarization is typically much cheaper than extraction, but it is not free, and it is repeated whenever new chunks add descriptions to an existing node (<a href="27-incremental-temporal.html">Chapter 27</a>).</p>
+
+<div class="callout warn">
+  <span class="callout-title">Summaries can merge what resolution got wrong</span>
+  <p>If resolution fused Project Sentinel and Project Tern, the summarizer will obediently write a fluent paragraph describing one program that monitors reefs and replaces sonar. Nothing downstream will look wrong. Run your resolution evaluation <em>before</em> summarization, and keep the raw <code>descriptions</code> list on the node so you can audit a suspicious summary.</p>
+</div>
+
+<h2>Measuring resolution quality</h2>
+<p>Resolution is a classification problem over pairs and a clustering problem over names, so you need a small gold file: for a sample of raw names, the entity each one refers to. Label a few hundred names covering your hardest cases (aliases, acronyms, roles, near-identical projects) rather than a random sample, which will be dominated by easy singletons.</p>
+
+<h3>Pairwise precision and recall</h3>
+<p>Treat every pair of names in the same predicted cluster as a predicted match and every pair in the same gold cluster as a true match. Then precision = correct predicted pairs / predicted pairs and recall = correct predicted pairs / true pairs.</p>
+<p>Take fourteen Kestrel names with gold clusters {Dr. Mira Okafor, Mira Okafor, Okafor, the CEO}, {Tidewater Institute, Tidewater, TWI}, {Project Sentinel, Sentinel, Sentinel drones}, {Project Tern, Tern}, {Port Avalon} and {Port Avalon City Council}. The gold clusters contain 6 + 3 + 3 + 1 = 13 true pairs.</p>
+<ul>
+  <li><strong>minigraphrag resolver</strong>: clusters {Okafor ×3}, {TWI ×3}, {Tern ×2}, everything else singleton. Predicted pairs 3 + 3 + 1 = 7, all correct. Precision 7/7 = 1.00, recall 7/13 = 0.54, F1 = 0.70.</li>
+  <li><strong>Naive union-find</strong> (token containment or Jaro-Winkler ≥ 0.88, no types, no acronym rule): clusters {Okafor ×3}, {Tidewater Institute, Tidewater}, one five-name Sentinel-plus-Tern cluster and {Port Avalon, Port Avalon City Council}. Predicted pairs 3 + 1 + 10 + 1 = 15, of which 3 + 1 + 3 + 1 = 8 are correct. Precision 8/15 = 0.53, recall 8/13 = 0.62, F1 = 0.57.</li>
+</ul>
+<p>The naive resolver has higher recall and much worse precision, and the pairwise numbers exaggerate how bad the chained cluster is, because pairs grow quadratically with cluster size.</p>
+
+<h3>B-cubed</h3>
+<p><strong>B-cubed</strong> precision and recall (Bagga and Baldwin, 1998) are computed per name and averaged, which weighs every name equally. For a name <em>x</em> with predicted cluster <em>P</em>(<em>x</em>) and gold cluster <em>G</em>(<em>x</em>): precision(<em>x</em>) = |<em>P</em>(<em>x</em>) ∩ <em>G</em>(<em>x</em>)| / |<em>P</em>(<em>x</em>)| and recall(<em>x</em>) = |<em>P</em>(<em>x</em>) ∩ <em>G</em>(<em>x</em>)| / |<em>G</em>(<em>x</em>)|. On the same fourteen names the minigraphrag resolver gets B-cubed precision 1.00 and recall 0.75 (F1 0.86). The naive resolver gets precision 0.76 and recall 0.80 (F1 0.78). The ranking agrees with the pairwise view but the gap is smaller.</p>
+
+<pre data-file="examples/ch09_eval.py"><code class="language-python">from itertools import combinations
+
+def pairs(clusters):
+    return {frozenset(p) for c in clusters for p in combinations(sorted(c), 2)}
+
+def pairwise_prf(pred, gold):
+    P, G = pairs(pred), pairs(gold)
+    tp = len(P &amp; G)
+    p = tp / len(P) if P else 1.0
+    r = tp / len(G) if G else 1.0
+    return p, r, (2 * p * r / (p + r) if p + r else 0.0)
+
+def b_cubed(pred, gold):
+    pm = {n: c for c in pred for n in c}
+    gm = {n: c for c in gold for n in c}
+    names = list(gm)
+    p = sum(len(pm[n] &amp; gm[n]) / len(pm[n]) for n in names) / len(names)
+    r = sum(len(pm[n] &amp; gm[n]) / len(gm[n]) for n in names) / len(names)
+    return p, r, 2 * p * r / (p + r)</code></pre>
+
+<h3>Downstream checks that catch what metrics miss</h3>
+<ul>
+  <li><strong>Largest clusters.</strong> Sort resolved nodes by alias count and read the top twenty. Chaining shows up here first.</li>
+  <li><strong>Type conflicts.</strong> List nodes whose mentions disagree on type (majority under 70%). They are either extractor type drift or a bad merge.</li>
+  <li><strong>Canonical question paths.</strong> For each multi-hop question in your eval set, check that the expected path exists in the graph. Question 2's path through Project Sentinel and Kestrel Labs is a regression test for resolution.</li>
+  <li><strong>Singleton rate by type.</strong> A PERSON type with 90% singletons usually means last-name-only mentions are not attaching.</li>
+</ul>
+
+<h3>Precision or recall?</h3>
+<p>For GraphRAG, favor precision. A missed merge leaves two nodes that are each partly right; local search may retrieve one and miss some facts. A wrong merge creates one node that is confidently wrong about both entities, poisons its community report, and can create paths that don't exist (“Tern monitors Halden Reef”). The asymmetry is why minigraphrag keeps ambiguous aliases separate and why adjudication treats “unsure” as “different”.</p>
+
+<table>
+  <thead><tr><th>Technique</th><th>Catches</th><th>Misses or breaks on</th><th>Cost</th></tr></thead>
+  <tbody>
+    <tr><td>Normalization</td><td>Case, titles, punctuation, possessives</td><td>Any real alias</td><td>Free</td></tr>
+    <tr><td>Token containment</td><td>Okafor / Mira Okafor, Tern / Project Tern</td><td>Location vs. organization subsets without type checks; ambiguous short names</td><td>Free</td></tr>
+    <tr><td>Acronym rule</td><td>TWI / Tidewater Institute</td><td>Collisions between short acronyms</td><td>Free</td></tr>
+    <tr><td>Levenshtein / Jaro-Winkler</td><td>Typos, transliterations</td><td>Shared prefixes (Project X / Project Y), added words</td><td>Microseconds per pair</td></tr>
+    <tr><td>Embeddings of name + description</td><td>Paraphrased aliases, some roles</td><td>Closely related but distinct entities</td><td>One embedding per name</td></tr>
+    <tr><td>LLM adjudication</td><td>Roles (“the CEO”), context-dependent aliases</td><td>Thin descriptions; cost at scale</td><td>One call per gray pair</td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 9.1 <span class="level">Warm-up</span></h4>
+  <p>By hand, compute the Levenshtein distance and the Jaro-Winkler similarity (<em>p</em> = 0.1) for the misspelling “NIAR” vs. “NAIR”. Then say which of the two measures treats this swap more kindly and why.</p>
+  <details class="hint"><summary>Hint</summary><p>For Jaro, the match window for length-4 strings is ⌊4/2⌋ − 1 = 1. Count how many matched characters appear in a different order in the two strings; <em>t</em> is half that count.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Levenshtein.</strong> NAIR → NIAR needs two substitutions (A→I and I→A), since plain Levenshtein has no swap operation. Distance 2, similarity 1 − 2/4 = 0.50. (Damerau-Levenshtein would count one transposition, distance 1.)</p>
+    <p><strong>Jaro.</strong> Window = 1. N (position 0) matches N (0). A (1) looks at positions 0 to 2 of NIAR: N, I, A, so it matches A at 2. I (2) looks at positions 1 to 3: I at 1 is still unmatched, so it matches. R (3) matches R (3). So <em>m</em> = 4. Matched characters in order: NAIR gives N, A, I, R; NIAR gives N, I, A, R. Positions 1 and 2 disagree, so 2 half-transpositions and <em>t</em> = 1. Jaro = ⅓(4/4 + 4/4 + (4 − 1)/4) = ⅓(2.75) = 0.9167.</p>
+    <p><strong>Winkler.</strong> The common prefix is “N”, so <em>ℓ</em> = 1 and JW = 0.9167 + 1 × 0.1 × (1 − 0.9167) = 0.925.</p>
+    <p>Jaro-Winkler is far kinder (0.925 vs. 0.50) because it is built around matched characters with a small penalty for order, while Levenshtein charges full price for each position that differs. For short person names with typos, that kindness is useful; for short acronyms it causes false matches, so use a minimum length before trusting either score.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 9.2 <span class="level">Core</span></h4>
+  <p>A colleague's resolver produced these clusters over the fourteen names used in the evaluation section: {Dr. Mira Okafor, Mira Okafor, Okafor, the CEO}, {Tidewater Institute, Tidewater, TWI}, {Project Sentinel, Sentinel drones}, {Sentinel, Project Tern, Tern}, {Port Avalon}, {Port Avalon City Council}. Compute pairwise precision, recall and F1, and B-cubed precision and recall. Is this better or worse than the minigraphrag resolver's result (pairwise P 1.00, R 0.54; B-cubed P 1.00, R 0.75)?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Pairwise.</strong> Predicted pairs: 6 + 3 + 1 + 3 = 13. Correct: all 6 Okafor pairs, all 3 TWI pairs, and {Project Sentinel, Sentinel drones} = 1; in the {Sentinel, Project Tern, Tern} cluster only {Project Tern, Tern} is correct. Total correct = 6 + 3 + 1 + 1 = 11. Precision 11/13 = 0.846. Recall 11/13 = 0.846 (there are 13 gold pairs). F1 = 0.846.</p>
+    <p><strong>B-cubed</strong>, name by name as (precision, recall):</p>
+    <ul>
+      <li>Four Okafor names: (4/4, 4/4) = (1, 1) each.</li>
+      <li>Three TWI names: (1, 1) each.</li>
+      <li>Project Sentinel and Sentinel drones: predicted cluster size 2, both correct, gold size 3: (1, 2/3) each.</li>
+      <li>Sentinel: predicted cluster {Sentinel, Project Tern, Tern}, overlap with its gold cluster is just itself: (1/3, 1/3).</li>
+      <li>Project Tern and Tern: overlap 2 of predicted 3, gold size 2: (2/3, 1) each.</li>
+      <li>Port Avalon, Port Avalon City Council: (1, 1) each.</li>
+    </ul>
+    <p>Precision = (4 + 3 + 2 + 1/3 + 4/3 + 2) / 14 = 12.667 / 14 = 0.905. Recall = (4 + 3 + 4/3 + 1/3 + 2 + 2) / 14 = 12.667 / 14 = 0.905.</p>
+    <p>It has much higher recall and a single bad merge. Whether that is better depends on the damage: the wrong merge attaches the ambiguous “Sentinel” to Project Tern, so every fact stated about “Sentinel” (it detected the bleaching, it monitors Halden Reef) now describes the sonar project. For GraphRAG that single error is more harmful than the missed merges, which is why you should also look at which pairs are wrong rather than reading the scores alone.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 9.3 <span class="level">Core</span></h4>
+  <p>Write <code>resolve_with_blocking(entities, threshold)</code> that (a) blocks by normalized tokens plus an acronym key that correctly puts “TWI” and “TIDEWATER INSTITUTE” in the same block, (b) scores pairs with token containment or <code>difflib.SequenceMatcher</code> ratio, (c) requires the same majority type, and (d) clusters with union-find but refuses any union that would create a cluster containing two names that are both longer than one token and not in a containment relation. Report how many pairs you scored compared with all pairs.</p>
+  <details class="hint"><summary>Hint</summary><p>Word initials alone fail: “TIDEWATER INSTITUTE” gives TI, not TWI, because the W is inside a word. A simple key that never separates an acronym from its expansion is the first letter: put short single-token names (2 to 6 letters) and multi-word names into a block keyed by their first letter, then let <code>_is_acronym</code> do the precise check during scoring.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from collections import Counter, defaultdict
+from difflib import SequenceMatcher
+from itertools import combinations
+from minigraphrag.resolution import normalize_name, _is_acronym
+
+STOP = {"PROJECT", "LABS", "INSTITUTE", "CAPITAL", "INC", "CITY"}
+
+def resolve_with_blocking(entities, threshold=0.9):
+    types = defaultdict(Counter)
+    for e in entities:
+        types[normalize_name(e.name)][e.type] += 1
+    keys = sorted(types)
+    major = {k: types[k].most_common(1)[0][0] for k in keys}
+
+    # (a) blocking: rare tokens, plus first-initial blocks for acronym candidates
+    blocks = defaultdict(set)
+    for k in keys:
+        toks = k.split()
+        for t in toks:
+            if t not in STOP:
+                blocks["T:" + t].add(k)
+        if len(toks) &gt; 1:
+            blocks["I:" + toks[0][0]].add(k)                 # TIDEWATER INSTITUTE -&gt; I:T
+        elif 2 &lt;= len(k) &lt;= 6:
+            blocks["I:" + k[0]].add(k)                       # TWI -&gt; I:T
+    cand = set()
+    for members in blocks.values():
+        cand.update(combinations(sorted(members), 2))
+
+    # (b, c) scoring with a type gate
+    def match(a, b):
+        if major[a] != major[b]:
+            return False
+        sa, sb = set(a.split()), set(b.split())
+        return (sa &lt;= sb or sb &lt;= sa or _is_acronym(a, b) or _is_acronym(b, a)
+                or SequenceMatcher(None, a, b).ratio() &gt;= threshold)
+    accepted = [(a, b) for a, b in cand if match(a, b)]
+
+    # (d) guarded union-find
+    parent = {k: k for k in keys}
+    members = {k: {k} for k in keys}
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def conflict(group):
+        long = [g for g in group if " " in g]
+        return any(not (set(x.split()) &lt;= set(y.split()) or set(y.split()) &lt;= set(x.split()))
+                   for x, y in combinations(long, 2))
+    for a, b in sorted(accepted):
+        ra, rb = find(a), find(b)
+        if ra != rb and not conflict(members[ra] | members[rb]):
+            parent[rb] = ra
+            members[ra] |= members.pop(rb)
+
+    n = len(keys)
+    print(f"scored {len(cand)} of {n * (n - 1) // 2} pairs")
+    return list(members.values())</code></pre>
+    <p>On a list of 28 raw Kestrel names (the 17 canonical names plus Kestrel, Mira Okafor, Okafor, the CEO, Vehl, Tidewater, TWI, Sentinel, Sentinel drones, Tern and Deep Cast; 27 distinct keys after normalization) this scores 24 pairs out of 351 and produces clusters such as {TIDEWATER INSTITUTE, TIDEWATER, TWI}, {JONAS VEHL, VEHL} and {PROJECT TERN, TERN}. It also reveals a blocking miss: “DEEPCAST” and “DEEP CAST” share no token and never meet, so the typo pair is never scored. Adding a character trigram block fixes that. The first-initial block is coarse: in a big corpus the “I:T” block grows large, so cap block size or use a proper acronym index keyed by candidate acronyms generated from each multi-word name. On this list the SequenceMatcher ratio of PROJECT SENTINEL and PROJECT TERN is only 0.71, so that pair is never accepted; if a looser scorer did accept it, the conflict guard would still refuse the union, because both names are multi-word and neither contains the other. It does not stop a chain through two single-word names, so keep the type gate and a high threshold.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 9.4 <span class="level">Core</span></h4>
+  <p>Three text units produced these records (strength in parentheses). The name map sends VEHL → JONAS VEHL and KESTREL → KESTREL LABS. By hand, give the merged attributes of node JONAS VEHL (descriptions, source_ids, aliases, type, frequency) and of the edge {JONAS VEHL, KESTREL LABS} (descriptions, source_ids, weight) as <code>build_graph</code> would produce them.</p>
+  <ul>
+    <li><code>01-0</code>: entity JONAS VEHL, PERSON, “Co-founder and CTO of Kestrel Labs”; relationship JONAS VEHL → KESTREL LABS, “Vehl co-founded Kestrel Labs and serves as CTO” (9).</li>
+    <li><code>03-0</code>: entity VEHL, PERSON, “Kestrel CTO who designed the acoustic array layout”; relationship VEHL → KESTREL, “Vehl is chief technology officer of Kestrel” (8).</li>
+    <li><code>12-0</code>: entity JONAS VEHL, PERSON, “Became Chief Scientist in March 2026”; entity VEHL, ORGANIZATION, “Speaker in the podcast”; relationship KESTREL LABS → JONAS VEHL, “Vehl stepped down as CTO of Kestrel Labs in March 2026” (9).</li>
+  </ul>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Node JONAS VEHL.</strong> Four entity records map to it, in this order: 01-0 JONAS VEHL, 03-0 VEHL, 12-0 JONAS VEHL, 12-0 VEHL.</p>
+    <ul>
+      <li>descriptions: [“Co-founder and CTO of Kestrel Labs”, “Kestrel CTO who designed the acoustic array layout”, “Became Chief Scientist in March 2026”, “Speaker in the podcast”] (all distinct, so all kept).</li>
+      <li>source_ids: [“01-0”, “03-0”, “12-0”] (12-0 once).</li>
+      <li>aliases: [“VEHL”] (added once, from 03-0).</li>
+      <li>type: votes PERSON 3, ORGANIZATION 1 → PERSON. The type error in 12-0 is outvoted, which is why majority voting matters.</li>
+      <li>frequency: len(source_ids) = 3.</li>
+    </ul>
+    <p><strong>Edge {JONAS VEHL, KESTREL LABS}.</strong> All three relationship records map to the same undirected pair; the reversed direction in 12-0 does not create a second edge.</p>
+    <ul>
+      <li>descriptions: all three, in record order.</li>
+      <li>source_ids: [“01-0”, “03-0”, “12-0”].</li>
+      <li>weight: 9 + 8 + 9 = 26.</li>
+    </ul>
+    <p>Worth noticing: one description on this edge says Vehl <em>is</em> CTO and another that he stepped down. The summarizer's “prefer the most recent dated information” instruction handles it in the profile text, but the graph edge itself has no notion of time. That is exactly the gap <a href="10-claims-temporal.html">Chapter 10</a> fills.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 9.5 <span class="level">Stretch</span></h4>
+  <p>Extend <code>summarize_descriptions</code> with a <code>max_input_tokens</code> budget that uses GraphRAG's rolling strategy: sort descriptions, collect until the budget would be exceeded, summarize that batch, and continue with the summary as the first item of the next batch. Then answer: with a 4,000-token input budget, 60 tokens per description and a 150-token summary, how many LLM calls does a hub with 300 descriptions need? What is lost by rolling summaries compared with a single call?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import json
+from minigraphrag import prompts as P
+from minigraphrag.tokens import count_tokens
+
+def summarise_rolling(llm, name, descriptions, max_tokens=150, max_input_tokens=4000):
+    descriptions = sorted(set(descriptions))
+    if len(descriptions) &lt;= 1 and count_tokens(" ".join(descriptions)) &lt;= max_tokens:
+        return " ".join(descriptions)
+    overhead = count_tokens(P.SUMMARIZE_DESCRIPTIONS_PROMPT)
+    batch, used, result, calls = [], overhead, "", 0
+    for i, desc in enumerate(descriptions):
+        batch.append(desc)
+        used += count_tokens(desc)
+        last = i == len(descriptions) - 1
+        if (used &gt; max_input_tokens and len(batch) &gt; 1) or last:
+            prompt = P.SUMMARIZE_DESCRIPTIONS_PROMPT.format(
+                entity_name=name, description_list=json.dumps(sorted(batch)), max_tokens=max_tokens)
+            result = llm.complete(prompt).strip()
+            calls += 1
+            if not last:
+                batch, used = [result], overhead + count_tokens(result)
+    return result</code></pre>
+    <p><strong>Call count.</strong> Ignore the prompt overhead for the estimate (the template is 131 tokens here, so it shaves about two descriptions off each batch; a simulation with exactly 60-token descriptions still makes 5 calls). The first batch holds about 4,000 / 60 ≈ 66 descriptions. The overflow check triggers when the budget is <em>exceeded</em>, so each batch includes one description past the limit: roughly 67 in the first batch. Every later batch starts with the 150-token summary, leaving about 3,850 tokens, or about 64 new descriptions plus the one that overflows, so about 65. After the first call, 300 − 67 = 233 descriptions remain, needing ⌈233 / 65⌉ = 4 more calls. Total about 5 calls, versus 1 call if the model could accept all 18,000 tokens.</p>
+    <p><strong>What is lost.</strong> Sorting is alphabetical, not chronological or by importance, so the earliest batches are not special, but whatever the first summary compressed away is gone for good: later batches see a 150-token digest of 67 descriptions next to 65 full ones, so the final profile is biased toward descriptions in the last batch. A fairer alternative is a map-reduce tree: summarize batches independently, then summarize the summaries, so every description goes through the same number of compression steps.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why can a missing merge between “Kestrel” and “Kestrel Labs” make canonical question 2 unanswerable by graph traversal, even though both nodes exist?</p>
+  <ol>
+    <li>Because the LLM refuses to answer when it sees two similar names</li>
+    <li>Because community detection deletes low-degree nodes</li>
+    <li data-correct>Because edges attach to the node named in each chunk, so the board-member edge and the runs edge sit on different nodes with no edge between them</li>
+    <li>Because embeddings of the two names are too far apart for search</li>
+  </ol>
+  <div class="explain">A traversal can only follow edges. The path Sentinel → Kestrel Labs → Lena Park needs the “runs” and “board member” edges to share a node. Until resolution merges the aliases, they don't.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">“PORT AVALON” and “PORT AVALON CITY COUNCIL” score 100 on token set ratio. What is the cheapest reliable way to stop them from merging?</p>
+  <ol>
+    <li data-correct>Require compatible majority types: LOCATION and ORGANIZATION don't merge</li>
+    <li>Lower the token set ratio threshold to 90</li>
+    <li>Switch to Jaro-Winkler</li>
+    <li>Send every token subset pair to an LLM</li>
+  </ol>
+  <div class="explain">Any token subset scores 100, so no threshold helps. Jaro-Winkler also scores this pair high (0.892). A type gate costs nothing and blocks it. LLM adjudication would work but is far more expensive than needed.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Union-find merges A–B and B–C into one cluster. Why is this dangerous for entity resolution specifically?</p>
+  <ol>
+    <li>Union-find is too slow for large graphs</li>
+    <li>Union-find cannot handle more than two names per cluster</li>
+    <li>It produces different results depending on the order of unions</li>
+    <li data-correct>Similarity is not transitive, so a chain of individually plausible matches can join entities that are clearly different end to end</li>
+  </ol>
+  <div class="explain">Sentinel ~ Project Sentinel ~ Project Tern ~ Tern: each link has a reason, and the resulting cluster merges two different projects. Connected components always give the same partition for the same accepted pairs, and union-find is near linear.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">After merging, the edge {DEEPCAST, KESTREL LABS} has weight 21 from three relationship records. What does GraphRAG-style weight summation mainly give downstream stages?</p>
+  <ol>
+    <li>A calibrated probability that the relationship is true</li>
+    <li data-correct>A signal of how often and how strongly the relation was stated, which community detection and ranking use</li>
+    <li>The number of chunks that mention the edge</li>
+    <li>A timestamp for when the relationship was valid</li>
+  </ol>
+  <div class="explain">Summed strengths reward repeated evidence. They are not calibrated probabilities, they are not a chunk count (that is len(source_ids)), and they carry no time information.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A hub entity has 300 descriptions, far more than fit in one summarization prompt. What does Microsoft GraphRAG's description summarizer do?</p>
+  <ol>
+    <li>Keeps only the first description</li>
+    <li>Truncates the list to the input budget and ignores the rest</li>
+    <li data-correct>Summarizes batches that fit the input budget, carrying each batch's summary into the next batch</li>
+    <li>Embeds all descriptions and keeps the centroid</li>
+  </ol>
+  <div class="explain">It collects sorted descriptions until the input token budget is exceeded, summarizes, and continues with the summary plus the remaining descriptions until all have been seen.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Your resolver's pairwise precision drops from 0.98 to 0.90 while recall rises from 0.70 to 0.80. For a GraphRAG index, which is usually the better call?</p>
+  <ol>
+    <li>Take the new resolver: F1 went up</li>
+    <li>It makes no difference as long as descriptions are summarized</li>
+    <li>Take the new resolver, because missed merges break more paths than wrong merges</li>
+    <li data-correct>Inspect the new false merges first; wrong merges corrupt both entities, their reports and their paths, so precision is usually worth more</li>
+  </ol>
+  <div class="explain">F1 treats both error types equally, but their costs are not equal here. One false merge of two central entities can do more damage than many missed merges of rare aliases. Look at which pairs are wrong before deciding.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Can I skip resolution and rely on embedding search to find all the aliases at query time?</summary>
+  <div><p>Partly. Local search seeds from entity embeddings, so a query about “Okafor” may retrieve all three Okafor nodes. But everything that uses graph structure breaks: degree ranking, paths, Personalized PageRank (<a href="17-ppr-hipporag.html">Chapter 17</a>) and communities all treat the aliases as different entities, and each node's neighborhood is incomplete. Query-time alias matching is a good safety net, not a substitute.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should resolution happen before or after description summarization?</summary>
+  <div><p>Before. Summarization is per node, so it needs the final node set. If you summarize first, every alias gets its own summary and you have to summarize again after merging, paying twice. The one exception is when you want embeddings of richer descriptions to drive resolution; then summarize cheaply (or just concatenate) for the embedding, resolve, and write the real summaries afterwards.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I handle two different people with the same name?</summary>
+  <div><p>String methods will always merge them, so you need context. Keep the type gate, then look at neighborhoods: if two “J. PARK” mentions share no neighbors and their descriptions put them in different organizations, keep them apart and disambiguate the display name (“JAMIE PARK (HARBOR ROBOTICS)”). In a closed corpus like Kestrel this is rare; in news or enterprise corpora it is common enough to warrant an LLM adjudication rule for same-name pairs with disjoint neighborhoods.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is there a way to resolve during extraction instead of afterwards?</summary>
+  <div><p>Yes, and it helps. Pass a short list of known canonical names (from a gazetteer or from a previous indexing run) into the extraction prompt and ask the model to use those spellings when they apply. It reduces variants at the source. It does not remove the need for resolution, because the model will still emit new variants and roles, and a long name list in every prompt costs tokens on every chunk.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What about “the CEO”? No string rule will ever link it to Okafor.</summary>
+  <div><p>Roles are coreference, and the best place to handle them is inside the chunk, where the text usually says who the CEO is. Instruct the extractor to resolve pronouns and roles to named entities when the chunk makes it clear. For the leftovers, embedding similarity plus LLM adjudication can link them, but beware time: “the CTO” is Jonas Vehl in a 2022 document and Priya Nair in a 2026 one. Role mentions should be resolved using the document date, which is another reason to carry dates through the pipeline.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a resolution report you can defend</h3>
+  <p>Build the resolution stage for your minigraphrag index and make its decisions inspectable, so that when someone asks why two nodes merged you can answer from a log instead of guessing.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A gold file of at least 60 raw names from the Kestrel extraction mapped to canonical entities, including every alias listed in the running example</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A resolver that logs, for every merge, the rule that fired (normalized key, containment, acronym, fuzzy score, embedding score or LLM verdict)</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Pairwise and B-cubed precision and recall against the gold file, reported for at least two threshold settings</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A check that the paths for canonical questions 1 to 3 exist in the built graph, run as a test</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A table of the ten largest resolved nodes with their aliases and type votes, reviewed by hand</span></li>
+  </ul>
+  <p><strong>Done when</strong> your resolver reaches pairwise precision of at least 0.95 on the gold file and all three canonical multi-hop paths exist in the graph.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Unresolved aliases split degree, break multi-hop paths and create phantom entities in communities and reports.</li>
+    <li>Use a cascade: normalize, block, score with several measures, gate on type, and send only the gray zone to an LLM.</li>
+    <li>Each string measure has blind spots: Levenshtein misses added words, Jaro-Winkler over-rewards shared prefixes, token set ratio gives 100 to any subset.</li>
+    <li>Transitive closure chains unrelated entities together; prefer canonical stars, guarded unions or linkage criteria, and keep ambiguous names separate.</li>
+    <li>Merge by keeping all descriptions and source ids and summing edge weights, then summarize descriptions within explicit input and output token budgets.</li>
+    <li>Evaluate with a gold file using pairwise and B-cubed metrics, and weigh wrong merges as more costly than missed ones.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: entity and relationship merging, summarize-descriptions prompt and defaults. <span class="venue">GitHub</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>Peeters, Steiner and Bizer. <a href="https://arxiv.org/abs/2310.11244">Entity Matching using Large Language Models</a>. <span class="venue">EDBT 2025; arXiv 2310.11244</span></li>
+  <li>Fellegi and Sunter. <a href="https://doi.org/10.1080/01621459.1969.10501049">A Theory for Record Linkage</a>. <span class="venue">Journal of the American Statistical Association, 1969</span></li>
+  <li>Winkler. <a href="https://files.eric.ed.gov/fulltext/ED325505.pdf">String Comparator Metrics and Enhanced Decision Rules in the Fellegi-Sunter Model of Record Linkage</a>. <span class="venue">Proceedings of the Section on Survey Research Methods, American Statistical Association, 1990</span></li>
+  <li>Papadakis, Skoutas, Thanos and Palpanas. <a href="https://doi.org/10.1145/3377455">Blocking and Filtering Techniques for Entity Resolution: A Survey</a>. <span class="venue">ACM Computing Surveys, 2020</span></li>
+  <li>Bagga and Baldwin. <a href="https://aclanthology.org/P98-1012/">Entity-Based Cross-Document Coreferencing Using the Vector Space Model</a>. <span class="venue">COLING-ACL, 1998</span></li>
+  <li>Max Bachmann. <a href="https://github.com/rapidfuzz/RapidFuzz">RapidFuzz</a>: Levenshtein, Jaro-Winkler and token set ratio implementations. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch09-chaining", function (el, cfg, api) {
+  const W = 720, H = cfg.height || 420;
+  const { stage } = api.frame(el, cfg);
+  const svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Clustering name matches" }, stage);
+  const G = api.drawGraph(svg, {
+    nodes: cfg.nodes.map(function (n) { return { id: n.id, label: n.label, group: 8, x: n.x, y: n.y }; }),
+    edges: cfg.pairs.map(function (p) { return { source: p.a, target: p.b, label: p.score.toFixed(2) }; })
+  }, W, H);
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const bar = api.controls(el);
+  const tL = api.h("label", {}, bar, "Threshold ");
+  const t = api.h("input", { type: "range", min: 0.75, max: 1, step: 0.01, value: cfg.threshold || 0.85 }, tL);
+  const tV = api.h("b", {}, tL);
+  const mL = api.h("label", {}, bar, "Clustering ");
+  const mode = api.h("select", {}, mL);
+  api.h("option", { value: "uf" }, mode, "Union-find (transitive)");
+  api.h("option", { value: "star" }, mode, "Canonical star");
+  const cL = api.h("label", {}, bar);
+  const typeC = api.h("input", { type: "checkbox" }, cL);
+  cL.appendChild(document.createTextNode(" Types must match"));
+  const info = {};
+  cfg.nodes.forEach(function (n) { info[n.id] = n; });
+  function pairsOf(clusters) {
+    const s = new Set();
+    clusters.forEach(function (c) { for (let i = 0; i < c.length; i++) for (let j = i + 1; j < c.length; j++) s.add([c[i], c[j]].sort().join("|")); });
+    return s;
+  }
+  const goldGroups = {};
+  cfg.nodes.forEach(function (n) { (goldGroups[n.gold] = goldGroups[n.gold] || []).push(n.id); });
+  const goldPairs = pairsOf(Object.values(goldGroups));
+  function run() {
+    const thr = +t.value, needType = typeC.checked, star = mode.value === "star";
+    tV.textContent = thr.toFixed(2);
+    const ok = function (p) { return p.score >= thr - 1e-9 && (!needType || info[p.a].type === info[p.b].type); };
+    const linked = function (x, y) { return cfg.pairs.some(function (p) { return ok(p) && ((p.a === x && p.b === y) || (p.a === y && p.b === x)); }); };
+    const parent = {};
+    cfg.nodes.forEach(function (n) { parent[n.id] = n.id; });
+    const find = function (x) { while (parent[x] !== x) x = parent[x]; return x; };
+    if (!star) {
+      cfg.pairs.forEach(function (p) { if (ok(p)) { const ra = find(p.a), rb = find(p.b); if (ra !== rb) parent[ra] = rb; } });
+    } else {
+      const words = function (s) { return s.split(" ").length; };
+      const order = cfg.nodes.slice().sort(function (x, y) {
+        return (words(y.label) - words(x.label)) || (y.label.length - x.label.length) || (x.label < y.label ? -1 : 1);
+      });
+      const canon = [];
+      order.forEach(function (n) {
+        const cands = canon.filter(function (c) { return linked(n.id, c); });
+        if (cands.length === 1) parent[n.id] = cands[0]; else canon.push(n.id);
+      });
+    }
+    const groups = {};
+    cfg.nodes.forEach(function (n) { const r = find(n.id); (groups[r] = groups[r] || []).push(n.id); });
+    const clusters = Object.values(groups);
+    const multi = clusters.filter(function (c) { return c.length > 1; });
+    const color = {};
+    multi.forEach(function (c, i) { c.forEach(function (id) { color[id] = api.groupColor([1, 2, 3, 4, 6, 7, 5][i % 7]); }); });
+    G.nodes.forEach(function (n) {
+      const col = color[n.id] || "var(--c8)";
+      n._c.style.fill = "color-mix(in srgb, " + col + " " + (color[n.id] ? 45 : 14) + "%, var(--panel))";
+      n._c.style.stroke = col;
+    });
+    G.edges.forEach(function (e, i) {
+      const p = cfg.pairs[i];
+      const on = ok(p), used = on && find(p.a) === find(p.b);
+      e._el.classList.toggle("active", used);
+      e._el.style.opacity = on ? 1 : 0.35;
+      e._el.style.strokeDasharray = on ? "" : "4 4";
+      if (e._label) e._label.style.opacity = on ? 1 : 0.55;
+    });
+    const pred = pairsOf(clusters);
+    let tp = 0;
+    pred.forEach(function (k) { if (goldPairs.has(k)) tp++; });
+    const prec = pred.size ? tp / pred.size : 1, rec = tp / goldPairs.size;
+    const chips = multi.map(function (c) {
+      const golds = new Set(c.map(function (id) { return info[id].gold; }));
+      const bad = golds.size > 1;
+      return '<span class="viz-chip ' + (bad ? "edge" : "node") + '">' + c.map(function (id) { return api.escapeHtml(info[id].label); }).join(" + ") + (bad ? " (wrong merge)" : "") + "</span>";
+    }).join(" ");
+    cap.innerHTML = (chips || "No merges.") + "<br>Predicted pairs <strong>" + pred.size + "</strong>, correct <strong>" + tp + "</strong> of " + goldPairs.size + " gold pairs. Pairwise precision <strong>" + api.fmt(prec, 2) + "</strong>, recall <strong>" + api.fmt(rec, 2) + "</strong>.";
+  }
+  t.addEventListener("input", run);
+  mode.addEventListener("change", run);
+  typeC.addEventListener("change", run);
+  run();
+});
+</script>
+</body>
+</html>

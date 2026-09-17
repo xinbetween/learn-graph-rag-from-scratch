@@ -24,6 +24,64 @@
   const registry = {};
   const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  /* UI strings for the built-in figures. The page language comes from <html lang>; captions and labels
+     that a chapter supplies in its JSON config are already in the page's language. */
+  const LANG = (document.documentElement.lang || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
+  const L = ({
+    en: {
+      interactive: "Interactive", reset: "Reset", back: "Back", play: "Play", pause: "Pause", replay: "Replay", next: "Next",
+      step: (i, n) => "Step " + i + " of " + n,
+      chunkSize: "Chunk size ", overlap: "Overlap ", words: (n) => n + " words",
+      chunkCaption: (c, o) => "<strong>" + c + " chunks.</strong> " + o + " words appear in two chunks. ",
+      chunkNote: "Try a tiny chunk size: facts like who acquired whom get split away from their subject.",
+      query: "query", topK: "Top k ", dragHint: "Drag the diamond to ask a different question", retrieved: "Retrieved: ",
+      damping: "Damping α ", iteration: "Iteration ", animate: "Animate", seedHint: "Click nodes to toggle seeds",
+      personalizedTo: "Personalized to ", uniform: "Uniform teleport (classic PageRank)", highestMass: ". Highest mass: ",
+      louvainMove: (pass, name) => "Pass " + pass + ": <strong>" + name + "</strong> joins a neighbor's community because it raises modularity. ",
+      louvainStart: "Start: every node is its own community. ",
+      louvainStats: (k, q) => "Communities: <strong>" + k + "</strong>. Modularity Q = <strong>" + q + "</strong>.",
+      louvainEnd: " No single move improves Q any more, so phase 1 ends here; Louvain would now collapse each community into a super-node and repeat.",
+      extractIntro: "The extractor reads the chunk. Step through to see each entity, then each relationship, get pulled out.",
+      entity: (name, type, desc) => 'Entity <span class="viz-chip node">' + name + "</span> type <strong>" + type + "</strong>" + (desc ? ": " + desc : ""),
+      relationship: (s, l, t, desc) => 'Relationship <span class="viz-chip edge">' + s + " → " + l + " → " + t + "</span>" + (desc ? " " + desc : ""),
+      question: "Question:", helpfulness: (x) => "helpfulness: " + x, reduceLabel: "Reduce:",
+      mrShuffle: "Community reports (at one level of the hierarchy) are shuffled and packed into context-sized batches.",
+      mrMap: "Map: each batch is sent to the LLM in parallel. It writes a partial answer and scores how helpful that batch is for the question.",
+      mrFilter: (t) => "Filter: partial answers scoring below " + t + " are dropped, then the rest are sorted by score.",
+      mrReduce: "Reduce: the surviving partial answers are packed into one final prompt that synthesizes the global answer.",
+      fused: "Fused (RRF)",
+      rrfCaption: (k, low) => "score(d) = Σ 1 / (k + rank). With k = " + k + ", " + (low ? "top positions dominate: whichever list ranks an item first nearly decides." : "ranks are flattened, so items that appear in several lists rise above one-list winners."),
+      tokens: " tokens",
+      configError: "Figure configuration error: ", unknown: "Unknown figure type: ", failed: "Figure failed to load: "
+    },
+    zh: {
+      interactive: "交互", reset: "重置", back: "上一步", play: "播放", pause: "暂停", replay: "重播", next: "下一步",
+      step: (i, n) => "第 " + i + " / " + n + " 步",
+      chunkSize: "分块大小 ", overlap: "重叠 ", words: (n) => n + " 词",
+      chunkCaption: (c, o) => "<strong>" + c + " 个分块。</strong>有 " + o + " 个词同时出现在两个分块中。",
+      chunkNote: "把分块调得很小试试：像“谁收购了谁”这样的事实会和它的主语被切到不同分块里。",
+      query: "查询", topK: "Top k ", dragHint: "拖动菱形，换一个问题", retrieved: "检索到：",
+      damping: "阻尼系数 α ", iteration: "迭代 ", animate: "播放动画", seedHint: "点击节点切换种子",
+      personalizedTo: "个性化种子：", uniform: "均匀跳转（经典 PageRank）", highestMass: "。概率最高：",
+      louvainMove: (pass, name) => "第 " + pass + " 轮：<strong>" + name + "</strong> 加入邻居所在的社区，因为这样能提高模块度。",
+      louvainStart: "开始：每个节点各自是一个社区。",
+      louvainStats: (k, q) => "社区数：<strong>" + k + "</strong>。模块度 Q = <strong>" + q + "</strong>。",
+      louvainEnd: "任何单个移动都无法再提高 Q，第一阶段到此结束；接下来 Louvain 会把每个社区压缩成一个超级节点并重复这一过程。",
+      extractIntro: "抽取器读取这个分块。逐步查看每个实体、再查看每个关系是如何被抽取出来的。",
+      entity: (name, type, desc) => '实体 <span class="viz-chip node">' + name + "</span>，类型 <strong>" + type + "</strong>" + (desc ? "：" + desc : ""),
+      relationship: (s, l, t, desc) => '关系 <span class="viz-chip edge">' + s + " → " + l + " → " + t + "</span>" + (desc ? " " + desc : ""),
+      question: "问题：", helpfulness: (x) => "有用性：" + x, reduceLabel: "归约：",
+      mrShuffle: "某一层级的社区报告被打乱顺序，并装入与上下文窗口大小相当的批次。",
+      mrMap: "映射：每个批次并行发送给 LLM。它写出部分答案，并为这一批次对问题的有用程度打分。",
+      mrFilter: (t) => "过滤：得分低于 " + t + " 的部分答案被丢弃，其余按得分排序。",
+      mrReduce: "归约：保留下来的部分答案被装进最后一个提示词，合成全局答案。",
+      fused: "融合结果（RRF）",
+      rrfCaption: (k, low) => "score(d) = Σ 1 / (k + rank)。k = " + k + " 时，" + (low ? "排名靠前的位置占主导：哪个列表把某项排在第一，几乎就决定了结果。" : "排名差距被拉平，出现在多个列表中的项会超过只在一个列表中夺冠的项。"),
+      tokens: " 个 token",
+      configError: "交互图配置错误：", unknown: "未知的交互图类型：", failed: "交互图加载失败："
+    }
+  })[LANG];
+
   /* ---------- tiny helpers ---------- */
   function svgEl(tag, attrs, parent) {
     const e = document.createElementNS(NS, tag);
@@ -55,7 +113,7 @@
     el.innerHTML = "";
     const head = h("div", { class: "viz-head" }, el);
     h("span", { class: "viz-title" }, head, cfg.title || "");
-    h("span", { class: "viz-badge" }, head, "Interactive");
+    h("span", { class: "viz-badge" }, head, L.interactive);
     if (cfg.subtitle) h("span", { class: "viz-sub" }, head, cfg.subtitle);
     const stage = h("div", { class: "viz-stage" }, el);
     return { head, stage };
@@ -183,25 +241,25 @@
   function player(el, n, render, opts) {
     opts = opts || {};
     const bar = controls(el);
-    const reset = button(bar, "Reset");
-    const prev = button(bar, "Back");
-    const play = button(bar, "Play", "primary");
-    const next = button(bar, "Next");
+    const reset = button(bar, L.reset);
+    const prev = button(bar, L.back);
+    const play = button(bar, L.play, "primary");
+    const next = button(bar, L.next);
     h("span", { class: "grow" }, bar);
     const no = h("span", { class: "stepno" }, bar);
     let i = 0, timer = null;
     function go(k) {
       i = Math.max(0, Math.min(n - 1, k));
       render(i);
-      no.textContent = "Step " + (i + 1) + " of " + n;
+      no.textContent = L.step(i + 1, n);
       prev.disabled = i === 0; next.disabled = i === n - 1;
       if (i === n - 1) stop();
     }
-    function stop() { clearInterval(timer); timer = null; play.textContent = i === n - 1 ? "Replay" : "Play"; }
+    function stop() { clearInterval(timer); timer = null; play.textContent = i === n - 1 ? L.replay : L.play; }
     play.addEventListener("click", () => {
       if (timer) return stop();
       if (i === n - 1) go(0);
-      play.textContent = "Pause";
+      play.textContent = L.pause;
       timer = setInterval(() => (i < n - 1 ? go(i + 1) : stop()), opts.interval || 1900);
     });
     prev.addEventListener("click", () => { stop(); go(i - 1); });
@@ -323,11 +381,11 @@
     const body = h("div", { class: "viz-text" }, el.querySelector(".viz-stage"));
     const cap = h("div", { class: "viz-caption", "aria-live": "polite" }, el);
     const bar = controls(el);
-    const sizeL = h("label", {}, bar, "Chunk size "); const size = h("input", { type: "range", min: 10, max: Math.max(20, Math.min(200, words.length)), value: cfg.size || 40 }, sizeL); const sizeV = h("b", {}, sizeL);
-    const ovL = h("label", {}, bar, "Overlap "); const ov = h("input", { type: "range", min: 0, max: 30, value: cfg.overlap || 8 }, ovL); const ovV = h("b", {}, ovL);
+    const sizeL = h("label", {}, bar, L.chunkSize); const size = h("input", { type: "range", min: 10, max: Math.max(20, Math.min(200, words.length)), value: cfg.size || 40 }, sizeL); const sizeV = h("b", {}, sizeL);
+    const ovL = h("label", {}, bar, L.overlap); const ov = h("input", { type: "range", min: 0, max: 30, value: cfg.overlap || 8 }, ovL); const ovV = h("b", {}, ovL);
     const cols = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c6)", "var(--c7)"];
     function render() {
-      const S = +size.value; let O = Math.min(+ov.value, S - 1); sizeV.textContent = S + " words"; ovV.textContent = O + " words";
+      const S = +size.value; let O = Math.min(+ov.value, S - 1); sizeV.textContent = L.words(S); ovV.textContent = L.words(O);
       const chunks = []; for (let s = 0; s < words.length; s += S - O) { chunks.push([s, Math.min(words.length, s + S)]); if (s + S >= words.length) break; }
       const owner = words.map(() => []);
       chunks.forEach((c, ci) => { for (let k = c[0]; k < c[1]; k++) owner[k].push(ci); });
@@ -341,7 +399,7 @@
         if (chunks.some((c) => c[0] === k)) { const m = document.createElement("sup"); m.textContent = "#" + (o[o.length - 1] + 1); m.style.cssText = "font-family:var(--font-ui);font-size:.65em;color:var(--muted);margin-right:2px"; sp.prepend(m); }
       });
       const ovWords = owner.filter((o) => o.length > 1).length;
-      setCaption(cap, "<strong>" + chunks.length + " chunks.</strong> " + ovWords + " words appear in two chunks. " + (cfg.note || "Try a tiny chunk size: facts like who acquired whom get split away from their subject."));
+      setCaption(cap, L.chunkCaption(chunks.length, ovWords) + (cfg.note || L.chunkNote));
     }
     size.addEventListener("input", render); ov.addEventListener("input", render); render();
   };
@@ -360,11 +418,11 @@
     const q = { X: ((cfg.query ? cfg.query.x : 50) / 100) * W, Y: ((cfg.query ? cfg.query.y : 50) / 100) * H };
     const qg = svgEl("g", { tabindex: 0, style: "cursor:grab" }, svg);
     svgEl("rect", { x: -9, y: -9, width: 18, height: 18, transform: "rotate(45)", style: "fill:var(--edge);stroke:var(--ink);stroke-width:1.5" }, qg);
-    const qt = svgEl("text", { x: 14, y: -12, class: "d-text bold" }, qg); qt.textContent = (cfg.query && cfg.query.label) || "query";
+    const qt = svgEl("text", { x: 14, y: -12, class: "d-text bold" }, qg); qt.textContent = (cfg.query && cfg.query.label) || L.query;
     const cap = h("div", { class: "viz-caption", "aria-live": "polite" }, el);
     const bar = controls(el);
-    const kL = h("label", {}, bar, "Top k "); const k = h("input", { type: "range", min: 1, max: Math.min(8, pts.length), value: cfg.k || 3 }, kL); const kV = h("b", {}, kL);
-    h("span", { class: "grow" }, bar); h("span", { class: "stepno" }, bar, "Drag the diamond to ask a different question");
+    const kL = h("label", {}, bar, L.topK); const k = h("input", { type: "range", min: 1, max: Math.min(8, pts.length), value: cfg.k || 3 }, kL); const kV = h("b", {}, kL);
+    h("span", { class: "grow" }, bar); h("span", { class: "stepno" }, bar, L.dragHint);
     function render() {
       qg.setAttribute("transform", "translate(" + q.X + "," + q.Y + ")");
       gl.innerHTML = "";
@@ -373,7 +431,7 @@
       pts.forEach((p) => p._c.setAttribute("r", 7));
       ranked.slice(0, K).forEach((r) => { svgEl("line", { x1: q.X, y1: q.Y, x2: r.p.X, y2: r.p.Y, class: "d-line hot" }, gl); r.p._c.setAttribute("r", 10); });
       const maxD = Math.hypot(W, H);
-      setCaption(cap, "Retrieved: " + ranked.slice(0, K).map((r) => '<span class="viz-chip node">' + r.p.label + " · " + fmt(1 - r.d / maxD, 2) + "</span>").join(" ") + (cfg.note ? "<br>" + cfg.note : ""));
+      setCaption(cap, L.retrieved + ranked.slice(0, K).map((r) => '<span class="viz-chip node">' + r.p.label + " · " + fmt(1 - r.d / maxD, 2) + "</span>").join(" ") + (cfg.note ? "<br>" + cfg.note : ""));
     }
     let dragging = false;
     const pt = (ev) => { const r = svg.getBoundingClientRect(); return { x: ((ev.clientX - r.left) / r.width) * W, y: ((ev.clientY - r.top) / r.height) * H }; };
@@ -416,10 +474,10 @@
     const G = drawGraph(svg, conf, W, H);
     const cap = h("div", { class: "viz-caption", "aria-live": "polite" }, el);
     const bar = controls(el);
-    const aL = h("label", {}, bar, "Damping α "); const a = h("input", { type: "range", min: 0.05, max: 0.95, step: 0.05, value: cfg.alpha || 0.85 }, aL); const aV = h("b", {}, aL);
-    const itL = h("label", {}, bar, "Iteration "); const it = h("input", { type: "range", min: 0, max: 30, value: 30 }, itL); const itV = h("b", {}, itL);
-    const anim = button(bar, "Animate", "primary");
-    h("span", { class: "grow" }, bar); h("span", { class: "stepno" }, bar, "Click nodes to toggle seeds");
+    const aL = h("label", {}, bar, L.damping); const a = h("input", { type: "range", min: 0.05, max: 0.95, step: 0.05, value: cfg.alpha || 0.85 }, aL); const aV = h("b", {}, aL);
+    const itL = h("label", {}, bar, L.iteration); const it = h("input", { type: "range", min: 0, max: 30, value: 30 }, itL); const itV = h("b", {}, itL);
+    const anim = button(bar, L.animate, "primary");
+    h("span", { class: "grow" }, bar); h("span", { class: "stepno" }, bar, L.seedHint);
     let result;
     function run() { aV.textContent = (+a.value).toFixed(2); result = pagerank(G.nodes, G.edges, seeds, +a.value, 30, cfg.directed); draw(); }
     function draw() {
@@ -436,7 +494,7 @@
       G.place();
       const top = result.ids.map((id, i) => [id, r[i]]).sort((x, y) => y[1] - x[1]).slice(0, 4);
       const label = (id) => (G.byId[id].label || id);
-      setCaption(cap, (seeds.size ? "Personalized to " + [...seeds].map((s) => '<span class="viz-chip edge">' + label(s) + "</span>").join(" ") : "Uniform teleport (classic PageRank)") + ". Highest mass: " + top.map((x) => '<span class="viz-chip node">' + label(x[0]) + " " + fmt(x[1], 3) + "</span>").join(" "));
+      setCaption(cap, (seeds.size ? L.personalizedTo + [...seeds].map((s) => '<span class="viz-chip edge">' + label(s) + "</span>").join(" ") : L.uniform) + L.highestMass + top.map((x) => '<span class="viz-chip node">' + label(x[0]) + " " + fmt(x[1], 3) + "</span>").join(" "));
     }
     a.addEventListener("input", run); it.addEventListener("input", draw);
     anim.addEventListener("click", () => { let t = 0; it.value = 0; draw(); const tm = setInterval(() => { t++; it.value = t; draw(); if (t >= 30) clearInterval(tm); }, reduceMotion ? 1 : 120); });
@@ -491,8 +549,8 @@
       });
       G.edges.forEach((e) => { const same = s.comm[e.source] === s.comm[e.target]; const ec = s.comm[e.source] in palette ? groupColor(palette[s.comm[e.source]]) : "var(--muted)"; e._el.style.stroke = same ? "color-mix(in srgb, " + ec + " 70%, var(--rule))" : ""; e._el.style.strokeDasharray = same ? "" : "4 4"; });
       const k = Object.keys(labels).length;
-      const mv = s.moved != null ? "Pass " + s.pass + ": <strong>" + (G.byId[s.moved].label || s.moved) + "</strong> joins a neighbor's community because it raises modularity. " : "Start: every node is its own community. ";
-      setCaption(cap, mv + "Communities: <strong>" + k + "</strong>. Modularity Q = <strong>" + fmt(s.q, 3) + "</strong>." + (i === trace.length - 1 ? " No single move improves Q any more, so phase 1 ends here; Louvain would now collapse each community into a super-node and repeat." : ""));
+      const mv = s.moved != null ? L.louvainMove(s.pass, G.byId[s.moved].label || s.moved) : L.louvainStart;
+      setCaption(cap, mv + L.louvainStats(k, fmt(s.q, 3)) + (i === trace.length - 1 ? L.louvainEnd : ""));
     }
     player(el, trace.length, render, { interval: cfg.interval || 900 });
   };
@@ -521,9 +579,9 @@
     html = html.replace(/ (\d+)/g, (_, i) => tokens[+i]);
     text.innerHTML = html;
     text.querySelectorAll("mark").forEach((mk) => { mk.style.background = "transparent"; mk.style.color = "inherit"; mk.style.borderRadius = "3px"; mk.style.padding = "0 2px"; mk.style.transition = "background .3s"; });
-    const steps = [{ caption: cfg.intro || "The extractor reads the chunk. Step through to see each entity, then each relationship, get pulled out." }];
-    ents.forEach((e, i) => steps.push({ e: i, caption: 'Entity <span class="viz-chip node">' + e.name + "</span> type <strong>" + (e.type || "") + "</strong>" + (e.description ? ": " + e.description : "") }));
-    rels.forEach((r, i) => steps.push({ r: i, caption: 'Relationship <span class="viz-chip edge">' + r.source + " → " + r.label + " → " + r.target + "</span>" + (r.description ? " " + r.description : "") }));
+    const steps = [{ caption: cfg.intro || L.extractIntro }];
+    ents.forEach((e, i) => steps.push({ e: i, caption: L.entity(e.name, e.type || "", e.description) }));
+    rels.forEach((r, i) => steps.push({ r: i, caption: L.relationship(r.source, r.label, r.target, r.description) }));
     function render(i) {
       const shownE = new Set(), shownR = new Set();
       for (let k = 0; k <= i; k++) { if (steps[k].e != null) shownE.add(steps[k].e); if (steps[k].r != null) shownR.add(steps[k].r); }
@@ -540,7 +598,7 @@
   registry["map-reduce"] = function (el, cfg) {
     const { stage } = frame(el, cfg);
     const threshold = cfg.threshold == null ? 20 : cfg.threshold;
-    const q = h("div", { class: "viz-text" }, stage); q.innerHTML = "<strong>Question:</strong> " + escapeHtml(cfg.question || "");
+    const q = h("div", { class: "viz-text" }, stage); q.innerHTML = "<strong>" + L.question + "</strong> " + escapeHtml(cfg.question || "");
     const grid = h("div", { class: "viz-grid" }, stage); grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(190px, 1fr))";
     const cards = (cfg.communities || []).map((c) => {
       const d = h("div", {}, grid); d.style.cssText = "border:1px solid var(--rule);border-radius:8px;padding:10px;background:var(--paper);transition:opacity .3s, border-color .3s";
@@ -558,18 +616,18 @@
       const st = steps[i];
       cards.forEach((k) => {
         const mapped = i >= 1, filtered = i >= 2 && k.c.score < threshold;
-        k.sc.textContent = mapped ? "helpfulness: " + k.c.score + " / 100" : "helpfulness: ?";
+        k.sc.textContent = L.helpfulness(mapped ? k.c.score + " / 100" : "?");
         k.barFg.style.width = mapped ? k.c.score + "%" : "0%";
         k.barFg.style.background = filtered ? "var(--bad)" : "var(--node)";
         k.ans.textContent = mapped ? k.c.answer || "" : "";
         k.d.style.opacity = filtered ? 0.35 : 1;
       });
-      out.innerHTML = st === "reduce" ? "<strong>Reduce:</strong> " + escapeHtml(cfg.final || "") : "";
+      out.innerHTML = st === "reduce" ? "<strong>" + L.reduceLabel + "</strong> " + escapeHtml(cfg.final || "") : "";
       setCaption(cap, ({
-        shuffle: "Community reports (at one level of the hierarchy) are shuffled and packed into context-sized batches.",
-        map: "Map: each batch is sent to the LLM in parallel. It writes a partial answer and scores how helpful that batch is for the question.",
-        filter: "Filter: partial answers scoring below " + threshold + " are dropped, then the rest are sorted by score.",
-        reduce: "Reduce: the surviving partial answers are packed into one final prompt that synthesizes the global answer."
+        shuffle: L.mrShuffle,
+        map: L.mrMap,
+        filter: L.mrFilter(threshold),
+        reduce: L.mrReduce
       })[st]);
     }
     player(el, steps.length, render, { interval: 2400 });
@@ -594,10 +652,10 @@
         lists[nm].forEach((item, r) => { scores[item] = (scores[item] || 0) + 1 / (K + r + 1); const row = h("div", { class: "viz-sub" }, col); row.innerHTML = (r + 1) + ". " + escapeHtml(item); });
       });
       const fused = Object.entries(scores).sort((a, b) => b[1] - a[1]);
-      const col = h("div", {}, grid); h("div", { class: "viz-title" }, col, "Fused (RRF)").style.fontSize = ".85rem";
+      const col = h("div", {}, grid); h("div", { class: "viz-title" }, col, L.fused).style.fontSize = ".85rem";
       const mx = fused[0] ? fused[0][1] : 1;
       fused.forEach(([item, s], r) => { const row = h("div", {}, col); row.style.fontSize = ".82rem"; row.innerHTML = (r + 1) + ". " + escapeHtml(item) + ' <span class="viz-sub">' + fmt(s, 4) + "</span>"; const b = h("div", { class: "viz-bar" }, row); b.style.width = (100 * s / mx) + "%"; b.style.height = "4px"; });
-      setCaption(cap, "score(d) = Σ 1 / (k + rank). With k = " + K + ", " + (K < 10 ? "top positions dominate: whichever list ranks an item first nearly decides." : "ranks are flattened, so items that appear in several lists rise above one-list winners."));
+      setCaption(cap, L.rrfCaption(K, K < 10));
     }
     k.addEventListener("input", render); render();
   };
@@ -613,7 +671,7 @@
     function render() {
       const raw = sliders.map((s) => +s.value); const sum = raw.reduce((a, b) => a + b, 0) || 1;
       barWrap.innerHTML = "";
-      const rows = parts.map((p, i) => { const share = raw[i] / sum; const seg = h("div", {}, barWrap); seg.style.cssText = "width:" + share * 100 + "%;background:color-mix(in srgb," + groupColor(i + 1) + " 55%, var(--panel));display:flex;align-items:center;font-size:.75rem;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:0 4px;min-width:0;transition:width .2s"; seg.title = p.label; seg.textContent = share * 100 >= p.label.length * 1.1 ? p.label : ""; return p.label + ": <strong>" + Math.round(share * total).toLocaleString() + "</strong> tokens"; });
+      const rows = parts.map((p, i) => { const share = raw[i] / sum; const seg = h("div", {}, barWrap); seg.style.cssText = "width:" + share * 100 + "%;background:color-mix(in srgb," + groupColor(i + 1) + " 55%, var(--panel));display:flex;align-items:center;font-size:.75rem;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:0 4px;min-width:0;transition:width .2s"; seg.title = p.label; seg.textContent = share * 100 >= p.label.length * 1.1 ? p.label : ""; return p.label + ": <strong>" + Math.round(share * total).toLocaleString() + "</strong>" + L.tokens; });
       setCaption(cap, rows.join(" &nbsp; ") + (cfg.note ? "<br>" + cfg.note : ""));
     }
     render();
@@ -626,12 +684,12 @@
     const script = el.querySelector('script[type="application/json"]');
     let cfg = {};
     try { cfg = script ? JSON.parse(script.textContent) : {}; }
-    catch (e) { el.textContent = "Visualization config error: " + e.message; console.error(e, el); return; }
-    if (!fn) { el.textContent = "Unknown visualization: " + type; return; }
+    catch (e) { el.textContent = L.configError + e.message; console.error(e, el); return; }
+    if (!fn) { el.textContent = L.unknown + type; return; }
     el.dataset.mounted = "1";
-    try { fn(el, cfg, api); } catch (e) { console.error("viz " + type + " failed", e); el.textContent = "Visualization failed to load: " + e.message; }
+    try { fn(el, cfg, api); } catch (e) { console.error("viz " + type + " failed", e); el.textContent = L.failed + e.message; }
   }
-  const api = { svgEl, h, frame, controls, button, player, drawGraph, layoutGraph, groupColor, legend, pagerank, fmt, escapeHtml };
+  const api = { L, lang: LANG, svgEl, h, frame, controls, button, player, drawGraph, layoutGraph, groupColor, legend, pagerank, fmt, escapeHtml };
   window.GRFSViz = { register: (name, fn) => { registry[name] = fn; document.querySelectorAll('.viz[data-viz="' + name + '"]').forEach(mount); }, api, mountAll: () => document.querySelectorAll(".viz[data-viz]").forEach(mount) };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", window.GRFSViz.mountAll); else window.GRFSViz.mountAll();
 })();

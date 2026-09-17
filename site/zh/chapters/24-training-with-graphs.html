@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Training models with graphs | Graph RAG from Scratch</title>
+<meta name="description" content="When and how to train for GraphRAG: graph encoders and soft prompts, graph instruction tuning (GraphGPT, LLaGA, MuseGraph), trained retrievers, RL for graph construction and retrieval, distillation and synthetic data.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/24-training-with-graphs.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="24-training-with-graphs" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Training models with graphs</h1>
+  <p class="lede">Everything so far used models as they come, steered by prompts. This chapter covers the ways research and practice change the weights instead: graph encoders that feed soft prompts to an LLM, graph instruction tuning, trained retrievers, reinforcement learning for graph construction and agentic retrieval, and distillation. It ends with a practical question you will actually face: is training worth it for your system?</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Name the three reasons to train in a GraphRAG system (retrieval quality, graph understanding, cost) and match each to a technique</li>
+      <li>Explain how a graph encoder and projector turn a subgraph into soft-prompt vectors in an LLM's embedding space, and run a shape-level PyTorch sketch</li>
+      <li>Compare GraphGPT, LLaGA and MuseGraph on what they feed the LLM and which parameters they train</li>
+      <li>Describe how GFM-RAG trains a graph retriever and how Graph-R1 and AutoGraph-R1 use reinforcement learning, including what each rewards</li>
+      <li>Build an instruction-tuning dataset from the Kestrel graph and audit it for evaluation leakage</li>
+      <li>Decide between prompting, retriever training and LLM fine-tuning from data, budget and evaluation evidence</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why train at all?</h2>
+<p>Prompted GraphRAG goes a long way. You have built extraction, communities, local and global search, hybrid retrieval, context construction and graph reasoning without updating a single weight. Training enters when one of three problems is measured, not suspected:</p>
+<table>
+  <thead><tr><th>Problem</th><th>Kestrel symptom</th><th>Training options</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Retrieval quality</strong>: the right evidence does not reach the context</td><td>Context recall on multi-hop questions stays low after tuning fusion and prompts</td><td>Train a graph retriever (GNN-RAG, GFM-RAG), a reranker, or an RL-trained retrieval agent (Graph-R1)</td></tr>
+    <tr><td><strong>Graph understanding</strong>: the model misreads structure even when the evidence is present</td><td>Given the right path, the model still answers “Brightwater acquired Deepcast”</td><td>Graph encoders with soft prompts (G-Retriever), graph instruction tuning (GraphGPT, LLaGA, MuseGraph), reasoning-path tuning (RoG)</td></tr>
+    <tr><td><strong>Cost</strong>: a large model is doing work a small one could learn</td><td>Extraction or Text2Cypher on every document with a frontier model</td><td>Fine-tune small extractors or query generators on synthetic data (SynthCypher), distillation (DRAG), RL for graph construction (AutoGraph-R1)</td></tr>
+  </tbody>
+</table>
+<p>A useful first diagnostic separates the first two. Take questions the system gets wrong, put the gold evidence into the context by hand, and ask again. If answers become right, your problem is retrieval. If they stay wrong, it is understanding or generation. <a href="25-evaluation.html">Chapter 25</a> formalizes this with context recall and answer metrics.</p>
+
+<h2>Graph encoders and soft prompts</h2>
+
+<h3>The idea</h3>
+<p>An LLM reads a sequence of vectors: each input token id is looked up in an embedding table to produce a vector of dimension <em>d</em> (a few thousand for 7B-class models), and the transformer processes those vectors. Nothing forces every input vector to come from the table. A <em>soft prompt</em> is a set of vectors placed in the same sequence that do not correspond to any real token. They are produced by a trainable module and learned by gradient descent through a frozen LLM.</p>
+<p>For graphs the recipe has three parts:</p>
+<ol>
+  <li>A <strong>graph encoder</strong>, usually a graph neural network (GNN), computes a vector for each node by repeatedly mixing a node's features with its neighbors' (<a href="19-subgraph-gnn.html">Chapter 19</a> introduced GNNs). Node features typically start as text embeddings of node descriptions.</li>
+  <li>A <strong>projector</strong>, a linear layer or small MLP, maps graph vectors from the encoder's dimension into the LLM's embedding dimension. This is the alignment step: it teaches graph vectors to “speak” in a space the LLM already understands.</li>
+  <li>The projected vectors are <strong>concatenated</strong> with the embedded text tokens (instruction, question, often a textualized version of the same graph) and passed through the LLM. The loss is ordinary next-token cross-entropy on the answer tokens.</li>
+</ol>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "From a Kestrel subgraph to soft-prompt tokens",
+  "perRow": 3,
+  "stages": [
+    {"label": "Retrieve subgraph", "detail": "For “Why did Kestrel start Tern?”, retrieval returns 5 nodes: Marlow Dynamics, Deepcast, Kestrel Labs, Project Tern, Priya Nair, with their edges."},
+    {"label": "Node features", "detail": "Each node's description is embedded by a text encoder: a matrix of shape (5, 64) in our sketch, (nodes, 384 to 1024) in practice."},
+    {"label": "GNN encoder", "detail": "Two message-passing layers mix each node with its neighbors: shape (5, 128). Deepcast's vector now carries information about Marlow and Kestrel."},
+    {"label": "Pool and project", "detail": "Mean-pool to one graph vector (128), then an MLP projects it to k soft tokens in the LLM's space: shape (k, d_model). G-Retriever uses one graph token."},
+    {"label": "Concatenate", "detail": "Soft tokens are placed before the embedded instruction and question tokens: shape (1, k + n, d_model). Often a textualized graph is included as ordinary tokens too."},
+    {"label": "Frozen LLM and loss", "detail": "The LLM runs as usual. Cross-entropy on the answer tokens backpropagates through the frozen LLM into the projector and encoder, which are the only weights updated (optionally plus LoRA adapters)."}
+  ]
+}
+</script>
+</div>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="soft-title">
+      <title id="soft-title">Input sequence with graph soft tokens followed by text token embeddings, passing through a frozen LLM, with gradients flowing only to the projector and encoder</title>
+      <defs>
+        <marker id="soft-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <text class="d-text bold" x="10" y="16">Input sequence to the LLM, shape (1, k + n, d_model)</text>
+      <rect class="d-box comm" x="10" y="36" width="40" height="40" rx="4"/>
+      <rect class="d-box comm" x="54" y="36" width="40" height="40" rx="4"/>
+      <rect class="d-box comm" x="98" y="36" width="40" height="40" rx="4"/>
+      <rect class="d-box comm" x="142" y="36" width="40" height="40" rx="4"/>
+      <text class="d-text small" x="96" y="94" text-anchor="middle">k graph soft tokens</text>
+      <rect class="d-box" x="200" y="36" width="40" height="40" rx="4"/>
+      <text class="d-text mono" x="220" y="60" text-anchor="middle">Why</text>
+      <rect class="d-box" x="244" y="36" width="40" height="40" rx="4"/>
+      <text class="d-text mono" x="264" y="60" text-anchor="middle">did</text>
+      <rect class="d-box" x="288" y="36" width="56" height="40" rx="4"/>
+      <text class="d-text mono" x="316" y="60" text-anchor="middle">Kestrel</text>
+      <rect class="d-box" x="348" y="36" width="40" height="40" rx="4"/>
+      <text class="d-text mono" x="368" y="60" text-anchor="middle">...</text>
+      <text class="d-text small" x="294" y="94" text-anchor="middle">n embedded text tokens (frozen table)</text>
+
+      <rect class="d-box ghost" x="10" y="120" width="378" height="46" rx="6"/>
+      <text class="d-text bold" x="199" y="148" text-anchor="middle">Frozen LLM (no weight updates)</text>
+      <line class="d-line" x1="199" y1="100" x2="199" y2="118" marker-end="url(#soft-arrow)"/>
+      <rect class="d-box" x="10" y="190" width="378" height="40" rx="6"/>
+      <text class="d-text" x="199" y="215" text-anchor="middle">loss = cross-entropy on answer tokens</text>
+      <line class="d-line" x1="199" y1="166" x2="199" y2="188" marker-end="url(#soft-arrow)"/>
+
+      <rect class="d-box node" x="450" y="36" width="210" height="40" rx="6"/>
+      <text class="d-text bold" x="555" y="61" text-anchor="middle">Projector (trained)</text>
+      <rect class="d-box node" x="450" y="100" width="210" height="40" rx="6"/>
+      <text class="d-text bold" x="555" y="125" text-anchor="middle">GNN encoder (trained)</text>
+      <rect class="d-box" x="450" y="164" width="210" height="40" rx="6"/>
+      <text class="d-text" x="555" y="189" text-anchor="middle">Subgraph + node text</text>
+      <line class="d-line" x1="555" y1="164" x2="555" y2="142" marker-end="url(#soft-arrow)"/>
+      <line class="d-line" x1="555" y1="100" x2="555" y2="78" marker-end="url(#soft-arrow)"/>
+      <path class="d-line" d="M555,36 L555,28 L96,28 L96,34" marker-end="url(#soft-arrow)"/>
+      <path class="d-line hot dash" d="M388,210 C430,210 420,120 448,120" marker-end="url(#soft-arrow)"/>
+      <text class="d-text small" x="400" y="238">gradients flow back through the frozen LLM</text>
+    </svg>
+  </div>
+  <figcaption>Soft prompting with a graph. The LLM and its embedding table stay frozen; gradients from the answer loss pass through them to the projector and graph encoder. Swapping in LoRA adapters on the LLM is the common next step when the frozen model is not enough.</figcaption>
+</figure>
+
+<div class="callout paper">
+  <span class="callout-title">He et al., G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering (2024)</span>
+  <p>After retrieving a subgraph with prize-collecting Steiner tree optimization (<a href="19-subgraph-gnn.html">Chapter 19</a>), G-Retriever encodes it with a graph attention network, mean-pools the node vectors, and projects the result with an MLP into a single graph token in the LLM's embedding space. That token is concatenated with the text embeddings of the textualized subgraph and the question, and fed to a frozen LLM. Only the graph encoder and projector are trained; a variant adds LoRA fine-tuning of the LLM on top of the soft prompt.</p>
+</div>
+
+<h3>A runnable shape sketch</h3>
+<p>The code below is <strong>illustrative only</strong>. It needs <code>pip install torch</code> and nothing else: a random embedding table and a two-layer transformer stand in for the LLM so that you can check shapes and confirm which parameters receive gradients. No pretrained model is loaded and nothing useful is learned. To use a real LLM, you would replace <code>token_embedding</code> with the model's input embedding layer and pass <code>inputs_embeds</code> to its forward method.</p>
+<pre data-file="examples/soft_prompt.py"><code class="language-python">"""Illustrative only: a GNN encoder + projector that turns a subgraph into soft-prompt vectors.
+
+No pretrained LLM is loaded. A random embedding table and a tiny frozen transformer stand in
+for the LLM so you can check shapes and see which parameters receive gradients.
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def normalized_adjacency(edge_index: torch.Tensor, num_nodes: int) -&gt; torch.Tensor:
+    """D^-1/2 (A + I) D^-1/2 as a dense matrix (fine for subgraphs of a few hundred nodes)."""
+    A = torch.zeros(num_nodes, num_nodes)
+    A[edge_index[0], edge_index[1]] = 1.0
+    A[edge_index[1], edge_index[0]] = 1.0          # treat the subgraph as undirected
+    A = A + torch.eye(num_nodes)
+    d_inv_sqrt = A.sum(1).pow(-0.5)
+    return d_inv_sqrt[:, None] * A * d_inv_sqrt[None, :]
+
+class GCNEncoder(nn.Module):
+    def __init__(self, in_dim: int, hidden: int, layers: int = 2):
+        super().__init__()
+        dims = [in_dim] + [hidden] * layers
+        self.linears = nn.ModuleList(nn.Linear(a, b) for a, b in zip(dims, dims[1:]))
+
+    def forward(self, x: torch.Tensor, A_hat: torch.Tensor) -&gt; torch.Tensor:
+        for i, lin in enumerate(self.linears):
+            x = A_hat @ lin(x)                      # mix each node with its neighbors
+            if i &lt; len(self.linears) - 1:
+                x = F.relu(x)
+        return x                                    # (num_nodes, hidden)
+
+class GraphSoftPrompt(nn.Module):
+    """Subgraph -&gt; k soft tokens in the LLM's embedding space (G-Retriever uses k = 1 via mean pooling)."""
+
+    def __init__(self, in_dim: int, hidden: int, llm_dim: int, num_tokens: int = 4):
+        super().__init__()
+        self.encoder = GCNEncoder(in_dim, hidden)
+        self.num_tokens, self.llm_dim = num_tokens, llm_dim
+        self.projector = nn.Sequential(nn.Linear(hidden, llm_dim), nn.GELU(),
+                                       nn.Linear(llm_dim, llm_dim * num_tokens))
+
+    def forward(self, x, edge_index):
+        h = self.encoder(x, normalized_adjacency(edge_index, x.shape[0]))
+        pooled = h.mean(dim=0)                                    # (hidden,)
+        return self.projector(pooled).view(self.num_tokens, self.llm_dim)   # (k, llm_dim)
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    # A 5-node Kestrel subgraph: 0 Marlow, 1 Deepcast, 2 Kestrel Labs, 3 Project Tern, 4 Priya Nair
+    edge_index = torch.tensor([[0, 1, 2, 4, 4],
+                               [1, 2, 3, 3, 0]])
+    x = torch.randn(5, 64)                  # stand-in for text embeddings of node descriptions
+
+    VOCAB, LLM_DIM = 1000, 256
+    token_embedding = nn.Embedding(VOCAB, LLM_DIM)                 # the "LLM" input table
+    frozen_llm = nn.TransformerEncoder(nn.TransformerEncoderLayer(LLM_DIM, 4, batch_first=True), 2)
+    lm_head = nn.Linear(LLM_DIM, VOCAB)
+    for module in (token_embedding, frozen_llm, lm_head):
+        module.requires_grad_(False)                                # freeze the LLM
+
+    graph_prompt = GraphSoftPrompt(in_dim=64, hidden=128, llm_dim=LLM_DIM, num_tokens=4)
+    question_ids = torch.randint(0, VOCAB, (1, 12))                # "Why did Kestrel start Tern?" (fake ids)
+    soft = graph_prompt(x, edge_index)                             # (4, 256)
+    inputs = torch.cat([soft.unsqueeze(0), token_embedding(question_ids)], dim=1)   # (1, 16, 256)
+    logits = lm_head(frozen_llm(inputs))                           # (1, 16, 1000)
+    print("soft prompt", tuple(soft.shape), "inputs", tuple(inputs.shape), "logits", tuple(logits.shape))
+
+    target_ids = torch.randint(0, VOCAB, (1, 12))                  # fake answer tokens
+    loss = F.cross_entropy(logits[:, 4:].reshape(-1, VOCAB), target_ids.reshape(-1))
+    loss.backward()
+    trainable = sum(p.numel() for p in graph_prompt.parameters())
+    frozen = sum(p.numel() for m in (token_embedding, frozen_llm, lm_head) for p in m.parameters())
+    print(f"trainable {trainable:,}  frozen {frozen:,}  loss {loss.item():.3f}")
+    print("encoder grad:", graph_prompt.encoder.linears[0].weight.grad is not None,
+          " LLM grad:", lm_head.weight.grad is not None)</code></pre>
+<p>Running it prints:</p>
+<pre><code>soft prompt (4, 256) inputs (1, 16, 256) logits (1, 16, 1000)
+trainable 321,024  frozen 3,143,144  loss 6.901
+encoder grad: True  LLM grad: False</code></pre>
+<p>The trainable count is easy to verify by hand. Encoder: 64 × 128 + 128 = 8,320 and 128 × 128 + 128 = 16,512. Projector: 128 × 256 + 256 = 33,024 and 256 × 1,024 + 1,024 = 263,168, because the last layer emits 4 × 256 values. Total 321,024. The initial loss of 6.9 is ln(1000) ≈ 6.91 give or take the random initialization, which is what an untrained model over a 1,000-token vocabulary should give. With a real 7B model and <em>d</em> = 4,096, the same projector would have millions of parameters, still well under 1% of the LLM.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Soft prompts tie you to one model</span>
+  <p>A projector is trained against one LLM's embedding space. Change the LLM, even to a newer version of the same family, and the projector must be retrained. Soft prompts also require an open-weight model, since hosted APIs accept text, not embedding vectors. Weigh that against a textual serialization (<a href="22-context-construction.html">Chapter 22</a>), which works with any model today.</p>
+</div>
+
+<h2>Graph instruction tuning</h2>
+<p>Instruction tuning trains an LLM on (instruction, input, output) examples so it learns to follow a family of tasks. <em>Graph</em> instruction tuning makes graph structure part of the input, either as soft tokens or as a compact textual description, and trains on graph tasks such as node classification, link prediction and describing a node's neighborhood. Three influential designs differ mainly in how the graph enters the model and what is trained.</p>
+
+<h3>GraphGPT: align first, then tune in two stages</h3>
+<div class="callout paper">
+  <span class="callout-title">Tang et al., GraphGPT: Graph Instruction Tuning for Large Language Models (2024)</span>
+  <p>Published at SIGIR 2024. GraphGPT first performs <em>text-graph grounding</em>: contrastive learning that aligns a graph encoder's node representations with text encoder representations of the nodes' text. It then runs dual-stage instruction tuning. Stage 1 is self-supervised: a <em>graph matching</em> task shows the LLM graph tokens for a sampled subgraph and a shuffled list of node texts, and asks it to put the texts in the order that matches the graph tokens. Stage 2 is task-specific instruction tuning on tasks such as node classification and link prediction. In both stages the LLM and graph encoder stay frozen and only a lightweight alignment projector is trained. A <code>&lt;graph&gt;</code> placeholder in the prompt is replaced by the projected graph tokens. The authors also add chain-of-thought instruction data distilled from GPT-3.5 to improve the harder tasks.</p>
+</div>
+<p>The graph matching stage is the transferable idea. It creates supervision for free: any graph with node text yields unlimited training examples that force the projector to preserve which text belongs to which position in the structure. On Kestrel, a sampled neighborhood of Deepcast with the shuffled descriptions of Marlow Dynamics, Kestrel Labs and Project Tern is one example.</p>
+
+<h3>LLaGA: reorganize nodes into sequences, train only a projector</h3>
+<p>LLaGA (Large Language and Graph Assistant) avoids training a GNN at all. It turns each node's neighborhood into a fixed-length <em>sequence of node embeddings</em> using templates, projects each embedding with an MLP into the LLM's token space, and trains only that projector while the LLM stays frozen. Its <strong>neighborhood detail template</strong> builds a fixed-shape tree around the center node: sample a fixed number of neighbors at hop 1, a fixed number of neighbors of each of those at hop 2, fill missing slots with placeholder nodes, and read the tree level by level. Its <strong>hop-field overview template</strong> instead summarizes each hop with one averaged embedding, computed by parameter-free message passing over the text features.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "A LLaGA-style neighborhood detail template for Project Tern",
+  "subtitle": "Fan-out 3 at hop 1 and 3 at hop 2: always 1 + 3 + 9 = 13 slots",
+  "height": 400,
+  "nodes": [
+    {"id": "tern", "label": "Project Tern", "group": 2, "x": 50, "y": 10},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 18, "y": 42},
+    {"id": "priya", "label": "Priya Nair", "group": 3, "x": 50, "y": 42},
+    {"id": "jonas", "label": "Jonas Vehl", "group": 3, "x": 82, "y": 42},
+    {"id": "lena", "label": "Lena Park", "group": 3, "x": 6, "y": 80},
+    {"id": "council", "label": "City Council", "group": 1, "x": 24, "y": 90},
+    {"id": "brightwater", "label": "Brightwater", "group": 1, "x": 8, "y": 20},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 44, "y": 80},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 2, "x": 62, "y": 92},
+    {"id": "pad1", "label": "[PAD]", "group": 8, "x": 86, "y": 80},
+    {"id": "pad2", "label": "[PAD]", "group": 8, "x": 96, "y": 92}
+  ],
+  "edges": [
+    {"source": "tern", "target": "kestrel"},
+    {"source": "tern", "target": "priya"},
+    {"source": "tern", "target": "jonas"},
+    {"source": "kestrel", "target": "lena"},
+    {"source": "kestrel", "target": "priya"},
+    {"source": "kestrel", "target": "council"},
+    {"source": "kestrel", "target": "brightwater"},
+    {"source": "priya", "target": "marlow"},
+    {"source": "priya", "target": "sentinel"},
+    {"source": "jonas", "target": "kestrel"},
+    {"source": "jonas", "target": "pad1"},
+    {"source": "jonas", "target": "pad2"}
+  ],
+  "legend": {"1": "Organization", "2": "Project", "3": "Person", "8": "Placeholder"},
+  "steps": [
+    {"caption": "Slot 1 is the center node, <span class=\"viz-chip node\">Project Tern</span>. Every example for every node will have the same 13-slot shape, which is what lets a simple projector handle it.", "active": ["tern"]},
+    {"caption": "<strong>Hop 1</strong>, fan-out 3. Tern has exactly three neighbors in the typed Kestrel view, so slots 2 to 4 are Kestrel Labs, Priya Nair and Jonas Vehl.", "active": ["kestrel", "priya", "jonas"], "visited": ["tern"], "edges": ["tern>kestrel", "tern>priya", "tern>jonas"]},
+    {"caption": "<strong>Hop 2 under Kestrel Labs</strong>, slots 5 to 7. Kestrel has 10 neighbors besides Tern, so 3 are sampled at random: Lena Park, Priya Nair, City Council. Brightwater Capital was not sampled this time; a different seed gives a different tree.", "active": ["lena", "priya", "council"], "visited": ["tern", "kestrel"], "edges": ["kestrel>lena", "kestrel>priya", "kestrel>council"], "visitedEdges": ["tern>kestrel"]},
+    {"caption": "<strong>Hop 2 under Priya Nair</strong>, slots 8 to 10: Marlow Dynamics, Project Sentinel and Kestrel Labs. Nodes may repeat in the sequence; the tree records how they were reached.", "active": ["marlow", "sentinel", "kestrel"], "visited": ["tern", "priya"], "edges": ["priya>marlow", "priya>sentinel", "kestrel>priya"], "visitedEdges": ["tern>priya"]},
+    {"caption": "<strong>Hop 2 under Jonas Vehl</strong>, slots 11 to 13. Besides Tern he has only one neighbor, Kestrel Labs, so the two remaining slots are <span class=\"viz-chip\">[PAD]</span> placeholders.", "active": ["kestrel", "pad1", "pad2"], "visited": ["tern", "jonas"], "edges": ["jonas>kestrel", "jonas>pad1", "jonas>pad2"], "visitedEdges": ["tern>jonas"]},
+    {"caption": "Read level by level: Tern | Kestrel, Priya, Jonas | Lena, Priya, Council | Marlow, Sentinel, Kestrel | Kestrel, PAD, PAD. Each slot's node embedding goes through the projector and becomes one input token for the frozen LLM.", "active": ["tern"], "visited": ["kestrel", "priya", "jonas", "lena", "council", "marlow", "sentinel", "pad1", "pad2"], "visitedEdges": ["tern>kestrel", "tern>priya", "tern>jonas", "kestrel>lena", "kestrel>priya", "kestrel>council", "priya>marlow", "priya>sentinel", "jonas>kestrel", "jonas>pad1", "jonas>pad2"]}
+  ]
+}
+</script>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Chen et al., LLaGA: Large Language and Graph Assistant (2024)</span>
+  <p>LLaGA reorganizes graph nodes into structure-aware sequences with the neighborhood detail and hop-field overview templates, and maps them into the LLM's token embedding space with a versatile projector. The projector is the only trained component; the LLM (Vicuna-7B in the main experiments) is frozen, which the authors present as keeping the LLM's general-purpose abilities intact. It is trained on node classification, link prediction and node description, and reported strong results in both supervised and zero-shot settings.</p>
+</div>
+
+<p>Here is the template as code, together with a builder that turns the typed Kestrel graph into instruction-tuning examples. Each example stores the entities it involves, which is what makes a leakage-safe split possible.</p>
+<pre data-file="examples/instruct_data.py"><code class="language-python">import json, random
+from collections import defaultdict
+import networkx as nx
+
+PAD = "[PAD]"
+
+def neighborhood_sequence(G: nx.Graph, center: str, fanouts=(3, 3), seed: int = 0) -&gt; list[str]:
+    """LLaGA-style neighborhood detail template: a fixed-shape tree, flattened level by level."""
+    rng = random.Random(seed)
+    sequence, level = [center], [(center, None)]
+    for fanout in fanouts:
+        nxt = []
+        for node, parent in level:
+            if node == PAD:
+                nxt += [(PAD, None)] * fanout
+                continue
+            candidates = sorted(n for n in G.neighbors(node) if n != parent)
+            picked = rng.sample(candidates, min(fanout, len(candidates)))
+            nxt += [(n, node) for n in picked] + [(PAD, None)] * (fanout - len(picked))
+        sequence += [n for n, _ in nxt]
+        level = nxt
+    return sequence                 # length 1 + f1 + f1*f2, always the same
+
+def fact_sentence(u: str, rel: str, v: str) -&gt; str:
+    return f"{u} {rel.lower().replace('_', ' ')} {v}"
+
+def build_instruction_set(T: nx.MultiDiGraph, holdout_entities: set[str], seed: int = 0) -&gt; tuple[list, list]:
+    """Instruction-tuning examples from a typed graph, split so held-out entities never appear in training."""
+    rng = random.Random(seed)
+    U = nx.Graph(T)
+    examples = []
+    for node in T.nodes:
+        by_relation = defaultdict(list)
+        for _, v, rel in T.out_edges(node, keys=True):
+            by_relation[rel].append(v)
+        if by_relation:
+            rel = rng.choice(sorted(by_relation))
+            targets = sorted(by_relation[rel])              # every correct answer, not one of them
+            examples.append({"task": "relation", "entities": [node, *targets],
+                             "instruction": f"Using the graph around {node}, list every entity that {node} "
+                                            f"is linked to by the relation {rel}.",
+                             "graph": neighborhood_sequence(U, node, (3, 2), seed),
+                             "output": ", ".join(targets)})
+        examples.append({"task": "node_type", "entities": [node],
+                         "instruction": f"What type of entity is {node}?",
+                         "graph": neighborhood_sequence(U, node, (3, 2), seed),
+                         "output": T.nodes[node]["type"]})
+    for s, v, rel in T.edges(keys=True):          # two-hop paths become "why/how connected" questions
+        for _, w, rel2 in T.out_edges(v, keys=True):
+            if w != s:
+                examples.append({"task": "path", "entities": [s, v, w],
+                                 "instruction": f"How is {s} connected to {w}?",
+                                 "graph": neighborhood_sequence(U, s, (3, 2), seed),
+                                 "output": f"{fact_sentence(s, rel, v)}; {fact_sentence(v, rel2, w)}."})
+    nodes = sorted(T.nodes)
+    for _ in range(len(examples) // 10):          # about 10% negatives: unconnected pairs -&gt; abstain
+        a, b = rng.sample(nodes, 2)
+        if not U.has_edge(a, b) and nx.has_path(U, a, b) and nx.shortest_path_length(U, a, b) &gt; 3:
+            examples.append({"task": "abstain", "entities": [a, b],
+                             "instruction": f"How is {a} connected to {b}?",
+                             "graph": neighborhood_sequence(U, a, (3, 2), seed),
+                             "output": "The graph does not show a connection within three hops."})
+    train = [e for e in examples if not holdout_entities &amp; set(e["entities"])]
+    test = [e for e in examples if holdout_entities &amp; set(e["entities"])]
+    return train, test</code></pre>
+<p>With <code>holdout_entities={"Project Tern"}</code> the builder produces 64 training and 13 test examples. The training set has 35 path questions, 16 node-type questions, 11 relation questions and 2 abstention questions. Two things in that output deserve attention before you train on it, and Exercise 24.4 digs into both: several test path questions are near-duplicates of training ones, and the <code>graph</code> sequences of 24 training examples still contain Project Tern.</p>
+
+<h3>MuseGraph: compact text descriptions and distilled reasoning</h3>
+<div class="callout paper">
+  <span class="callout-title">Tan et al., MuseGraph: Graph-oriented Instruction Tuning of Large Language Models for Generic Graph Mining (2024)</span>
+  <p>MuseGraph takes the textual route. It writes a <em>compact graph description</em> that fits a node's most informative neighborhood into a limited token budget, builds chain-of-thought instruction packages whose reasoning is distilled from GPT-4, and applies a graph-aware instruction tuning strategy across several tasks and datasets designed to avoid catastrophic forgetting of the LLM's general generation ability. A single tuned model handles multiple graph mining tasks. The journal version appears in IEEE TPAMI.</p>
+</div>
+
+<table>
+  <thead><tr><th></th><th>G-Retriever</th><th>GraphGPT</th><th>LLaGA</th><th>MuseGraph</th></tr></thead>
+  <tbody>
+    <tr><td>Graph enters the LLM as</td><td>1 soft token + textualized subgraph</td><td>Projected graph tokens at a placeholder</td><td>Template sequence of projected node embeddings</td><td>Compact text description</td></tr>
+    <tr><td>Graph encoder</td><td>GNN (GAT), trained</td><td>Pretrained, text-aligned, frozen</td><td>None (text encoder + templates)</td><td>None</td></tr>
+    <tr><td>LLM weights</td><td>Frozen (LoRA variant)</td><td>Frozen</td><td>Frozen</td><td>Tuned</td></tr>
+    <tr><td>Trained</td><td>Encoder + projector</td><td>Projector</td><td>Projector</td><td>LLM</td></tr>
+    <tr><td>Works with hosted APIs</td><td>No</td><td>No</td><td>No</td><td>The inputs yes; the tuning needs open weights</td></tr>
+    <tr><td>Main target</td><td>Graph QA with retrieval</td><td>Node and link tasks, generalization</td><td>Node and link tasks, zero-shot</td><td>Many graph mining tasks in one model</td></tr>
+  </tbody>
+</table>
+
+<h2>Training retrievers</h2>
+<p>For GraphRAG specifically, the most practical training target is often the retriever, not the LLM. A retriever is small, its training signal (which documents support which answer) is cheap to produce, and a better retriever helps every downstream model, including hosted ones. <a href="19-subgraph-gnn.html">Chapter 19</a> introduced GNN retrievers; here is how GFM-RAG trains one to generalize.</p>
+<div class="callout paper">
+  <span class="callout-title">Luo et al., GFM-RAG: Graph Foundation Model for Retrieval Augmented Generation (2025)</span>
+  <p>GFM-RAG builds a KG index over documents and uses a query-dependent GNN of about 8M parameters as a retriever. Training has two stages. First, self-supervised KG completion: mask the head or tail of sampled triples to make queries like (e, r, ?) and train the GNN to score the right entity. Second, supervised document retrieval: natural-language questions from multi-hop QA datasets, with target entities taken from the labeled supporting documents. Entity scores are converted into document scores with an inverse-frequency weighting so that popular entities count less. The model was trained on 60 knowledge graphs with over 14M triples and 700k documents and is intended to transfer to new datasets without dataset-specific fine-tuning.</p>
+</div>
+<p>The training labels map directly onto the Kestrel data: <code>data/questions.jsonl</code> lists <code>supporting_docs</code> for each question, and the graph's <code>source_ids</code> tell you which entities those documents contain. That is exactly the (question, target entities) supervision GFM-RAG's second stage uses, just at a scale of 23 questions instead of hundreds of thousands, which is why the paper's approach is to pretrain broadly and transfer rather than train per corpus.</p>
+
+<h2>Reinforcement learning for graph retrieval and construction</h2>
+<p>Supervised training needs the right intermediate steps as labels: the right documents, the right path. Reinforcement learning (RL) needs only a score for the outcome, which is attractive for multi-step retrieval where many different sequences of queries can reach a correct answer. Recent GraphRAG work uses <em>Group Relative Policy Optimization</em> (GRPO): for each question, sample a group of rollouts, score each, and push the policy toward rollouts that scored above the group's average. No separate value model is needed.</p>
+
+<h3>Graph-R1: an RL-trained retrieval agent</h3>
+<div class="callout paper">
+  <span class="callout-title">Luo et al., Graph-R1: Towards Agentic GraphRAG Framework via End-to-end Reinforcement Learning (2025)</span>
+  <p>Graph-R1 builds a lightweight knowledge hypergraph with an LLM extractor that captures n-ary facts, then models retrieval as a multi-turn interaction between an agent and that hypergraph environment. In each turn the agent thinks, generates a query, retrieves knowledge, and eventually answers. It is trained end to end with GRPO. The outcome reward is −1 plus a format reward (0.5 per well-formed step, capped at 1.0) plus an answer reward, token-level F1 against the gold answer, and the answer term counts only when the format reward has reached its cap. The authors report GRPO training more stably than REINFORCE++ and PPO on this task and reaching the highest F1. The paper was accepted at ICML 2026.</p>
+</div>
+<p>The reward is simple enough to write down, which is a good way to understand what the agent is being taught:</p>
+<pre data-file="examples/rl_reward.py"><code class="language-python">import re
+from minigraphrag.evaluation import token_f1
+
+STEP = re.compile(r"&lt;think&gt;.+?&lt;/think&gt;\s*&lt;query&gt;.+?&lt;/query&gt;", re.S)
+ANSWER = re.compile(r"&lt;answer&gt;(.+?)&lt;/answer&gt;", re.S)
+
+def rollout_reward(rollout: str, gold: str, max_steps: int = 4) -&gt; float:
+    """Outcome reward for one multi-turn retrieval episode, in the spirit of Graph-R1.
+
+    format part: 0.5 per well-formed think+query step, capped at 1.0
+    answer part: token F1 against the gold answer, only if the episode ends in a well-formed answer
+    """
+    steps = len(STEP.findall(rollout))
+    format_reward = min(1.0, 0.5 * min(steps, max_steps))
+    m = ANSWER.search(rollout)
+    if m is None:
+        return format_reward - 1.0                     # no answer at all: clearly worse than any answer
+    return format_reward + token_f1(m.group(1), gold)
+
+def group_advantages(rewards: list[float]) -&gt; list[float]:
+    """GRPO-style advantages: compare each rollout with the others sampled for the same question."""
+    mean = sum(rewards) / len(rewards)
+    std = (sum((r - mean) ** 2 for r in rewards) / len(rewards)) ** 0.5
+    return [(r - mean) / (std + 1e-6) for r in rewards]</code></pre>
+<p>Three rollouts for “Who acquired Deepcast?” with gold answer “Marlow Dynamics”: two well-formed steps ending in the right answer score 1.0 + 1.0 = <strong>2.0</strong>; one step ending in “Brightwater Capital” scores 0.5 + 0 = <strong>0.5</strong>; three steps and no answer score 1.0 − 1.0 = <strong>0.0</strong>. The group mean is 0.833 and the standard deviation 0.850, so the advantages are +1.37, −0.39 and −0.98. The update makes the first behavior more likely and the other two less likely. The reward never checks whether the retrieved facts support the answer. A policy can learn to guess well, so pair RL with the post-retrieval verification from <a href="23-graph-reasoning.html">Chapter 23</a> when you evaluate it.</p>
+
+<div class="callout note">
+  <span class="callout-title">This sketch is not Graph-R1's code</span>
+  <p><code>rollout_reward</code> keeps the shape of the paper's reward (a format part capped at 1.0 and an F1 answer part) but simplifies it: the paper subtracts a constant 1 and adds the F1 term only when the format part is at its cap, and the tags, the no-answer penalty and the step limit here are our own choices. Read the paper and its released code before reproducing results.</p>
+</div>
+
+<h3>AutoGraph-R1: train the graph builder, not the answerer</h3>
+<p>Every chapter so far built the graph with a fixed extraction prompt and hoped it would be useful for retrieval. AutoGraph-R1 closes that loop.</p>
+<div class="callout paper">
+  <span class="callout-title">Tsang et al., AutoGraph-R1: End-to-End Reinforcement Learning for Knowledge Graph Construction (2025)</span>
+  <p>AutoGraph-R1 frames knowledge graph construction as policy learning: an LLM constructor (Qwen2.5 at 3B and 7B) generates the graph, and it is optimized with GRPO for how useful that graph is in a RAG pipeline whose retriever and answer generator stay frozen. It uses two task-aware rewards. The <em>knowledge-carrying</em> reward treats the graph as a carrier of knowledge and is binary: an LLM judge decides whether the gold answer can be deduced from the retrieved triples. The <em>knowledge-indexing</em> reward treats the graph as an index to passages and measures recall of the gold passages among the top-k passages retrieved through the graph.</p>
+</div>
+<p>For Kestrel, the knowledge-carrying reward would ask: given the triples retrieved for “Why did Kestrel start Tern?”, can a judge deduce the gold answer? A constructor that never emits the Marlow ACQUIRED Deepcast triple would earn 0 on that question, however clean its other triples are. That is a sharper training signal than any extraction precision metric, because it measures the graph by what it is for.</p>
+
+<h2>Distillation and synthetic data</h2>
+<p>Many practical wins come from moving work from a large model to a small one, and from generating training data you do not have.</p>
+<div class="callout paper">
+  <span class="callout-title">Chen et al., DRAG: Distilling RAG for SLMs from LLMs to Transfer Knowledge and Mitigate Hallucination via Evidence and Graph-based Distillation (2025)</span>
+  <p>Published at ACL 2025. DRAG distills <em>without</em> updating the small model's weights; the authors describe it as fine-tuning-free. A large teacher model generates several evidence passages for a question, the passages are ranked by combining embedding similarity with the teacher's own relevance ranking, and the teacher extracts entity-relationship triples from the top evidence to form a small knowledge graph. The small student model then answers with the question plus the filtered evidence, the triples, or both, in its prompt. The teacher supplies evidence and structure, never the answer.</p>
+</div>
+<p>DRAG is a useful reminder that “distillation” in RAG can mean moving knowledge through the context rather than through gradients. The graph is the compact, checkable interface between the two models.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Tiwari et al., Auto-Cypher: Improving LLMs on Cypher generation via LLM-supervised generation-verification framework (2025)</span>
+  <p>Published at NAACL 2025. The pipeline generates synthetic Text2Cypher training data and verifies each query's correctness during generation with an “LLM-as-database-filler” step, which populates a database so the generated query can be checked. The resulting SynthCypher dataset has 29.8k instances across many domains and complexity levels, and fine-tuning open models of around 7B to 8B parameters on it improved them by up to 40% on the Text2Cypher test split and 30% on a graph-database adaptation of SPIDER.</p>
+</div>
+<p>The generate-and-verify pattern applies to every GraphRAG component you might want a small model for. For Kestrel extraction: have a large model extract from each chunk, keep only records whose names appear in the chunk and whose relationships survive a support check (<a href="23-graph-reasoning.html">Chapter 23</a>), and fine-tune a small extractor on what remains. For Text2Cypher (<a href="20-text2cypher.html">Chapter 20</a>): generate questions from graph patterns, generate Cypher, execute it, and keep pairs whose results match the pattern's known answer.</p>
+
+<h2>When is training worth it?</h2>
+
+<h3>A decision checklist</h3>
+<ol>
+  <li><strong>Have you exhausted cheaper fixes?</strong> Better chunking, extraction prompts, entity resolution, hybrid fusion, context construction and routing each move quality more per hour than training, until they stop moving it. Keep the before and after numbers.</li>
+  <li><strong>Is the failure retrieval or understanding?</strong> Use the gold-evidence diagnostic from the start of this chapter. Retrieval failures point to retriever training or RL retrieval; understanding failures point to instruction tuning or a stronger model.</li>
+  <li><strong>Can a stronger prompted model fix it?</strong> If a frontier model with your context solves it, you may just need that model, or distillation of it into a cheaper one.</li>
+  <li><strong>Do you control the model?</strong> Soft prompts and projectors need open weights. If you are on hosted APIs, your training options are retrievers, rerankers, extractors and query generators around the model.</li>
+  <li><strong>Can you afford to maintain it?</strong> Trained components must be retrained when the base model, the schema or the corpus drifts. Budget for retraining and monitoring as well as the first training run.</li>
+</ol>
+
+<h3>Data requirements</h3>
+<table>
+  <thead><tr><th>What you train</th><th>Typical labels</th><th>Rough scale to start</th><th>Where labels come from</th></tr></thead>
+  <tbody>
+    <tr><td>Reranker or retriever fine-tune</td><td>(question, relevant passage) pairs with hard negatives</td><td>Hundreds to a few thousand pairs</td><td><code>supporting_docs</code>, click logs, synthetic questions per passage</td></tr>
+    <tr><td>Small extractor</td><td>(chunk, verified records)</td><td>Hundreds to thousands of chunks</td><td>Large-model extraction filtered by checks</td></tr>
+    <tr><td>Text2Cypher model</td><td>(question, schema, verified query)</td><td>Thousands; SynthCypher is 29.8k</td><td>Generate-and-execute pipelines</td></tr>
+    <tr><td>Projector for soft prompts</td><td>(graph, instruction, answer)</td><td>Thousands or more; self-supervised tasks help</td><td>Graph matching, node description, templated QA</td></tr>
+    <tr><td>RL retrieval agent or constructor</td><td>Questions with gold answers (and gold passages)</td><td>Thousands of questions, many rollouts each</td><td>QA datasets, synthetic QA over your graph</td></tr>
+  </tbody>
+</table>
+<p>These are orders of magnitude to plan around, not thresholds from any single paper. Twenty-three Kestrel questions are enough to <em>evaluate</em> a change, never enough to <em>train</em> one; for that you would generate data, as the builder above does.</p>
+
+<h3>Evaluation leakage</h3>
+<p>Graph data leaks in ways that text data does not, because examples share nodes and edges. The common channels:</p>
+<ul>
+  <li><strong>Shared entities.</strong> Splitting examples at random puts “How is Deepcast connected to Project Tern?” in test and “How is Deepcast connected to Kestrel Labs?” in train. The model learns the Deepcast neighborhood from training data and appears to reason at test time.</li>
+  <li><strong>Structure in the input.</strong> Even when a held-out entity is not a training label, it can appear inside training inputs, such as neighborhood sequences or textualized subgraphs. The model sees the test answer's edges during training.</li>
+  <li><strong>Transductive graphs.</strong> If the graph used at training time contains the test questions' edges, the model can memorize them. Hold out edges (or whole documents, re-extracting the graph without them) rather than just questions.</li>
+  <li><strong>Synthetic questions from the evaluation corpus.</strong> Generating training data from the same documents you evaluate on measures memorization of those documents. Generate from a disjoint corpus, or at least disjoint documents.</li>
+  <li><strong>Pretraining contamination.</strong> Public benchmarks may be in the base model's pretraining data. Fictional corpora like Kestrel exist partly to avoid this.</li>
+</ul>
+<pre data-file="examples/leakage.py"><code class="language-python">from collections import defaultdict
+
+def leakage_report(train: list[dict], test: list[dict]) -&gt; dict:
+    """Three ways test information sneaks into training data."""
+    train_instructions = {e["instruction"] for e in train}
+    test_entities = {x for e in test for x in e["entities"]}
+    report = {
+        "same_instruction": sum(e["instruction"] in train_instructions for e in test),
+        "test_entity_in_train_graph": sum(any(x in e["graph"] for x in test_entities) for e in train),
+        "test_answer_in_train_output": sum(any(e["output"] in t["output"] for t in train) for e in test),
+    }
+    answers = defaultdict(set)
+    for e in train + test:
+        answers[e["instruction"]].add(e["output"])
+    report["conflicting_labels"] = sum(len(v) &gt; 1 for v in answers.values())
+    return report</code></pre>
+<p>On the Kestrel builder's default split this reports 0 identical instructions, but 63 training examples whose graph input contains at least one entity that appears in a test example, 1 test answer that also appears inside a training output, and 6 instructions with conflicting labels. With 17 entities, almost every entity is within two hops of every other, so an entity-level holdout barely holds anything out. On a graph this small, the honest evaluation is on a different corpus.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 24.1 <span class="level">Warm-up</span></h4>
+  <p>A graph encoder produces node vectors of size 1,024. You want k = 8 soft tokens for an LLM with embedding dimension 4,096. (a) How many parameters does a single linear projector from the pooled graph vector to all 8 tokens have? (b) How many does a per-token design have, where each of the 8 slot embeddings (as in LLaGA) is projected separately by one shared linear layer? (c) Why might you pick the second despite its different output?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) The layer maps 1,024 inputs to 8 × 4,096 = 32,768 outputs: 1,024 × 32,768 weights + 32,768 biases = 33,554,432 + 32,768 = <strong>33,587,200</strong>.</p>
+    <p>(b) A shared 1,024 → 4,096 layer applied to each slot: 1,024 × 4,096 + 4,096 = 4,194,304 + 4,096 = <strong>4,198,400</strong>, eight times fewer, and the count does not change if you use more slots.</p>
+    <p>(c) The shared per-slot projector keeps one token per node, so the LLM can attend to individual nodes (Deepcast's slot separately from Marlow's) instead of one pooled summary, it scales to any template length without new parameters, and it has far fewer parameters to fit, which matters when training data is limited. The pooled design is cheaper at inference (8 tokens regardless of graph size) but compresses the whole subgraph into a few vectors.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 24.2 <span class="level">Warm-up</span></h4>
+  <p>Using the typed Kestrel view, write by hand a LLaGA-style neighborhood detail sequence for <strong>Deepcast</strong> with fan-out 2 at hop 1 and 2 at hop 2, excluding the parent when sampling children and choosing neighbors in alphabetical order instead of at random. How many slots are there and how many are placeholders?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Deepcast's neighbors in the typed view: Kestrel Labs (SUPPLIED) and Marlow Dynamics (ACQUIRED). Hop 1: Kestrel Labs, Marlow Dynamics.</p>
+    <p>Hop 2 under Kestrel Labs, excluding Deepcast, alphabetically: Brightwater Capital, Dr. Mira Okafor. Under Marlow Dynamics, excluding Deepcast: Kestrel Labs (COMPETES_WITH), Priya Nair (FORMERLY_WORKED_AT).</p>
+    <p>Sequence: <code>Deepcast | Kestrel Labs, Marlow Dynamics | Brightwater Capital, Dr. Mira Okafor | Kestrel Labs, Priya Nair</code>. Slots: 1 + 2 + 4 = <strong>7</strong>, with <strong>0</strong> placeholders, because both hop-1 nodes have at least two other neighbors. Alphabetical choice is deterministic but biased (names early in the alphabet always win); random sampling with several seeds, as <code>neighborhood_sequence</code> does, acts as data augmentation during training.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 24.3 <span class="level">Core</span></h4>
+  <p>Modify the PyTorch sketch so that each node becomes its own soft token (no pooling), with a shared projector, and add a binary mask so padded nodes are dropped. Print the shapes for the 5-node Kestrel subgraph, and confirm the loss is still computed only on the question and answer positions.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import torch, torch.nn as nn, torch.nn.functional as F
+from examples.soft_prompt import GCNEncoder, normalized_adjacency
+
+class NodeSoftPrompt(nn.Module):
+    """One soft token per real node: (num_nodes, in_dim) -&gt; (num_real_nodes, llm_dim)."""
+    def __init__(self, in_dim, hidden, llm_dim):
+        super().__init__()
+        self.encoder = GCNEncoder(in_dim, hidden)
+        self.projector = nn.Sequential(nn.Linear(hidden, llm_dim), nn.GELU(), nn.Linear(llm_dim, llm_dim))
+
+    def forward(self, x, edge_index, keep):              # keep: bool tensor (num_nodes,)
+        h = self.encoder(x, normalized_adjacency(edge_index, x.shape[0]))
+        return self.projector(h[keep])                     # shared weights for every node
+
+torch.manual_seed(0)
+edge_index = torch.tensor([[0, 1, 2, 4, 4], [1, 2, 3, 3, 0]])
+x = torch.randn(5, 64)
+keep = torch.tensor([True, True, True, True, True])      # set False for [PAD] slots
+VOCAB, D = 1000, 256
+emb = nn.Embedding(VOCAB, D).requires_grad_(False)
+llm = nn.TransformerEncoder(nn.TransformerEncoderLayer(D, 4, batch_first=True), 2).requires_grad_(False)
+head = nn.Linear(D, VOCAB).requires_grad_(False)
+
+prompt = NodeSoftPrompt(64, 128, D)
+soft = prompt(x, edge_index, keep)                         # (5, 256)
+q = torch.randint(0, VOCAB, (1, 12))
+inputs = torch.cat([soft.unsqueeze(0), emb(q)], dim=1)     # (1, 17, 256)
+logits = head(llm(inputs))                                 # (1, 17, 1000)
+k = soft.shape[0]
+loss = F.cross_entropy(logits[:, k:].reshape(-1, VOCAB), torch.randint(0, VOCAB, (12,)))
+loss.backward()
+print(tuple(soft.shape), tuple(inputs.shape), tuple(logits.shape))
+print(prompt.projector[0].weight.grad is not None, head.weight.grad is None)</code></pre>
+    <p>Prints <code>(5, 256) (1, 17, 256) (1, 17, 1000)</code> and <code>True True</code>. The slice <code>logits[:, k:]</code> starts after the soft tokens, so no loss is computed on positions that have no target token. With padding, <code>k</code> is the number of kept nodes, which varies per example; in a batch you would pad to a common length and pass an attention mask to the LLM, the usual approach with Hugging Face models via <code>inputs_embeds</code> and <code>attention_mask</code>. For a real causal LM you would also shift targets by one position.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 24.4 <span class="level">Core</span></h4>
+  <p>Run <code>build_instruction_set</code> and <code>leakage_report</code> on the typed Kestrel view with Project Tern held out. (a) Explain each of the four numbers. (b) Fix the conflicting labels. (c) Propose a split that actually tests generalization to unseen structure, and say what it costs.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) <strong>same_instruction = 0</strong>: no test instruction is literally in training. <strong>test_entity_in_train_graph = 63</strong>: test examples involve Project Tern plus the entities on paths to it (Kestrel Labs, Priya Nair, Jonas Vehl and more), and those appear in almost every training neighborhood sequence. This counts overlap with <em>any</em> test entity, so it overstates the direct leak; counting only Project Tern gives 24 training examples whose <code>graph</code> contains it. <strong>test_answer_in_train_output = 1</strong>: one short test answer (such as an entity type) also occurs inside some training output. <strong>conflicting_labels = 6</strong>: the path generator emits one example per two-hop path, so “How is Dr. Mira Okafor connected to Project Tern?” appears twice, once through CO_FOUNDED and once through CEO_OF, with different outputs.</p>
+    <p>(b) Merge outputs per instruction before splitting:</p>
+    <pre><code class="language-python">from collections import defaultdict
+
+def merge_by_instruction(examples):
+    merged = {}
+    outputs = defaultdict(list)
+    for e in examples:
+        key = e["instruction"]
+        merged.setdefault(key, {**e, "entities": list(e["entities"])})
+        if e["output"] not in outputs[key]:
+            outputs[key].append(e["output"])
+        merged[key]["entities"] = sorted(set(merged[key]["entities"]) | set(e["entities"]))
+    for key, e in merged.items():
+        e["output"] = " Also: ".join(outputs[key])       # every valid path is part of the answer
+    return list(merged.values())</code></pre>
+    <p>(c) Hold out <em>structure</em>: remove a connected region (for example the Tern facts and every document that mentions Tern), rebuild the graph without it for training inputs, and evaluate on questions whose answers need the removed edges given at test time as input. Better still for a corpus this small, train on one synthetic company world and test on another with a different schema instance. The cost is that the training graph is smaller and less representative, and you must re-run extraction per split, but only then does a score measure reading the graph rather than remembering it.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 24.5 <span class="level">Stretch</span></h4>
+  <p>Your team runs Kestrel-style GraphRAG on 200k internal documents with a hosted LLM. Answers are wrong on about 30% of multi-hop questions. Putting gold evidence into the context fixes two thirds of those. Extraction with the hosted model costs more than all query traffic. Write a one-page training plan: what you train first, the data, the evaluation, and what would make you stop.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Diagnosis.</strong> Two thirds of multi-hop failures are retrieval (gold evidence fixes them); one third is understanding or generation. Extraction cost dominates. The hosted LLM rules out soft prompts and projector tuning.</p>
+    <p><strong>First: a retrieval fix, starting with no training.</strong> Re-check hybrid fusion weights and routing (Chapter 21), and add path-based retrieval for the path route. Only if context recall on a 200-question labeled set is still low, fine-tune a cross-encoder reranker on (question, supporting passage) pairs with hard negatives mined from your current retriever's misses, then consider a GNN retriever in the style of GFM-RAG, starting from a pretrained model rather than training from scratch. Data: a few hundred real labeled questions for evaluation, plus several thousand synthetic questions generated from documents <em>not</em> in the evaluation set for training.</p>
+    <p><strong>Second: a small extractor to cut cost.</strong> Run the hosted model on a stratified sample of a few thousand chunks, filter records with name-in-chunk and support checks, and fine-tune an open 7B-class model. Evaluate extraction precision and recall against a hand-labeled sample, and then the number that decides it, end-to-end answer quality and context recall with the new graph, in the spirit of AutoGraph-R1's utility-based rewards. Consider RL for the constructor only after the supervised extractor plateaus.</p>
+    <p><strong>Leave the understanding third to the model for now.</strong> Try a stronger hosted model or Chapter 23's verification on those questions; revisit instruction tuning only with open weights and thousands of examples.</p>
+    <p><strong>Evaluation.</strong> Fixed held-out question set drawn from documents excluded from all synthetic training data; report context recall, answer accuracy (LLM judge plus spot checks), citation support, cost per 1,000 queries and indexing cost. <strong>Stop</strong> if the reranker does not raise context recall by a margin larger than the run-to-run noise on the held-out set, if the small extractor lowers end-to-end accuracy even while its extraction F1 looks acceptable, or if maintenance (retraining on model or schema changes) is projected to cost more than the savings.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In soft prompting with a graph encoder and a frozen LLM, where do gradients change weights?</p>
+  <ol>
+    <li>Only in the LLM's embedding table</li>
+    <li data-correct>In the projector and, if it is trainable, the graph encoder; they pass through the frozen LLM without updating it</li>
+    <li>Nowhere; soft prompts are computed without training</li>
+    <li>In the LLM's attention layers only</li>
+  </ol>
+  <div class="explain">Freezing means the LLM's parameters get no updates, but backpropagation still flows through its computations to the trainable modules that produced the soft tokens.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the purpose of GraphGPT's self-supervised graph matching stage?</p>
+  <ol>
+    <li>To fine-tune the LLM's weights on node classification</li>
+    <li>To build a KG-Trie for constrained decoding</li>
+    <li>To generate chain-of-thought explanations</li>
+    <li data-correct>To align graph tokens with node text without labels, by asking the model to order shuffled node texts to match the graph</li>
+  </ol>
+  <div class="explain">Graph matching creates free supervision from any graph with node text, teaching the projector to preserve which text belongs where in the structure, before task-specific tuning.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does LLaGA's neighborhood detail template pad with placeholder nodes?</p>
+  <ol>
+    <li data-correct>So every node yields a sequence of the same shape, which a simple projector and fixed prompt layout can handle</li>
+    <li>To hide sensitive nodes from the LLM</li>
+    <li>To mark nodes that failed entity resolution</li>
+    <li>To make the sequence longer and improve accuracy</li>
+  </ol>
+  <div class="explain">A fixed fan-out per hop gives a fixed-length, level-ordered sequence. Nodes with too few neighbors get placeholders to keep the shape.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What does AutoGraph-R1's knowledge-indexing reward measure?</p>
+  <ol>
+    <li>Whether an LLM judge can deduce the answer from retrieved triples</li>
+    <li>The number of triples the constructor extracts</li>
+    <li data-correct>Recall of the gold passages among the top-k passages retrieved through the constructed graph</li>
+    <li>Token F1 of the generated answer</li>
+  </ol>
+  <div class="explain">The indexing reward treats the graph as an index to passages. The judge-based deducibility check is the other, knowledge-carrying reward.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">How does DRAG transfer capability from a large model to a small one?</p>
+  <ol>
+    <li>By fine-tuning the small model on the large model's answers</li>
+    <li>By training a projector between their embedding spaces</li>
+    <li>By RL with the large model as reward model</li>
+    <li data-correct>By having the large model generate ranked evidence and a small knowledge graph that are put into the small model's prompt</li>
+  </ol>
+  <div class="explain">DRAG leaves the student's weights unchanged. The teacher supplies evidence and triples, not answers, and the student reasons over them in context.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Examples are split at random into train and test. Test asks “How is Deepcast connected to Project Tern?” and train contains neighborhood sequences with Deepcast, Kestrel Labs and Project Tern. What is the main risk?</p>
+  <ol>
+    <li>The test set is too small</li>
+    <li data-correct>The model memorizes the shared neighborhood during training, so test accuracy overstates its ability to read unseen graphs</li>
+    <li>The instruction templates differ between train and test</li>
+    <li>Placeholder nodes confuse the model</li>
+  </ol>
+  <div class="explain">Graph examples share nodes and edges. Hold out structure (edges, documents, or whole graphs), because question-only splits leak graph patterns.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I fine-tune my LLM on my knowledge graph instead of doing retrieval?</summary>
+  <div><p>Usually not for facts. Fine-tuning is an unreliable way to add specific, changing facts: the model may not recall them, cannot cite them, and must be retrained when they change. Retrieval keeps facts updatable and citable. Fine-tuning is better at teaching <em>skills</em>, such as reading a serialization format, planning relation paths, extracting in your schema or writing Cypher, which is exactly what the methods in this chapter train.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is LoRA enough, or do I need full fine-tuning?</summary>
+  <div><p>For the skill-oriented tasks above, parameter-efficient methods like LoRA are the usual starting point: far less memory, easy to swap per task, and often close to full fine-tuning in quality on narrow tasks. Full fine-tuning is rarely justified for a GraphRAG component. If LoRA underperforms, check data quality and quantity before scaling the method.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I use these graph-LLM models with the minigraphrag pipeline?</summary>
+  <div><p>Partly. The <code>LLM</code> protocol in <code>minigraphrag</code> is text in, text out, so a model that needs soft-prompt tensors does not plug in directly; you would wrap it in a class whose <code>complete</code> method builds the graph input itself. Trained retrievers and rerankers fit more easily: they produce rankings, which <code>reciprocal_rank_fusion</code> and the context builders already consume.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does RL training need a lot of compute?</summary>
+  <div><p>More than supervised fine-tuning of the same model, because every training question needs a group of full multi-turn rollouts, each with retrieval calls, plus reward computation that may itself call an LLM judge (as AutoGraph-R1's knowledge-carrying reward does). The published systems train models in the 3B to 7B range. Before attempting it, make sure a supervised or prompted baseline has plateaued and your reward cannot be gamed by formatting tricks.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I know a gain comes from the graph?</summary>
+  <div><p>Run the ablation: give the prompted baseline the same information the trained model saw, for example the same few-shot examples or the same textualized graph, and compare on a held-out split with structure held out. Report variance across seeds. Many reported graph-LLM gains shrink when the text-only baseline is given an equally good serialization, which is itself a reason to invest in Chapter 22 first.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a training readiness report for Kestrel GraphRAG</h3>
+  <p>Produce the evidence you would need before approving any training work, and one small, honest training experiment.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>The gold-evidence diagnostic on all canonical questions: which failures are retrieval and which are understanding</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An instruction dataset from the typed Kestrel view with merged labels, a leakage report, and a structure-level holdout</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The PyTorch soft-prompt sketch extended to per-node tokens with masking (Exercise 24.3), with shape tests</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A reward function for a retrieval agent over your index, tested on at least five hand-written rollouts, with a note on how it could be gamed</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A one-page recommendation: what to train first, or why not to train, with the numbers that support it</span></li>
+  </ul>
+  <p><strong>Done when</strong> a colleague could read your report and decide whether to fund training without asking you a single question about the data.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Train only for a measured problem: retrieval quality, graph understanding, or cost. The gold-evidence test tells retrieval problems from understanding problems.</li>
+    <li>Graph encoders plus projectors turn subgraphs into soft tokens in an LLM's embedding space; usually only the projector (and encoder) is trained, and the result is tied to one open-weight LLM.</li>
+    <li>GraphGPT aligns graph and text then tunes a projector in two stages; LLaGA uses fixed node-sequence templates and trains only a projector; MuseGraph tunes the LLM on compact text descriptions with distilled reasoning.</li>
+    <li>Trained retrievers (GFM-RAG) and RL-trained agents (Graph-R1) target retrieval; AutoGraph-R1 trains the graph constructor on how useful its graphs are for RAG.</li>
+    <li>Distillation can move knowledge through context (DRAG), and generate-and-verify pipelines (SynthCypher) produce training data for small specialist models.</li>
+    <li>Graph examples share structure, so hold out edges, documents or whole graphs; question-only splits often measure memorization.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>He, X. et al. <a href="https://arxiv.org/abs/2402.07630">G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering</a>. <span class="venue">arXiv 2402.07630, 2024</span></li>
+  <li>Tang, J. et al. <a href="https://arxiv.org/abs/2310.13023">GraphGPT: Graph Instruction Tuning for Large Language Models</a>. <span class="venue">SIGIR 2024; arXiv 2310.13023</span></li>
+  <li>Chen, R. et al. <a href="https://arxiv.org/abs/2402.08170">LLaGA: Large Language and Graph Assistant</a>. <span class="venue">arXiv 2402.08170, 2024</span></li>
+  <li>Tan, Y. et al. <a href="https://arxiv.org/abs/2403.04780">MuseGraph: Graph-oriented Instruction Tuning of Large Language Models for Generic Graph Mining</a>. <span class="venue">IEEE TPAMI 48(1), 2026; arXiv 2403.04780</span></li>
+  <li>Luo, L. et al. <a href="https://arxiv.org/abs/2502.01113">GFM-RAG: Graph Foundation Model for Retrieval Augmented Generation</a>. <span class="venue">arXiv 2502.01113, 2025</span></li>
+  <li>Luo, H. et al. <a href="https://arxiv.org/abs/2507.21892">Graph-R1: Towards Agentic GraphRAG Framework via End-to-end Reinforcement Learning</a>. <span class="venue">ICML 2026; arXiv 2507.21892</span></li>
+  <li>Tsang, H. T. et al. <a href="https://arxiv.org/abs/2510.15339">AutoGraph-R1: End-to-End Reinforcement Learning for Knowledge Graph Construction</a>. <span class="venue">arXiv 2510.15339, 2025</span></li>
+  <li>Chen, J. et al. <a href="https://arxiv.org/abs/2506.01954">DRAG: Distilling RAG for SLMs from LLMs to Transfer Knowledge and Mitigate Hallucination via Evidence and Graph-based Distillation</a>. <span class="venue">ACL 2025; arXiv 2506.01954</span></li>
+  <li>Tiwari, A. et al. <a href="https://arxiv.org/abs/2412.12612">Auto-Cypher (SynthCypher): Improving LLMs on Cypher generation via LLM-supervised generation-verification framework</a>. <span class="venue">NAACL 2025; arXiv 2412.12612</span></li>
+  <li>Luo, L. et al. <a href="https://arxiv.org/abs/2310.01061">Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning</a>. <span class="venue">ICLR 2024; arXiv 2310.01061</span></li>
+  <li>Mavromatis, C. and Karypis, G. <a href="https://arxiv.org/abs/2405.20139">GNN-RAG: Graph Neural Retrieval for Large Language Model Reasoning</a>. <span class="venue">arXiv 2405.20139, 2024</span></li>
+  <li>Shao, Z. et al. <a href="https://arxiv.org/abs/2402.03300">DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models</a> (introduces GRPO). <span class="venue">arXiv 2402.03300, 2024</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

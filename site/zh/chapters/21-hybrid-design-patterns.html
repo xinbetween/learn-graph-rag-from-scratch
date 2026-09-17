@@ -1,0 +1,1120 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hybrid retrieval and seven Graph RAG designs | Graph RAG from Scratch</title>
+<meta name="description" content="Combine BM25, dense vectors and graph retrieval with reciprocal rank fusion and reranking, then apply seven reusable Graph RAG design patterns.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/21-hybrid-design-patterns.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="21-hybrid-design-patterns" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Hybrid retrieval and seven Graph RAG designs</h1>
+  <p class="lede">No single retriever wins on every question. This chapter builds the hybrid layer that production systems actually ship: BM25 from scratch, dense and graph rankings, reciprocal rank fusion, reranking and query routing. Then it walks through seven reusable Graph RAG designs, each tied to the Kestrel Labs graph and a short code sketch.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Compute BM25 scores by hand and explain what <code>k1</code> and <code>b</code> control</li>
+      <li>Fuse keyword, dense and graph rankings with reciprocal rank fusion, and say why it beats naive score normalization</li>
+      <li>Add a cross-encoder or graph-aware reranker and estimate what it costs</li>
+      <li>Route a question to local, path, global or Text2Cypher retrieval</li>
+      <li>Apply seven Graph RAG designs (neighborhood expansion, metapaths, subgraph assembly, temporal windows, hybrid rerankers, panels and provenance) and name the pitfall of each</li>
+      <li>Combine a metapath and a time window into one event-centered retrieval on the Kestrel graph</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why one retriever is not enough</h2>
+<p>By now you have built several retrievers. <a href="02-vector-rag.html">Vector RAG</a> ranks chunks by embedding similarity. <a href="14-local-search.html">Local search</a> anchors on entities and fans out. <a href="17-ppr-hipporag.html">Personalized PageRank</a> spreads relevance through the graph. <a href="15-global-search.html">Global search</a> map-reduces community reports. <a href="20-text2cypher.html">Text2Cypher</a> turns a question into a database query. Each was motivated by a question the previous one got wrong.</p>
+<p>In production you rarely get to pick one, because users do not announce what kind of question they are asking. Look at how differently the Kestrel questions fail:</p>
+
+<table>
+  <thead><tr><th>Question</th><th>What makes it hard</th><th>Retriever that tends to win</th></tr></thead>
+  <tbody>
+    <tr><td>“What did the Deepcast letter say about the second quarter?”</td><td>An exact phrase and a rare name</td><td>BM25: exact term matching on “Deepcast” and “quarter”</td></tr>
+    <tr><td>“Which sonar vendor was bought by a defense company?”</td><td>No names at all; the corpus says “acquired” and “Marlow Dynamics”</td><td>Dense vectors: paraphrase matching</td></tr>
+    <tr><td>“Why did Kestrel Labs start Project Tern?”</td><td>The answer spans three documents joined by entities</td><td>Graph: paths and PPR through Deepcast and Marlow Dynamics</td></tr>
+    <tr><td>“What are the main themes in this corpus?”</td><td>No single chunk contains the answer</td><td>Global search over community reports</td></tr>
+    <tr><td>“How many organizations has Kestrel Labs contracted with?”</td><td>Counting over typed records</td><td>Text2Cypher on the property graph</td></tr>
+  </tbody>
+</table>
+
+<p>A hybrid retrieval layer has three jobs: run more than one retriever, merge their rankings into one list, and spend a more expensive model on the short list that survives. An optional fourth job, routing, decides which retrievers to run at all.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="hy-arch-title">
+      <title id="hy-arch-title">Hybrid retrieval architecture: router, four retrievers, fusion, reranking and generation</title>
+      <defs>
+        <marker id="hy-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box" x="8" y="122" width="96" height="50" rx="6"/>
+      <text class="d-text bold" x="56" y="152" text-anchor="middle">Question</text>
+      <rect class="d-box comm" x="130" y="122" width="96" height="50" rx="6"/>
+      <text class="d-text bold" x="178" y="145" text-anchor="middle">Router</text>
+      <text class="d-text small" x="178" y="161" text-anchor="middle">which retrievers?</text>
+      <line class="d-line" x1="104" y1="147" x2="128" y2="147" marker-end="url(#hy-arrow)"/>
+
+      <rect class="d-box node" x="262" y="20" width="132" height="46" rx="6"/>
+      <text class="d-text bold" x="328" y="40" text-anchor="middle">BM25</text>
+      <text class="d-text small" x="328" y="56" text-anchor="middle">exact terms, rare names</text>
+      <rect class="d-box node" x="262" y="84" width="132" height="46" rx="6"/>
+      <text class="d-text bold" x="328" y="104" text-anchor="middle">Dense vectors</text>
+      <text class="d-text small" x="328" y="120" text-anchor="middle">paraphrases</text>
+      <rect class="d-box node" x="262" y="148" width="132" height="46" rx="6"/>
+      <text class="d-text bold" x="328" y="168" text-anchor="middle">Graph (PPR, paths)</text>
+      <text class="d-text small" x="328" y="184" text-anchor="middle">multi-hop links</text>
+      <rect class="d-box ghost" x="262" y="212" width="132" height="46" rx="6"/>
+      <text class="d-text bold" x="328" y="232" text-anchor="middle">Text2Cypher</text>
+      <text class="d-text small" x="328" y="248" text-anchor="middle">counts, filters</text>
+      <line class="d-line" x1="226" y1="140" x2="260" y2="44" marker-end="url(#hy-arrow)"/>
+      <line class="d-line" x1="226" y1="144" x2="260" y2="108" marker-end="url(#hy-arrow)"/>
+      <line class="d-line" x1="226" y1="152" x2="260" y2="170" marker-end="url(#hy-arrow)"/>
+      <line class="d-line dash" x1="226" y1="158" x2="260" y2="234" marker-end="url(#hy-arrow)"/>
+
+      <rect class="d-box edge" x="428" y="84" width="104" height="110" rx="6"/>
+      <text class="d-text bold" x="480" y="126" text-anchor="middle">RRF fusion</text>
+      <text class="d-text small" x="480" y="144" text-anchor="middle">ranks, not</text>
+      <text class="d-text small" x="480" y="158" text-anchor="middle">scores</text>
+      <line class="d-line" x1="394" y1="43" x2="426" y2="100" marker-end="url(#hy-arrow)"/>
+      <line class="d-line" x1="394" y1="107" x2="426" y2="125" marker-end="url(#hy-arrow)"/>
+      <line class="d-line" x1="394" y1="171" x2="426" y2="160" marker-end="url(#hy-arrow)"/>
+
+      <rect class="d-box edge" x="566" y="84" width="106" height="50" rx="6"/>
+      <text class="d-text bold" x="619" y="106" text-anchor="middle">Rerank</text>
+      <text class="d-text small" x="619" y="122" text-anchor="middle">top 20 to 50</text>
+      <line class="d-line" x1="532" y1="109" x2="564" y2="109" marker-end="url(#hy-arrow)"/>
+      <rect class="d-box" x="566" y="170" width="106" height="50" rx="6"/>
+      <text class="d-text bold" x="619" y="192" text-anchor="middle">Context</text>
+      <text class="d-text small" x="619" y="208" text-anchor="middle">and answer</text>
+      <line class="d-line" x1="619" y1="134" x2="619" y2="168" marker-end="url(#hy-arrow)"/>
+      <line class="d-line dash" x1="394" y1="235" x2="564" y2="200" marker-end="url(#hy-arrow)"/>
+      <text class="d-text small" x="430" y="262">query results skip fusion</text>
+    </svg>
+  </div>
+  <figcaption>The hybrid layer. Retrievers that return ranked passages are fused by rank; Text2Cypher returns exact records that go straight into the context. The reranker sees only the short list, which is what makes an expensive model affordable.</figcaption>
+</figure>
+
+<h2>BM25 from scratch</h2>
+<p>Dense embeddings are good at meaning and bad at identity. An embedding of “Deepcast” sits close to “sonar supplier”, which helps with paraphrases and hurts when the user typed the exact name and wants that name. Keyword retrieval is the opposite. BM25 (“Best Match 25”; the number is a version label from the Okapi retrieval system at City University London) is still the default keyword ranker in Lucene, Elasticsearch and OpenSearch because it is cheap, needs no training and is hard to beat on exact-term queries.</p>
+
+<h3>Three intuitions</h3>
+<ul>
+  <li><strong>Rare terms matter more.</strong> A match on “supplied”, which appears in one passage, says more than a match on “Kestrel”, which appears everywhere. That is inverse document frequency (IDF).</li>
+  <li><strong>Repetition helps, with diminishing returns.</strong> A passage that says “sonar” twice is probably more about sonar than one that says it once, but the tenth mention adds almost nothing. That is term-frequency saturation, controlled by <code>k1</code>.</li>
+  <li><strong>Long passages match everything a little.</strong> A term hit in a short passage is stronger evidence than the same hit in a long one. That is length normalization, controlled by <code>b</code>.</li>
+</ul>
+
+<h3>The formula</h3>
+<p>For a query <em>q</em> with terms <em>t</em>, a document <em>d</em> of length |<em>d</em>| tokens, average document length <em>avgdl</em>, and term frequency <em>f</em>(<em>t</em>, <em>d</em>):</p>
+<pre><code>score(d, q) = Σ over t in q of   IDF(t) · f(t,d) · (k1 + 1) / ( f(t,d) + k1 · (1 − b + b · |d| / avgdl) )
+
+IDF(t) = ln( (N − n(t) + 0.5) / (n(t) + 0.5) + 1 )</code></pre>
+<p>Here <em>N</em> is the number of documents and <em>n</em>(<em>t</em>) the number that contain <em>t</em>. The “+1” inside the logarithm is the Lucene variant: it keeps IDF positive even for a term that appears in most documents, where the classic Robertson–Spärck Jones form goes negative. Typical settings are <code>k1</code> between 1.2 and 2.0 and <code>b</code> = 0.75. <code>minigraphrag</code> defaults to <code>k1 = 1.5</code>.</p>
+
+<h3>Worked numbers on five Kestrel passages</h3>
+<p>Take five short passages, tokenized with <code>simple_tokenize</code> from <code>minigraphrag/embeddings.py</code> (lowercase, stopwords removed, a crude plural strip):</p>
+<table>
+  <thead><tr><th>id</th><th>Passage</th><th>Tokens |d|</th></tr></thead>
+  <tbody>
+    <tr><td>d1</td><td>Marlow Dynamics acquired Deepcast, the sonar maker, in April 2025.</td><td>8</td></tr>
+    <tr><td>d2</td><td>Deepcast supplied sonar arrays to Kestrel Labs from 2022 until Marlow ended outside contracts.</td><td>12</td></tr>
+    <tr><td>d3</td><td>Project Tern is a new sonar module that Kestrel built to replace the Deepcast sonar in Sentinel drones.</td><td>12</td></tr>
+    <tr><td>d4</td><td>Sentinel drones detected the Halden Reef bleaching event in August 2024.</td><td>9</td></tr>
+    <tr><td>d5</td><td>Brightwater Capital led the Kestrel Labs funding round, and Lena Park joined the board.</td><td>11</td></tr>
+  </tbody>
+</table>
+<p><em>N</em> = 5 and <em>avgdl</em> = (8 + 12 + 12 + 9 + 11) / 5 = 10.4. The query “Who supplied sonar to Kestrel?” tokenizes to <code>supplied</code>, <code>sonar</code>, <code>kestrel</code> (“who” and “to” are stopwords).</p>
+<ol>
+  <li><strong>IDF.</strong> “supplied” is in 1 passage: ln((5 − 1 + 0.5)/(1 + 0.5) + 1) = ln(4) = <strong>1.386</strong>. “sonar” is in 3 passages (d1, d2, d3): ln(2.5/3.5 + 1) = ln(1.714) = <strong>0.539</strong>. “kestrel” is also in 3 (d2, d3, d5): <strong>0.539</strong>.</li>
+  <li><strong>Length factor for d2.</strong> <code>k1</code> · (1 − b + b · 12/10.4) = 1.5 × (0.25 + 0.865) = 1.673.</li>
+  <li><strong>Saturated term frequency for one hit in d2.</strong> 1 × 2.5 / (1 + 1.673) = <strong>0.935</strong>.</li>
+  <li><strong>Score of d2.</strong> 1.386 × 0.935 + 0.539 × 0.935 + 0.539 × 0.935 = 1.297 + 0.504 + 0.504 = <strong>2.305</strong>.</li>
+  <li><strong>Score of d3.</strong> “sonar” appears twice: 2 × 2.5 / (2 + 1.673) = 1.361, times 0.539 = 0.734. Plus “kestrel” once: 0.504. Total <strong>1.238</strong>.</li>
+  <li><strong>d1</strong> (8 tokens, shorter than average) gets a smaller length factor, 1.5 × (0.25 + 0.75 × 0.769) = 1.240, so its single “sonar” hit is worth 0.539 × 2.5/2.240 = <strong>0.601</strong>. <strong>d5</strong> scores 0.525 for “kestrel”. <strong>d4</strong> scores 0.</li>
+</ol>
+<p>The ranking is d2 (2.305), d3 (1.238), d1 (0.601), d5 (0.525). Two lessons hide in these numbers. First, the one rare term “supplied” contributes more than half of d2's score. Second, d3 mentions “sonar” twice but gets only 1.361 rather than 2 × 0.935 = 1.870 for it: that is saturation.</p>
+
+<div class="callout tip">
+  <span class="callout-title">What the knobs do, in numbers</span>
+  <p>Setting <code>b = 0</code> switches length normalization off: d2 rises to 2.464 and d1 drops to 0.539, because the short passage no longer gets a bonus. Pushing <code>k1</code> toward 0 makes BM25 binary: d1, d2 and d3 all score exactly 0.539 for the query “sonar”, since two mentions count the same as one. Large <code>k1</code> (say 3) lets repetition count for longer before saturating.</p>
+</div>
+
+<p>Here is the whole ranker as it ships in <code>minigraphrag</code>. Everything is vectorized over documents with NumPy, but it is the formula above line for line.</p>
+<pre data-file="minigraphrag/search/bm25.py"><code class="language-python">from ..embeddings import simple_tokenize
+
+
+def tokenize(text: str) -&gt; list[str]:
+    return simple_tokenize(text)
+
+
+class BM25:
+    def __init__(self, documents: list[str], k1: float = 1.5, b: float = 0.75,
+                 tokenizer: Callable[[str], list[str]] = tokenize):
+        self.k1, self.b, self.tokenizer = k1, b, tokenizer
+        self.doc_tfs = [Counter(tokenizer(d)) for d in documents]
+        self.doc_lens = np.array([sum(tf.values()) for tf in self.doc_tfs], dtype=float)
+        self.avgdl = float(self.doc_lens.mean()) if len(documents) else 0.0
+        df = Counter(t for tf in self.doc_tfs for t in tf)
+        n = len(documents)
+        # The +1 inside the log keeps IDF positive even for terms in most documents.
+        self.idf = {t: math.log((n - f + 0.5) / (f + 0.5) + 1) for t, f in df.items()}
+
+    def get_scores(self, query: str) -&gt; np.ndarray:
+        scores = np.zeros(len(self.doc_tfs))
+        for term in set(self.tokenizer(query)):
+            if term not in self.idf:
+                continue
+            tf = np.array([d.get(term, 0) for d in self.doc_tfs], dtype=float)
+            norm = self.k1 * (1 - self.b + self.b * self.doc_lens / (self.avgdl or 1))
+            scores += self.idf[term] * tf * (self.k1 + 1) / (tf + norm)
+        return scores
+
+    def search(self, query: str, top_k: int = 5) -&gt; list[tuple[int, float]]:
+        """(document index, score) pairs, best first; zero-score documents are omitted."""
+        scores = self.get_scores(query)
+        order = np.argsort(-scores, kind="stable")[:top_k]
+        return [(int(i), float(scores[i])) for i in order if scores[i] &gt; 0]</code></pre>
+
+<div class="callout note">
+  <span class="callout-title">Tokenization decides what BM25 can match</span>
+  <p><code>simple_tokenize</code> turns “Dynamics” into “dynamic” and “Series” into “serie”, and it has no idea that “Kestrel's” and “Kestrel” are the same word beyond stripping punctuation. Whatever you choose, use the same tokenizer for documents and queries. For identifier-heavy corpora (part numbers, ticket ids) keep a second field with no stemming at all.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Robertson and Zaragoza, The Probabilistic Relevance Framework: BM25 and Beyond (2009)</span>
+  <p>This survey derives BM25 from a probabilistic model of relevance and explains the saturation and length-normalization components as approximations to that model. It also covers BM25F, which weights fields such as title and body separately: a useful idea when your text units carry a document title or section heading.</p>
+</div>
+
+<h2>Dense and graph rankings</h2>
+<p>For fusion, every retriever only needs to produce a ranked list of the same kind of item. In <code>minigraphrag</code> that item is a text unit id, which keeps citations simple.</p>
+<ul>
+  <li><strong>Dense</strong>: embed the question with <code>index.embedder</code>, then <code>index.text_unit_store.search(vec, k=20)</code> returns <code>(id, cosine, metadata)</code> tuples. It catches “sonar vendor bought by a defense company” without any shared keywords.</li>
+  <li><strong>Graph</strong>: <code>link_query_to_nodes</code> maps the question to seed entities, <code>personalized_pagerank</code> spreads mass through the entity graph, and <code>rank_passages</code> sums node mass over the text units each entity was extracted from (<a href="17-ppr-hipporag.html">Chapter 17</a>). It surfaces the Marlow acquisition article for “Why did Kestrel start Tern?” even though that article never mentions Tern.</li>
+</ul>
+<p>Graph retrieval can rank more than passages. Local search ranks entities and relationships, global search ranks community reports, and path retrieval ranks paths. You can fuse those too, as long as each list contains comparable items. Mixing passages and entities in one fused list works poorly because their “goodness” is not on the same scale; give each kind its own section of the context instead (<a href="22-context-construction.html">Chapter 22</a>).</p>
+
+<h2>Fusing rankings</h2>
+<p>You now have three ranked lists for the same question, and they have to become one.</p>
+
+<h3>Why adding scores fails</h3>
+<p>BM25 scores are unbounded and depend on the query: 2.3 for our three-term query, perhaps 11 for a longer one. Cosine similarities from a sentence embedder cluster in a narrow band like 0.35 to 0.45. PPR masses are probabilities that sum to 1 across the whole graph. Adding them lets BM25 dominate for no principled reason.</p>
+<p>The usual patch is min-max normalization per list, then a weighted sum (called CombSUM in the information retrieval literature):</p>
+<pre data-file="examples/score_fusion.py"><code class="language-python">def min_max(scores: dict[str, float]) -&gt; dict[str, float]:
+    lo, hi = min(scores.values()), max(scores.values())
+    return {d: (s - lo) / (hi - lo) if hi &gt; lo else 1.0 for d, s in scores.items()}
+
+def combsum(runs: dict[str, dict[str, float]], weights: dict[str, float]) -&gt; list[tuple[str, float]]:
+    """Normalize each retriever's scores to [0, 1], then add them with weights (CombSUM)."""
+    fused: dict[str, float] = {}
+    for name, scores in runs.items():
+        for doc, s in min_max(scores).items():
+            fused[doc] = fused.get(doc, 0.0) + weights.get(name, 1.0) * s
+    return sorted(fused.items(), key=lambda x: -x[1])</code></pre>
+<p>Normalization has its own failure. Suppose BM25 gives passages a, b, c scores 2.3, 1.2, 0.6 and the dense retriever gives them 0.39, 0.40, 0.41. The dense retriever is saying “these are all about equally relevant.” Min-max stretches that 0.02 spread to the full 0-to-1 range, so c jumps from last to a tie with a (both 1.0), overriding a clear BM25 preference on the strength of noise. Z-score normalization has the same problem with short lists, and both are sensitive to a single outlier score.</p>
+
+<h3>Reciprocal rank fusion</h3>
+<p>Reciprocal rank fusion (RRF) throws scores away and uses only positions. Each list votes for each item with a weight that decays with rank:</p>
+<pre><code>RRF(d) = Σ over retrievers r of   w_r / (k + rank_r(d))        rank starts at 1; items missing from a list contribute 0</code></pre>
+<p>Because only ranks matter, RRF is immune to score scale, needs no training data and has one parameter, <code>k</code>.</p>
+
+<h3>Why k is about 60</h3>
+<p><code>k</code> controls how much being first is worth compared with being present. With <code>k = 0</code>, rank 1 earns 1.0 and rank 2 earns 0.5: the top of any single list dominates. With <code>k = 60</code>, rank 1 earns 1/61 = 0.01639 and rank 2 earns 1/62 = 0.01613, only 1.6% less, while rank 10 still earns 1/70 = 0.01429. Presence in several lists now counts for much more than exact position within one.</p>
+<p>Work through three lists: BM25 ranks A, C, B; dense ranks B, D, C; graph ranks E, F, C. Item C is never first but appears in all three lists.</p>
+<table>
+  <thead><tr><th>Item</th><th>k = 0</th><th>k = 60</th></tr></thead>
+  <tbody>
+    <tr><td>A (BM25 rank 1)</td><td>1/1 = 1.000</td><td>1/61 = 0.0164</td></tr>
+    <tr><td>B (BM25 rank 3, dense rank 1)</td><td>1/3 + 1/1 = <strong>1.333</strong></td><td>1/63 + 1/61 = 0.0323</td></tr>
+    <tr><td>C (ranks 2, 3, 3)</td><td>1/2 + 1/3 + 1/3 = 1.167</td><td>1/62 + 1/63 + 1/63 = <strong>0.0479</strong></td></tr>
+  </tbody>
+</table>
+<p>At <code>k = 0</code>, B wins because one retriever loved it. At <code>k = 60</code>, C wins because all three retrievers found it. The value 60 comes from the original RRF paper, where it was fixed after pilot experiments and worked well across collections; it is also the default constant in Elasticsearch's RRF and in several other search engines. Treat 60 as a good default rather than a law; the script in Exercise 21.3 makes sweeping it a one-line change.</p>
+
+<div class="viz" data-viz="rrf">
+<script type="application/json">
+{
+  "title": "Fusing three rankings for “Why did Kestrel Labs start Project Tern?”",
+  "subtitle": "Illustrative rankings of corpus documents. Drag k and watch the fused order change.",
+  "lists": {
+    "BM25": ["09 Tern engineering blog", "08 Board memo on supply", "12 Leadership interview", "03 Deepcast supply deal"],
+    "Dense": ["09 Tern engineering blog", "12 Leadership interview", "05 Priya Nair profile", "08 Board memo on supply"],
+    "Graph (PPR)": ["07 Marlow buys Deepcast", "08 Board memo on supply", "03 Deepcast supply deal", "09 Tern engineering blog"]
+  },
+  "k": 60
+}
+</script>
+</div>
+
+<p>Look at where “07 Marlow buys Deepcast” lands. It is the article that explains the root cause, and only the graph retriever found it. With <code>k = 60</code> it scores 1/61 = 0.0164 and finishes fifth, behind documents that two retrievers agreed on. This is the main weakness of equal-weight RRF for GraphRAG: evidence that only the graph can find is exactly the evidence you added a graph for, and fusion buries it. Two fixes are common. Weight the graph list higher (<code>weights=[1, 1, 2]</code> gives 07 a score of 2/61 = 0.0328, which lifts it from fifth to fourth, ahead of the leadership interview), or reserve a few context slots for each retriever's top items before filling the rest from the fused list.</p>
+
+<pre data-file="minigraphrag/search/hybrid.py"><code class="language-python">from ..context import format_table
+from ..llm import LLM
+from ..tokens import count_tokens
+from .bm25 import BM25
+from .common import DEFAULT_RESPONSE_TYPE, SearchResult, doc_ids_for_units, generate_answer
+from .ppr import link_query_to_nodes, personalized_pagerank, rank_passages
+
+
+def reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60, weights: list[float] | None = None) -&gt; list[tuple[str, float]]:
+    """Fuse several ranked id lists (best first). Returns (id, fused score), best first."""
+    weights = weights or [1.0] * len(rankings)
+    scores: dict[str, float] = {}
+    for ranking, w in zip(rankings, weights):
+        for rank, item in enumerate(ranking, start=1):
+            scores[item] = scores.get(item, 0.0) + w / (k + rank)
+    return sorted(scores.items(), key=lambda x: (-x[1], x[0]))
+
+
+def hybrid_search(index, query: str, llm: LLM, top_k: int = 5, rrf_k: int = 60, candidates: int = 20,
+                  max_context_tokens: int = 4000, response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; SearchResult:
+    """Fuse BM25, vector and PPR-graph rankings of text units, then answer."""
+    unit_ids = list(index.text_units)
+    bm25 = BM25([index.text_units[u].text for u in unit_ids])
+    keyword = [unit_ids[i] for i, _ in bm25.search(query, candidates)]
+    vector = [uid for uid, _, _ in index.text_unit_store.search(index.embedder.embed([query])[0], k=candidates)]
+    ppr = personalized_pagerank(index.graph, link_query_to_nodes(index, query))
+    graph = [uid for uid, _ in rank_passages(index, ppr)[:candidates]]
+
+    fused = reciprocal_rank_fusion([keyword, vector, graph], k=rrf_k)
+    rows, used = [], 0
+    for uid, score in fused[:top_k]:
+        text = index.text_units[uid].text
+        if used + count_tokens(text) &gt; max_context_tokens:
+            break
+        rows.append([uid, text])
+        used += count_tokens(text)
+    context = format_table("Sources", ["id", "text"], rows)
+    answer = generate_answer(llm, query, context, response_type)
+    data = {"rankings": {"bm25": keyword, "vector": vector, "graph": graph}, "fused": fused[:top_k],
+            "sources": [{"id": r[0], "text": r[1]} for r in rows]}
+    return SearchResult(answer, "hybrid", context, data, doc_ids_for_units(index, [r[0] for r in rows]), llm_calls=1)</code></pre>
+
+<div class="callout paper">
+  <span class="callout-title">Cormack, Clarke and Büttcher, Reciprocal Rank Fusion outperforms Condorcet and individual rank learning methods (2009)</span>
+  <p>A two-page SIGIR paper that proposed RRF with <code>k = 60</code>. In their experiments this simple formula beat Condorcet voting and learned rank-fusion methods. Its appeal for RAG is the same as in 2009: no training data and no score calibration.</p>
+</div>
+
+<table>
+  <thead><tr><th>Concern</th><th>Score normalization (CombSUM)</th><th>Reciprocal rank fusion</th></tr></thead>
+  <tbody>
+    <tr><td>Needs comparable scores</td><td>Yes, after normalization, and normalization is fragile</td><td>No: ranks only</td></tr>
+    <tr><td>Uses confidence information</td><td>Yes: a big score gap is preserved</td><td>No: rank 1 by a mile equals rank 1 by a hair</td></tr>
+    <tr><td>Tuning</td><td>A weight per retriever, plus a choice of normalization</td><td><code>k</code> and optional weights</td></tr>
+    <tr><td>Sensitivity to list length</td><td>Min-max depends on the worst item returned</td><td>Items beyond the cut-off simply contribute 0</td></tr>
+    <tr><td>When it wins</td><td>Retrievers are well calibrated, or you learn the weights from labeled data</td><td>Default choice, especially with no labels</td></tr>
+  </tbody>
+</table>
+
+<h3>Reranking the short list</h3>
+<p>Retrievers use a <em>bi-encoder</em> or keyword index: the query and each passage are encoded separately, so passage vectors can be precomputed and search is fast. A <em>cross-encoder</em> feeds the query and a passage into one transformer together, letting every query token attend to every passage token. That makes it much more accurate at judging relevance and much more expensive: one forward pass per candidate, at query time. The standard compromise is to fuse cheaply, then cross-encode only the top 20 to 50.</p>
+<pre data-file="examples/cross_encoder_rerank.py"><code class="language-python">from sentence_transformers import CrossEncoder   # pip install sentence-transformers
+
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+def cross_encoder_rerank(index, query: str, fused: list[tuple[str, float]], top_n: int = 30, keep: int = 8):
+    """Score (query, passage) pairs jointly for the fused top-n; keep the best `keep`."""
+    candidates = [uid for uid, _ in fused[:top_n]]
+    pairs = [(query, index.text_units[uid].text) for uid in candidates]
+    scores = reranker.predict(pairs)                 # one transformer forward pass per pair
+    ranked = sorted(zip(candidates, scores), key=lambda x: -x[1])
+    return [(uid, float(s)) for uid, s in ranked[:keep]]</code></pre>
+<p>Cost reasoning: a MiniLM-sized cross-encoder scores somewhere between tens and a few hundred short pairs per second on a CPU, and far more on a GPU, so reranking 30 candidates adds roughly tens to hundreds of milliseconds. A 7B LLM used as a listwise reranker is far slower and costs tokens; use one only when a cross-encoder demonstrably fails on your questions.</p>
+<p>A cross-encoder sees one passage at a time, so it cannot tell that passage A matters <em>because</em> it connects to passage B. That is exactly the multi-hop signal GraphRAG cares about, and it motivates graph-based reranking.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Dong et al., Don't Forget to Connect! Improving RAG with Graph-based Reranking (2024)</span>
+  <p>G-RAG builds a graph over the retrieved documents, connecting documents that share concepts from their Abstract Meaning Representation (AMR) parses, and trains a graph neural network to rerank them. Documents that are only partially relevant on their own can be lifted by their connections to relevant ones. The authors also report that using PaLM 2 directly as a reranker performed considerably worse than their GNN reranker, a useful caution against assuming a big LLM is the best reranker.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Sarmah et al., HybridRAG: Integrating Knowledge Graphs and Vector Retrieval Augmented Generation (2024)</span>
+  <p>HybridRAG retrieves context from both a vector database and a knowledge graph built from financial earnings call transcripts, and passes both to the generator. On their question set the combination outperformed either VectorRAG or GraphRAG alone on retrieval and answer metrics. The design is simple, concatenating the two contexts rather than fusing rankings, which makes it a good baseline to beat before you build anything fancier.</p>
+</div>
+
+<h3>Query routing</h3>
+<p>Running every retriever on every question wastes latency and money, and some retrievers actively hurt certain questions: global search on “Who is the CTO?” produces a vague essay. A router classifies the question first. The categories that matter for GraphRAG map directly onto earlier chapters:</p>
+<table>
+  <thead><tr><th>Route</th><th>Signals</th><th>Kestrel example</th><th>Retrieval</th></tr></thead>
+  <tbody>
+    <tr><td>local</td><td>Named entities, “who/what is”</td><td>“Who is the CTO of Kestrel Labs?”</td><td>Hybrid fusion + local search (<a href="14-local-search.html">Ch. 14</a>)</td></tr>
+    <tr><td>path</td><td>“why”, “connect”, “whose”, two or more entities</td><td>“What connects Priya Nair to Deepcast?”</td><td>Paths, PPR, metapaths (<a href="18-paths-and-agents.html">Ch. 18</a>)</td></tr>
+    <tr><td>global</td><td>“themes”, “risks”, “overall”</td><td>“What risks does Kestrel Labs face?”</td><td>Global or DRIFT search (<a href="15-global-search.html">Ch. 15</a>)</td></tr>
+    <tr><td>text2cypher</td><td>“how many”, “list all”, sorting</td><td>“How many organizations invested in Kestrel Labs?”</td><td>Generated Cypher (<a href="20-text2cypher.html">Ch. 20</a>)</td></tr>
+  </tbody>
+</table>
+<p>Time is better handled as a modifier than as a route. “Who supplied Kestrel's sonar in 2024?” is a local question with a time constraint, so the router extracts <code>as_of</code> and the temporal-window design below applies it.</p>
+<pre data-file="examples/router.py"><code class="language-python">import re
+from minigraphrag.llm import parse_json_response
+
+ROUTER_PROMPT = """Classify the question for a retrieval router. Categories:
+- local: about specific named entities and their direct facts
+- path: asks how entities are connected, or why something happened through a chain of events
+- global: asks for themes, trends, risks or summaries across the whole corpus
+- text2cypher: asks to count, filter, sort or aggregate typed records
+Return JSON: {{"route": "&lt;category&gt;", "as_of": "&lt;YYYY or YYYY-MM if the question names a time, else null&gt;"}}
+Question: {question}"""
+
+GLOBAL_CUES = re.compile(r"\b(themes?|trends?|overall|main|risks?|summar\w+|across)\b", re.I)
+CYPHER_CUES = re.compile(r"\b(how many|count|list all|average|top \d+|most)\b", re.I)
+PATH_CUES = re.compile(r"\b(connect\w*|why|whose|link\w*|path|between)\b", re.I)
+YEAR = re.compile(r"\b(20\d\d)\b")
+
+def route_query(question: str, llm=None) -&gt; dict:
+    """Pick a retrieval strategy. Uses the LLM when given, with regex rules as a cheap fallback."""
+    if llm is not None:
+        out = parse_json_response(llm.complete(ROUTER_PROMPT.format(question=question), json=True))
+        if out.get("route") in {"local", "path", "global", "text2cypher"}:
+            return {"route": out["route"], "as_of": out.get("as_of")}
+    year = YEAR.search(question)
+    as_of = year.group(1) if year else None
+    if GLOBAL_CUES.search(question):
+        return {"route": "global", "as_of": as_of}
+    if CYPHER_CUES.search(question):
+        return {"route": "text2cypher", "as_of": as_of}
+    if PATH_CUES.search(question):
+        return {"route": "path", "as_of": as_of}
+    return {"route": "local", "as_of": as_of}</code></pre>
+<div class="callout warn">
+  <span class="callout-title">Misroutes are silent</span>
+  <p>A wrong route still returns an answer, just a worse one, so routing errors do not show up in logs. Keep a labeled set of 50 to 100 questions with their correct route, measure router accuracy separately from answer quality, and when the router is unsure (for instance the LLM and the regex rules disagree) run both candidate routes and fuse.</p>
+</div>
+
+<h2>Seven Graph RAG designs</h2>
+<p>The first half of this chapter was about combining retrievers. The second half is about shaping what graph retrieval returns. Thinking Loop's Medium article “7 Graph RAG Designs That Outperform Keyword Search” (October 2025) lists seven designs: <strong>neighborhood expansion, metapaths, subgraph assembly, temporal windows, hybrid rerankers, panels</strong> and <strong>provenance</strong>. We use that list as a checklist. The article is paywalled, so everything below is our own description of each idea as a general pattern, with definitions, trade-offs and code written for this course rather than quoted from the article.</p>
+<p>Each design gets the same treatment: what it is, when to use it, what goes wrong, what it looks like on the Kestrel graph, and a code sketch. Where the course covers a design in depth, we link there.</p>
+
+<h3>1. Neighborhood expansion</h3>
+<p><strong>What it is.</strong> Start from seed entities matched to the question and pull in their neighbors, up to a hop limit, then use the entities, relationships and source passages of that neighborhood as context. It is the core move of <a href="14-local-search.html">local search</a>.</p>
+<p><strong>When to use it.</strong> Entity-centric questions where the answer is one or two hops from something the user named: “Who leads Project Sentinel?”, “Who is on Kestrel's board?”</p>
+<p><strong>Pitfalls.</strong> Hubs explode. Kestrel Labs touches most of the graph, so a 2-hop expansion from it returns nearly everything, and the context fills with loosely related facts. Cap the fan-out per node, rank neighbors by edge weight or query similarity, and cap total nodes.</p>
+<p><strong>Kestrel example.</strong> Seeding on Project Tern with one hop and a fan-out cap of three keeps its heaviest three edges. Without the cap, a second hop through Kestrel Labs would pull in Brightwater Capital, the City Council and Tidewater Institute, none of which help explain Tern.</p>
+<pre data-file="examples/neighborhood.py"><code class="language-python">import networkx as nx
+
+def expand_neighborhood(G: nx.Graph, seeds: list[str], hops: int = 1, max_per_node: int = 5,
+                        max_nodes: int = 30) -&gt; list[str]:
+    """Breadth-first expansion that follows only the heaviest `max_per_node` edges of each node."""
+    selected = list(dict.fromkeys(s for s in seeds if s in G))
+    frontier = list(selected)
+    for _ in range(hops):
+        nxt = []
+        for node in frontier:
+            nbrs = sorted(G.neighbors(node), key=lambda n: -G.edges[node, n].get("weight", 1.0))
+            for n in nbrs[:max_per_node]:
+                if n not in selected and n not in nxt:
+                    nxt.append(n)
+        room = max_nodes - len(selected)
+        if room &lt;= 0:
+            break
+        selected += nxt[:room]
+        frontier = nxt[:room]
+    return selected</code></pre>
+
+<h3>2. Metapaths</h3>
+<p><strong>What it is.</strong> A metapath is a sequence of relation types and node types, such as Organization →ACQUIRED→ Organization →SUPPLIED→ Organization →RUNS→ Project. Instead of expanding blindly, you only follow edges that match the next step of the pattern. The idea comes from heterogeneous information network research, where metapaths define which kinds of connection count as meaningful.</p>
+<p><strong>When to use it.</strong> You have a typed graph and recurring question shapes. “Which projects were affected when a supplier was acquired?” is always the same metapath, whatever the company names. Metapaths are also a clean way to express domain knowledge that an analyst can review.</p>
+<p><strong>Pitfalls.</strong> They need a typed schema: the <code>minigraphrag</code> index stores free-text descriptions on undirected edges, so metapaths require a typed view such as the one below (<a href="05-knowledge-graphs.html">Chapter 5</a> discusses schemas). Metapaths are brittle to extraction drift: if half the supply edges came out as SUPPLIES_TO, the walk silently finds nothing. And hand-written metapaths do not cover novel questions; pair them with a fallback.</p>
+<p><strong>Kestrel example.</strong> From Marlow Dynamics, the metapath above finds exactly the projects that depended on the acquired supplier. Step through it:</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Walking a metapath from Marlow Dynamics",
+  "subtitle": "ACQUIRED, then SUPPLIED, then RUNS: only matching edges are followed",
+  "height": 400,
+  "directed": true,
+  "nodes": [
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 10, "y": 48},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 34, "y": 20},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 60, "y": 48},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 2, "x": 88, "y": 22},
+    {"id": "tern", "label": "Project Tern", "group": 2, "x": 88, "y": 76},
+    {"id": "priya", "label": "Priya Nair", "group": 3, "x": 30, "y": 84},
+    {"id": "brightwater", "label": "Brightwater Capital", "group": 1, "x": 62, "y": 8},
+    {"id": "council", "label": "City Council", "group": 1, "x": 58, "y": 90}
+  ],
+  "edges": [
+    {"source": "marlow", "target": "deepcast", "label": "ACQUIRED"},
+    {"source": "deepcast", "target": "kestrel", "label": "SUPPLIED"},
+    {"source": "kestrel", "target": "sentinel", "label": "RUNS"},
+    {"source": "kestrel", "target": "tern", "label": "RUNS"},
+    {"source": "marlow", "target": "kestrel", "label": "COMPETES_WITH"},
+    {"source": "priya", "target": "marlow", "label": "FORMERLY_WORKED_AT"},
+    {"source": "priya", "target": "tern", "label": "CO_LEADS"},
+    {"source": "brightwater", "target": "kestrel", "label": "INVESTED_IN"},
+    {"source": "council", "target": "kestrel", "label": "CONTRACTED"}
+  ],
+  "legend": {"1": "Organization", "2": "Project", "3": "Person"},
+  "steps": [
+    {"caption": "The typed neighborhood around the Deepcast story. A blind 2-hop expansion from Marlow Dynamics would reach every node here.", "showAllLabels": true, "dim": false},
+    {"caption": "Start at <span class=\"viz-chip node\">Marlow Dynamics</span>. Step 1 of the metapath asks for an outgoing <strong>ACQUIRED</strong> edge to an Organization. COMPETES_WITH has the wrong relation, and FORMERLY_WORKED_AT points into Marlow, not out of it.", "active": ["marlow"]},
+    {"caption": "One edge matches: Marlow Dynamics ACQUIRED <span class=\"viz-chip node\">Deepcast</span>.", "active": ["deepcast"], "visited": ["marlow"], "edges": ["marlow>deepcast"]},
+    {"caption": "Step 2 asks for <strong>SUPPLIED</strong> to an Organization. Deepcast SUPPLIED <span class=\"viz-chip node\">Kestrel Labs</span>. Brightwater's INVESTED_IN and the council's CONTRACTED edges also touch Kestrel, but they are not on the path we are walking.", "active": ["kestrel"], "visited": ["marlow", "deepcast"], "edges": ["deepcast>kestrel"], "visitedEdges": ["marlow>deepcast"]},
+    {"caption": "Step 3 asks for <strong>RUNS</strong> to a Project. Two walks complete: one ends at Project Sentinel (whose drones used Deepcast sonar), one at Project Tern (built to replace it).", "active": ["sentinel", "tern"], "visited": ["marlow", "deepcast", "kestrel"], "edges": ["kestrel>sentinel", "kestrel>tern"], "visitedEdges": ["marlow>deepcast", "deepcast>kestrel"]},
+    {"caption": "Result: 2 walks, 5 nodes, 4 edges, all of them relevant to “Why did Kestrel start Tern?”. Priya Nair, Brightwater and the council were never touched.", "active": ["tern"], "visited": ["marlow", "deepcast", "kestrel", "sentinel"], "edges": ["kestrel>tern"], "visitedEdges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>sentinel"]}
+  ]
+}
+</script>
+</div>
+
+<p>To make the Kestrel facts walkable, we keep a small typed and time-stamped view of the running example. Later sections and chapters reuse it.</p>
+<pre data-file="examples/kestrel_kg.py"><code class="language-python">"""A typed, time-stamped view of the Kestrel Labs facts (from the running example)."""
+import networkx as nx
+
+TYPES = {
+    "Kestrel Labs": "ORGANIZATION", "Tidewater Institute": "ORGANIZATION", "Brightwater Capital": "ORGANIZATION",
+    "Marlow Dynamics": "ORGANIZATION", "Deepcast": "ORGANIZATION", "Port Avalon City Council": "ORGANIZATION",
+    "Dr. Mira Okafor": "PERSON", "Jonas Vehl": "PERSON", "Priya Nair": "PERSON", "Dr. Ana Ruiz": "PERSON",
+    "Lena Park": "PERSON", "Project Sentinel": "PROJECT", "Project Tern": "PROJECT", "Halden Reef": "LOCATION",
+    "Port Avalon": "LOCATION", "2024 Halden Reef bleaching event": "EVENT", "Ocean Health Act": "LAW",
+}
+
+# (source, RELATION, target, valid_from, valid_to); None means open-ended or unknown.
+FACTS = [
+    ("Dr. Mira Okafor", "CO_FOUNDED", "Kestrel Labs", "2021", "2021"),
+    ("Jonas Vehl", "CO_FOUNDED", "Kestrel Labs", "2021", "2021"),
+    ("Dr. Mira Okafor", "CEO_OF", "Kestrel Labs", "2021", None),
+    ("Jonas Vehl", "CTO_OF", "Kestrel Labs", "2021", "2026-03"),
+    ("Priya Nair", "CTO_OF", "Kestrel Labs", "2026-03", None),
+    ("Dr. Mira Okafor", "FORMERLY_WORKED_AT", "Tidewater Institute", "2015", "2021"),
+    ("Priya Nair", "FORMERLY_WORKED_AT", "Marlow Dynamics", None, "2023"),
+    ("Dr. Ana Ruiz", "DIRECTS", "Tidewater Institute", None, None),
+    ("Kestrel Labs", "RUNS", "Project Sentinel", "2023", None),
+    ("Tidewater Institute", "PARTNERS_ON", "Project Sentinel", "2023", None),
+    ("Priya Nair", "LEADS", "Project Sentinel", "2023", None),
+    ("Project Sentinel", "MONITORS", "Halden Reef", "2023", None),
+    ("Project Sentinel", "DETECTED", "2024 Halden Reef bleaching event", "2024-08", "2024-08"),
+    ("2024 Halden Reef bleaching event", "OCCURRED_AT", "Halden Reef", "2024-08", "2024-08"),
+    ("Dr. Ana Ruiz", "LEADS_SURVEY_OF", "Halden Reef", None, None),
+    ("Brightwater Capital", "INVESTED_IN", "Kestrel Labs", "2022", None),
+    ("Lena Park", "PARTNER_AT", "Brightwater Capital", None, None),
+    ("Lena Park", "BOARD_MEMBER_OF", "Kestrel Labs", None, None),
+    ("Deepcast", "SUPPLIED", "Kestrel Labs", "2022-08", "2025-06"),
+    ("Marlow Dynamics", "ACQUIRED", "Deepcast", "2025-04", "2025-04"),
+    ("Marlow Dynamics", "COMPETES_WITH", "Kestrel Labs", None, None),
+    ("Kestrel Labs", "RUNS", "Project Tern", "2025-06", None),
+    ("Jonas Vehl", "CO_LEADS", "Project Tern", "2025-06", None),
+    ("Priya Nair", "CO_LEADS", "Project Tern", "2025-06", None),
+    ("Port Avalon City Council", "CONTRACTED", "Kestrel Labs", "2025-11", None),
+    ("Kestrel Labs", "LOCATED_IN", "Port Avalon", None, None),
+    ("Tidewater Institute", "LOCATED_IN", "Port Avalon", None, None),
+    ("Port Avalon City Council", "LOCATED_IN", "Port Avalon", None, None),
+]
+
+def typed_graph() -&gt; nx.MultiDiGraph:
+    G = nx.MultiDiGraph()
+    for name, t in TYPES.items():
+        G.add_node(name, type=t)
+    for i, (s, rel, o, start, end) in enumerate(FACTS):
+        G.add_edge(s, o, key=rel, relation=rel, valid_from=start, valid_to=end, fact_id=f"f{i}")
+    return G</code></pre>
+<pre data-file="examples/metapaths.py"><code class="language-python">import networkx as nx
+
+def follow_metapath(G: nx.MultiDiGraph, start: str, metapath: list[tuple[str, str]],
+                    max_fanout: int = 25) -&gt; list[list[tuple[str, str, str]]]:
+    """All walks from `start` that match `metapath`, a list of (RELATION, TARGET_TYPE) steps.
+
+    Prefix a relation with "^" to traverse it backwards, e.g. ("^RUNS", "ORGANIZATION")
+    goes from a project to the organization that runs it.
+    """
+    walks = [[]]                      # each walk is a list of (source, relation, target) hops
+    frontier = [start]
+    for relation, target_type in metapath:
+        backwards = relation.startswith("^")
+        rel = relation.lstrip("^")
+        next_walks, next_frontier = [], []
+        for walk, node in zip(walks, frontier):
+            edges = G.in_edges(node, data=True) if backwards else G.out_edges(node, data=True)
+            matches = []
+            for u, v, d in edges:
+                other = u if backwards else v
+                if d["relation"] == rel and G.nodes[other]["type"] == target_type:
+                    matches.append((other, (u, rel, v)))
+            for other, hop in sorted(matches)[:max_fanout]:   # cap fan-out per node
+                if any(other in (h[0], h[2]) for h in walk) or other == start:
+                    continue                                   # keep walks simple (no cycles)
+                next_walks.append(walk + [hop])
+                next_frontier.append(other)
+        walks, frontier = next_walks, next_frontier
+    return walks</code></pre>
+<p>Running <code>follow_metapath(typed_graph(), "Marlow Dynamics", [("ACQUIRED", "ORGANIZATION"), ("SUPPLIED", "ORGANIZATION"), ("RUNS", "PROJECT")])</code> returns two walks, ending at Project Sentinel and Project Tern. In a graph database the same pattern is one Cypher query, which is why metapaths and <a href="20-text2cypher.html">Text2Cypher</a> fit together well:</p>
+<pre><code class="language-cypher">MATCH (a:Organization {name: "Marlow Dynamics"})-[:ACQUIRED]-&gt;(s:Organization)
+      -[:SUPPLIED]-&gt;(c:Organization)-[:RUNS]-&gt;(p:Project)
+RETURN a.name, s.name, c.name, p.name</code></pre>
+
+<h3>3. Subgraph assembly</h3>
+<p><strong>What it is.</strong> Collect candidate evidence from several sources (seed entities, neighborhood expansion, metapath walks, top passages' entities) and assemble it into one connected, size-bounded subgraph before serializing it. The connection requirement is the point: it keeps the bridge entities that link relevant facts, even when a bridge is not similar to the query itself.</p>
+<p><strong>When to use it.</strong> Multi-hop questions whose evidence is spread over several seeds, and whenever you want the context to read as one coherent story rather than a bag of facts. <a href="19-subgraph-gnn.html">Chapter 19</a> covers the prize-collecting Steiner tree formulation that G-Retriever uses.</p>
+<p><strong>Pitfalls.</strong> Exact Steiner trees are NP-hard, so you rely on heuristics that can drop a relevant but weakly connected node. Prizes from different sources need balancing; if name matches get a huge prize, the tree bends around them. And a connected subgraph can still be too big to serialize, so the node cap must be derived from your token budget.</p>
+<p><strong>Kestrel example.</strong> For “Why did Kestrel Labs start Project Tern?”, name matching seeds Kestrel Labs and Project Tern, the metapath walks add Marlow Dynamics and Deepcast, and the tree keeps the edges that connect them.</p>
+<pre data-file="examples/subgraph_assembly.py"><code class="language-python">import networkx as nx
+from minigraphrag.search.local import map_query_to_entities
+from minigraphrag.search.subgraph import similarity_prizes, pcst_subgraph
+
+def assemble_subgraph(index, question: str, metapath_walks: list[list[tuple]] = (), max_nodes: int = 12) -&gt; nx.Graph:
+    """Union three evidence sources, then keep one connected, budget-sized piece."""
+    G = index.graph
+    prizes = similarity_prizes(index, question, top_k=10)             # semantic relevance
+    for name in map_query_to_entities(index, question, top_k=3):       # named in the question
+        prizes[name] = prizes.get(name, 0.0) + 5.0
+    for walk in metapath_walks:                                        # typed paths found earlier
+        for u, _, v in walk:
+            for n in (u.upper(), v.upper()):
+                if n in G:
+                    prizes[n] = prizes.get(n, 0.0) + 3.0
+    return pcst_subgraph(G, prizes, edge_cost=1.0, max_nodes=max_nodes)</code></pre>
+
+<h3>4. Temporal windows</h3>
+<p><strong>What it is.</strong> Give every fact a validity interval and filter retrieval to facts that were true during the time the question cares about. The window can be a point (“as of March 2026”) or a span (“around the bleaching event”).</p>
+<p><strong>When to use it.</strong> Any corpus where facts change: roles, suppliers, prices, ownership. Without a window, “Who is the CTO of Kestrel Labs?” retrieves both Jonas Vehl and Priya Nair, and the model picks one, often the one mentioned more. <a href="10-claims-temporal.html">Chapter 10</a> extracts dated claims and <a href="27-incremental-temporal.html">Chapter 27</a> builds bi-temporal edges properly.</p>
+<p>For point-in-time questions, <code>minigraphrag/temporal.py</code> already provides a bi-temporal graph with <code>add_fact</code>, <code>as_of</code> and <code>holders</code>. The window helper below handles the other case, a span of time, over the typed view.</p>
+<p><strong>Pitfalls.</strong> Undated facts: you must decide whether a fact with no dates passes every window (recall) or none (precision). Granularity: a fact dated only “2023” overlaps any window that touches 2023. Boundaries: with month granularity, a window of March 2026 contains both Vehl's CTO role (ends 2026-03) and Nair's (starts 2026-03). And document date is not fact date: an interview recorded in 2026 can describe 2022.</p>
+<pre data-file="examples/temporal_window.py"><code class="language-python">from datetime import date
+
+def _to_date(s: str | None, default: date, end: bool = False) -&gt; date:
+    """'2025-06' -&gt; 1 June 2025; '2023' -&gt; 1 Jan 2023 (or 1 Dec 2023 when used as an end)."""
+    if s is None:
+        return default
+    month = int(s[5:7]) if len(s) &gt;= 7 else (12 if end else 1)
+    return date(int(s[:4]), month, 1)
+
+def overlaps(d: dict, start: str, end: str) -&gt; bool:
+    """Does the fact's validity [valid_from, valid_to] overlap the window [start, end]?"""
+    f = _to_date(d.get("valid_from"), date.min)
+    t = _to_date(d.get("valid_to"), date.max, end=True)
+    return f &lt;= _to_date(end, date.max, end=True) and t &gt;= _to_date(start, date.min)
+
+def facts_in_window(G, nodes: set[str], start: str, end: str) -&gt; list[tuple]:
+    """Edges touching `nodes` whose validity overlaps the window, oldest first."""
+    rows = []
+    for u, v, d in G.edges(data=True):
+        if (u in nodes or v in nodes) and overlaps(d, start, end):
+            rows.append((d.get("valid_from") or "????", u, d["relation"], v, d.get("valid_to") or "open"))
+    return sorted(rows)</code></pre>
+
+<div class="viz" data-viz="ch21-window">
+<script type="application/json">
+{
+  "title": "A time window over Kestrel facts",
+  "subtitle": "Move the window; facts whose validity overlaps it stay in the context",
+  "startYear": 2021,
+  "endYear": 2026,
+  "window": ["2024-02", "2025-02"],
+  "facts": [
+    {"label": "Mira Okafor CEO_OF Kestrel Labs", "from": "2021", "to": null, "group": 3},
+    {"label": "Jonas Vehl CTO_OF Kestrel Labs", "from": "2021", "to": "2026-03", "group": 3},
+    {"label": "Priya Nair CTO_OF Kestrel Labs", "from": "2026-03", "to": null, "group": 3},
+    {"label": "Brightwater INVESTED_IN Kestrel", "from": "2022", "to": null, "group": 1},
+    {"label": "Deepcast SUPPLIED Kestrel Labs", "from": "2022-08", "to": "2025-06", "group": 1},
+    {"label": "Kestrel RUNS Project Sentinel", "from": "2023", "to": null, "group": 2},
+    {"label": "Sentinel DETECTED bleaching", "from": "2024-08", "to": "2024-08", "group": 4},
+    {"label": "Marlow ACQUIRED Deepcast", "from": "2025-04", "to": "2025-04", "group": 1},
+    {"label": "Kestrel RUNS Project Tern", "from": "2025-06", "to": null, "group": 2},
+    {"label": "Council CONTRACTED Kestrel", "from": "2025-11", "to": null, "group": 1},
+    {"label": "Lena Park BOARD_MEMBER_OF Kestrel", "from": null, "to": null, "group": 3},
+    {"label": "Marlow COMPETES_WITH Kestrel", "from": null, "to": null, "group": 1}
+  ]
+}
+</script>
+</div>
+
+<h3>5. Hybrid rerankers</h3>
+<p><strong>What it is.</strong> A reranker that scores each candidate with several signals at once: text relevance (a cross-encoder or the fused rank), graph signals (distance to the question's seed entities, PPR mass, whether the passage supports an edge on a found path), and metadata (recency, source authority). The simplest version is a hand-weighted linear blend; the next step is a small learned model such as logistic regression or gradient-boosted trees trained on labeled pairs.</p>
+<p><strong>When to use it.</strong> After fusion, when a text-only reranker keeps demoting passages that matter for structural reasons. The Marlow acquisition article is the Kestrel example: a cross-encoder sees little overlap with “Why did Kestrel start Tern?”, but the graph says it sits two hops from both seeds on the only path between them.</p>
+<p><strong>Pitfalls.</strong> Unscaled features (the same trap as score fusion), weights tuned on five questions, and graph features that reward hubs: every passage mentions Kestrel Labs, so “distance to Kestrel Labs” is always 0. Prefer features computed from the less common seed entities, and hold out questions when tuning weights.</p>
+<pre data-file="examples/hybrid_rerank.py"><code class="language-python">import networkx as nx
+
+def graph_proximity(G: nx.Graph, seeds: list[str], passage_entities: list[str], cutoff: int = 3) -&gt; float:
+    """1.0 if the passage mentions a seed entity, 0.5 one hop away, 0.33 two hops away, 0 beyond cutoff."""
+    best = None
+    for s in seeds:
+        if s not in G:
+            continue
+        dist = nx.single_source_shortest_path_length(G, s, cutoff=cutoff)
+        for e in passage_entities:
+            if e in dist and (best is None or dist[e] &lt; best):
+                best = dist[e]
+    return 0.0 if best is None else 1.0 / (1 + best)
+
+def hybrid_rerank(candidates: list[str], features: dict[str, dict[str, float]],
+                  weights: dict[str, float]) -&gt; list[tuple[str, float]]:
+    """Linear blend of per-candidate features that are already scaled to [0, 1]."""
+    scored = [(c, sum(w * features[c].get(name, 0.0) for name, w in weights.items())) for c in candidates]
+    return sorted(scored, key=lambda x: -x[1])
+
+# features["07_marlow_acquires_deepcast-000"] = {
+#     "rrf": 1.0,            # fused rank score, min-max scaled over the candidates
+#     "cross_encoder": 0.82, # sigmoid of the cross-encoder logit
+#     "graph": 1.0,          # graph_proximity to the question's seed entities
+#     "recency": 0.6,        # 1.0 for the newest document, 0.0 for the oldest
+# }
+# hybrid_rerank(candidates, features, {"rrf": 0.2, "cross_encoder": 0.5, "graph": 0.2, "recency": 0.1})</code></pre>
+<p>With the weights shown, a passage with cross-encoder 0.82, graph 1.0, rrf 1.0 and recency 0.6 scores 0.5 × 0.82 + 0.2 × 1.0 + 0.2 × 1.0 + 0.1 × 0.6 = 0.87. A passage with a slightly higher cross-encoder score of 0.9 but graph 0 and rrf 0.5 scores 0.45 + 0 + 0.1 + 0.1 × recency, at most 0.65. The graph signal decides.</p>
+
+<h3>6. Panels</h3>
+<p><strong>What it is (our interpretation).</strong> The list names “panels” without a definition we can read, so this is our reading of it: present evidence to the model as several labeled context panels, each answering a different sub-question, assembled per query. Typical panels are an <em>entity panel</em> (who and what is involved), a <em>relationship-path panel</em> (how they connect), a <em>timeline panel</em> (what was true when) and a <em>source-passages panel</em> (the original text to quote). Each panel has its own ranking and its own token budget, so no single kind of evidence can crowd out the others. GraphRAG's local search, with its separate Reports, Entities, Relationships and Sources tables, is an early instance of the same idea.</p>
+<p><strong>When to use it.</strong> Questions that need several kinds of evidence at once, and any setting where you want the model to cite the kind of evidence as well as the item: “[Paths: 1] [Sources: 08_kestrel_board_memo_supply-000]”.</p>
+<p><strong>Pitfalls.</strong> Duplicate content across panels wastes budget (the same fact as a path and as a sentence in a source); deduplicate across panels as well as within them. Fixed shares waste space when a panel is empty; redistribute unused tokens. Too many panels fragment attention, so four or five is a practical maximum.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 262" role="img" aria-labelledby="panels-title">
+      <title id="panels-title">Four evidence panels assembled for the question What connects Priya Nair to Deepcast</title>
+      <text class="d-text bold" x="340" y="18" text-anchor="middle">Question: What connects Priya Nair to Deepcast?</text>
+      <rect class="d-box node" x="10" y="32" width="325" height="104" rx="6"/>
+      <text class="d-text bold" x="22" y="54">Entities panel (15%)</text>
+      <text class="d-text mono" x="22" y="76">PRIYA NAIR | PERSON | CTO since 2026</text>
+      <text class="d-text mono" x="22" y="94">DEEPCAST | ORGANIZATION | sonar maker</text>
+      <text class="d-text mono" x="22" y="112">MARLOW DYNAMICS | ORGANIZATION | ...</text>
+      <rect class="d-box edge" x="345" y="32" width="325" height="104" rx="6"/>
+      <text class="d-text bold" x="357" y="54">Paths panel (25%)</text>
+      <text class="d-text mono" x="357" y="76">Priya -FORMERLY_WORKED_AT-&gt; Marlow</text>
+      <text class="d-text mono" x="357" y="94">  -ACQUIRED-&gt; Deepcast</text>
+      <text class="d-text mono" x="357" y="112">Priya -CO_LEADS-&gt; Tern -REPLACES-&gt; ...</text>
+      <rect class="d-box comm" x="10" y="146" width="325" height="104" rx="6"/>
+      <text class="d-text bold" x="22" y="168">Timeline panel (15%)</text>
+      <text class="d-text mono" x="22" y="190">-2023    Nair at Marlow Dynamics</text>
+      <text class="d-text mono" x="22" y="208">2025-04  Marlow acquires Deepcast</text>
+      <text class="d-text mono" x="22" y="226">2025-06  Tern starts, Nair co-leads</text>
+      <rect class="d-box" x="345" y="146" width="325" height="104" rx="6"/>
+      <text class="d-text bold" x="357" y="168">Sources panel (45%)</text>
+      <text class="d-text mono" x="357" y="190">05_kestrel_blog_priya_nair-000 | ...</text>
+      <text class="d-text mono" x="357" y="208">07_marlow_acquires_deepcast-000 | ...</text>
+      <text class="d-text mono" x="357" y="226">09_kestrel_eng_blog_project_tern-0...</text>
+    </svg>
+  </div>
+  <figcaption>Panels as we interpret them: one question, four labeled views of the evidence, each with its own share of the token budget. The model can cite a path and the passage that supports it separately.</figcaption>
+</figure>
+
+<pre data-file="examples/panels.py"><code class="language-python">from minigraphrag.context import fit_to_budget
+from minigraphrag.search.local import map_query_to_entities
+from minigraphrag.search.paths import find_relational_paths, paths_to_text
+
+PANEL_SHARES = {"Entities": 0.15, "Paths": 0.25, "Timeline": 0.15, "Sources": 0.45}
+
+def build_panels(index, question: str, timeline_rows: list[str], budget: int = 4000) -&gt; str:
+    """Evidence as labeled panels. Each panel answers one kind of sub-question and has its own budget."""
+    G = index.graph
+    seeds = map_query_to_entities(index, question, top_k=3)
+    rows = {
+        "Entities": [f"{G.nodes[n]['human_id']}|{n}|{G.nodes[n].get('type', '')}|{G.nodes[n].get('description', '')[:300]}"
+                     for n in seeds],
+        "Paths": paths_to_text(G, find_relational_paths(G, seeds[:1], seeds[1:], max_hops=3)).splitlines(),
+        "Timeline": timeline_rows,                       # e.g. from facts_in_window, oldest first
+        "Sources": [f"{uid}|{index.text_units[uid].text}"
+                    for uid in dict.fromkeys(u for n in seeds for u in G.nodes[n].get("source_ids", []))],
+    }
+    headers = {"Entities": "id|entity|type|description", "Paths": "path", "Timeline": "from|subject|relation|object|to",
+               "Sources": "id|text"}
+    panels = []
+    for title, share in PANEL_SHARES.items():
+        kept = fit_to_budget(rows[title], int(budget * share), header=headers[title])
+        if kept:                                          # an empty panel is noise; leave it out
+            panels.append("\n".join([f"-----{title}-----", headers[title], *kept]))
+    return "\n\n".join(panels)</code></pre>
+<p><a href="22-context-construction.html">Chapter 22</a> goes deeper on serialization formats, ordering inside and across panels, and budget allocation.</p>
+
+<h3>7. Provenance</h3>
+<p><strong>What it is.</strong> Every fact that reaches the prompt carries a pointer back to the text that states it: source text unit ids, ideally a short supporting quote, and the extraction run that produced it. Answers cite those pointers, and anything without a pointer is either dropped or clearly flagged.</p>
+<p><strong>When to use it.</strong> Always, but it is non-negotiable when users make decisions from answers, when the graph is built by an LLM that can invent edges, and when you need to delete a document and everything derived from it. <a href="07-chunking-text-units.html">Chapter 7</a> created the ids, <a href="08-entity-relation-extraction.html">Chapter 8</a> attached them to every record, and <a href="23-graph-reasoning.html">Chapter 23</a> verifies paths hop by hop against them.</p>
+<p><strong>Pitfalls.</strong> Merged descriptions lose provenance granularity: after summarization, which sentence came from which source is gone, so keep <code>source_ids</code> lists through every merge. Citations to ids that exist but do not support the claim are worse than no citations, because they look trustworthy. And provenance must survive incremental updates; a deleted document should remove its edges or at least their support.</p>
+<pre data-file="examples/provenance.py"><code class="language-python">from dataclasses import dataclass, field
+
+@dataclass
+class EvidenceFact:
+    subject: str
+    relation: str
+    object: str
+    source_ids: list[str] = field(default_factory=list)   # text unit ids that state the fact
+    quote: str = ""                                        # the shortest supporting span
+    valid_from: str | None = None
+    valid_to: str | None = None
+
+    def render(self, fact_id: int) -&gt; str:
+        when = f" [{self.valid_from or '?'} to {self.valid_to or 'now'}]" if (self.valid_from or self.valid_to) else ""
+        return (f"F{fact_id}: {self.subject} {self.relation} {self.object}{when} "
+                f"(sources: {', '.join(self.source_ids) or 'NONE'}; quote: \"{self.quote}\")")
+
+def facts_from_edges(index, edges: list[tuple[str, str]]) -&gt; list[EvidenceFact]:
+    """Wrap minigraphrag edges as facts with their source ids and a short supporting quote."""
+    facts = []
+    for u, v in edges:
+        d = index.graph.edges[u, v]
+        quote = ""
+        for uid in d.get("source_ids", []):
+            text = index.text_units[uid].text if uid in index.text_units else ""
+            for sentence in text.replace("\n", " ").split(". "):
+                if u.split()[0].lower() in sentence.lower() and v.split()[0].lower() in sentence.lower():
+                    quote = sentence.strip()[:200]
+                    break
+            if quote:
+                break
+        facts.append(EvidenceFact(u, "RELATED_TO", v, list(d.get("source_ids", [])), quote))
+    return facts
+
+def drop_unsupported(facts: list[EvidenceFact]) -&gt; tuple[list[EvidenceFact], list[EvidenceFact]]:
+    kept = [f for f in facts if f.source_ids and f.quote]
+    return kept, [f for f in facts if f not in kept]</code></pre>
+
+<h2>Putting designs together: an event-centered briefing</h2>
+<p>Three of the designs compose into one retrieval that deserves a name of its own: seed on an event node, expand along a metapath, then keep only the facts that were true inside a time window around the event. It answers the kind of question an analyst asks after something happens. On Kestrel: “Brief me on the 2024 Halden Reef bleaching detection: who was involved and what was the situation at the time?”</p>
+<ol>
+  <li><strong>Seed</strong> on the event node <em>2024 Halden Reef bleaching event</em>.</li>
+  <li><strong>Expand two hops along a metapath</strong>: Event ←DETECTED− Project ←RUNS− Organization. This reaches Project Sentinel and Kestrel Labs and ignores everything else adjacent to the reef.</li>
+  <li><strong>Pull a time window</strong> of six months either side of August 2024 (2024-02 to 2025-02) over all facts touching those three nodes.</li>
+</ol>
+<pre data-file="examples/event_briefing.py"><code class="language-python">from examples.kestrel_kg import typed_graph
+from examples.metapaths import follow_metapath
+from examples.temporal_window import facts_in_window
+
+def event_briefing(G, seed: str, metapath: list[tuple[str, str]], start: str, end: str) -&gt; list[str]:
+    """Seed on an event, expand along a metapath, then keep facts valid in the window."""
+    walks = follow_metapath(G, seed, metapath)
+    nodes = {seed} | {n for walk in walks for u, _, v in walk for n in (u, v)}
+    return [f"{frm}|{u}|{rel}|{v}|{to}" for frm, u, rel, v, to in facts_in_window(G, nodes, start, end)]
+
+G = typed_graph()
+rows = event_briefing(G, "2024 Halden Reef bleaching event",
+                      [("^DETECTED", "PROJECT"), ("^RUNS", "ORGANIZATION")],   # event &lt;- project &lt;- organization
+                      start="2024-02", end="2025-02")                          # six months either side
+print(len(rows))
+print("\n".join(rows))</code></pre>
+<p>On the typed Kestrel view this returns 13 facts. Ten are dated and overlap the window, including Deepcast SUPPLIED Kestrel Labs (2022-08 to 2025-06), which answers canonical question 7 in passing: Deepcast was the supplier when the bleaching was detected. Three are undated (LOCATED_IN Port Avalon, Lena Park's board seat, COMPETES_WITH) and pass only because our window treats undated facts as always valid. Left out by the window: Project Tern (2025-06), the council contract (2025-11), Priya Nair's CTO role (2026-03) and the 2021 co-founding facts. The Marlow acquisition was never a candidate, because it touches none of the three nodes. The window did its job: nothing from after the supply shock leaks into a briefing about 2024.</p>
+
+<table>
+  <thead><tr><th>Design</th><th>Best for canonical question</th><th>Main risk</th><th>Where it appears</th></tr></thead>
+  <tbody>
+    <tr><td>Neighborhood expansion</td><td>6 “Who is the CTO?” (with a window)</td><td>Hub explosion</td><td><a href="14-local-search.html">Ch. 14</a></td></tr>
+    <tr><td>Metapaths</td><td>2 “Which investor's board member ...?”</td><td>Schema drift, no coverage of new shapes</td><td><a href="20-text2cypher.html">Ch. 20</a></td></tr>
+    <tr><td>Subgraph assembly</td><td>1 “Why did Kestrel start Tern?”</td><td>Heuristic drops weak bridges</td><td><a href="19-subgraph-gnn.html">Ch. 19</a></td></tr>
+    <tr><td>Temporal windows</td><td>7 “Who supplied sonar in 2024?”</td><td>Undated facts, boundaries</td><td><a href="27-incremental-temporal.html">Ch. 27</a></td></tr>
+    <tr><td>Hybrid rerankers</td><td>1 and 3, where the key passage lacks query words</td><td>Hub-biased features, overfitting weights</td><td>This chapter</td></tr>
+    <tr><td>Panels</td><td>3 “What connects Priya Nair to Deepcast?”</td><td>Duplication across panels</td><td><a href="22-context-construction.html">Ch. 22</a></td></tr>
+    <tr><td>Provenance</td><td>All of them</td><td>Citations that exist but do not support</td><td><a href="23-graph-reasoning.html">Ch. 23</a></td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 21.1 <span class="level">Warm-up</span></h4>
+  <p>Using the five passages, <code>k1 = 1.5</code> and <code>b = 0.75</code>, compute by hand the BM25 scores of all five passages for the query “Who acquired Deepcast?”. Which passage wins, and by how much does the rare term contribute?</p>
+  <details class="hint"><summary>Hint</summary><p>The query tokens are <code>acquired</code> and <code>deepcast</code>. Count how many passages contain each. You already computed the length factor for 8- and 12-token passages in the chapter.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>IDF.</strong> “acquired” appears only in d1: ln((5 − 1 + 0.5)/1.5 + 1) = ln 4 = 1.386. “deepcast” appears in d1, d2 and d3: ln(2.5/3.5 + 1) = 0.539.</p>
+    <p><strong>Saturated tf for one hit.</strong> d1 (8 tokens): length factor 1.5 × (0.25 + 0.75 × 8/10.4) = 1.240, so 2.5/2.240 = 1.116. d2 and d3 (12 tokens): 1.673, so 2.5/2.673 = 0.935.</p>
+    <p><strong>Scores.</strong> d1 = 1.386 × 1.116 + 0.539 × 1.116 = 1.547 + 0.601 = <strong>2.148</strong>. d2 = 0.539 × 0.935 = <strong>0.504</strong>. d3 = <strong>0.504</strong> (“deepcast” once). d4 = d5 = 0.</p>
+    <p>d1 wins by more than four times. The rare term “acquired” contributes 1.547 of d1's 2.148, about 72%. You can check with <code>BM25(docs).get_scores("Who acquired Deepcast?")</code>, which returns 2.1484, 0.5041, 0.5041, 0, 0.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 21.2 <span class="level">Core</span></h4>
+  <p>Three retrievers return: BM25 [A, C, B], dense [B, D, C], graph [E, F, C]. (a) Compute the fused order with <code>k = 0</code>, <code>k = 1</code> and <code>k = 60</code>. (b) With <code>k = 60</code>, what graph weight <em>w</em> (BM25 and dense weight 1) makes E, the graph's top item, beat B?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Only A, B, C and E can be at the top; D and F appear once at rank 2.</p>
+    <table>
+      <thead><tr><th>Item</th><th>k = 0</th><th>k = 1</th><th>k = 60</th></tr></thead>
+      <tbody>
+        <tr><td>A (1)</td><td>1.000</td><td>0.500</td><td>0.0164</td></tr>
+        <tr><td>B (3, 1)</td><td>1.333</td><td>0.250 + 0.500 = 0.750</td><td>0.0159 + 0.0164 = 0.0323</td></tr>
+        <tr><td>C (2, 3, 3)</td><td>0.500 + 0.333 + 0.333 = 1.167</td><td>0.333 + 0.250 + 0.250 = 0.833</td><td>0.0161 + 0.0159 + 0.0159 = 0.0479</td></tr>
+        <tr><td>E (1)</td><td>1.000</td><td>0.500</td><td>0.0164</td></tr>
+      </tbody>
+    </table>
+    <p>Order: k = 0 gives B, C, then A and E tied; k = 1 gives C, B, then A and E; k = 60 gives C, B, then A and E. The flip between B and C happens as soon as <code>k</code> is 1: the bonus for being first shrinks quickly.</p>
+    <p>(b) E scores <em>w</em>/61 and B scores 1/63 + 1/61 = 0.032266. We need <em>w</em>/61 &gt; 0.032266, so <em>w</em> &gt; 1.968. A graph weight of 2 puts E (0.03279) just above B, still below C (0.04788).</p>
+    <pre><code class="language-python">from minigraphrag.search.hybrid import reciprocal_rank_fusion
+lists = [["A", "C", "B"], ["B", "D", "C"], ["E", "F", "C"]]
+for k in (0, 1, 60):
+    print(k, reciprocal_rank_fusion(lists, k=k)[:4])
+print(reciprocal_rank_fusion(lists, k=60, weights=[1, 1, 2])[:3])</code></pre>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 21.3 <span class="level">Core</span></h4>
+  <p>Measure document recall@5 for BM25, dense, graph (PPR) and RRF with three weightings on every question in <code>data/questions.jsonl</code> that has <code>supporting_docs</code>. Which configuration wins on your index, and why might fusion fail to beat the best single retriever?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre data-file="examples/eval_fusion.py"><code class="language-python">import json
+from minigraphrag.indexer import load_index
+from minigraphrag.search.bm25 import BM25
+from minigraphrag.search.hybrid import reciprocal_rank_fusion
+from minigraphrag.search.ppr import link_query_to_nodes, personalized_pagerank, rank_passages
+
+index = load_index("out/kestrel")
+questions = [json.loads(line) for line in open("data/questions.jsonl")]
+unit_ids = list(index.text_units)
+bm25 = BM25([index.text_units[u].text for u in unit_ids])
+
+def rankings(q: str, n: int = 20) -&gt; dict[str, list[str]]:
+    return {
+        "bm25": [unit_ids[i] for i, _ in bm25.search(q, n)],
+        "vector": [u for u, _, _ in index.text_unit_store.search(index.embedder.embed([q])[0], k=n)],
+        "graph": [u for u, _ in rank_passages(index, personalized_pagerank(index.graph, link_query_to_nodes(index, q)))[:n]],
+    }
+
+def doc_recall(units: list[str], gold: set[str], k: int = 5) -&gt; float:
+    docs = {index.text_units[u].doc_id for u in units[:k]}
+    return len(docs &amp; gold) / len(gold)
+
+configs = {"bm25": None, "vector": None, "graph": None,
+           "rrf equal": [1.0, 1.0, 1.0], "rrf graph x2": [1.0, 1.0, 2.0], "rrf bm25 x2": [2.0, 1.0, 1.0]}
+totals, n = {c: 0.0 for c in configs}, 0
+for item in questions:
+    gold = set(item.get("supporting_docs", []))
+    if not gold:
+        continue
+    n += 1
+    r = rankings(item["question"])
+    for name, weights in configs.items():
+        ranked = r[name] if weights is None else \
+            [u for u, _ in reciprocal_rank_fusion([r["bm25"], r["vector"], r["graph"]], k=60, weights=weights)]
+        totals[name] += doc_recall(ranked, gold)
+for name, total in totals.items():
+    print(f"{name:14s} recall@5 = {total / n:.3f}")</code></pre>
+    <p>Interpretation matters more than the exact numbers, which depend on your embedder and extractor. With the offline <code>HashingEmbedder</code> and <code>MockLLM</code>, the “dense” retriever is really another bag-of-words matcher and the graph is noisy, so do not be surprised if equal-weight RRF lands below BM25 alone. Fusion helps when retrievers are individually decent and make <em>different</em> mistakes. If one retriever is much weaker, equal weights let it push good items down; weighting the strong retriever up, or dropping the weak one, fixes that. Repeat with a real embedder (<code>get_embedder("st")</code>) and an LLM-built graph, and the dense and graph lists usually become strong enough for fusion to pay off, especially on the multi-hop questions. Always break results down by question <code>type</code>: fusion that helps multi-hop questions and hurts simple ones may call for routing rather than more fusion.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 21.4 <span class="level">Core</span></h4>
+  <p>Write the metapath that answers canonical question 2, “Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?”, starting from the event node. Run it with <code>follow_metapath</code>. Then write the metapath for question 3, “What connects Priya Nair to Deepcast?”, and say what part of the expected answer it misses.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre data-file="examples/q2_metapath.py"><code class="language-python">from examples.kestrel_kg import typed_graph
+from examples.metapaths import follow_metapath
+
+G = typed_graph()
+Q2 = [("^DETECTED", "PROJECT"),          # event &lt;- project that detected it
+      ("^RUNS", "ORGANIZATION"),         # project &lt;- organization that runs it
+      ("^BOARD_MEMBER_OF", "PERSON"),    # organization &lt;- its board members
+      ("PARTNER_AT", "ORGANIZATION")]    # board member -&gt; the firm they are a partner at
+for walk in follow_metapath(G, "2024 Halden Reef bleaching event", Q2):
+    print(" ; ".join(f"{u} {r} {v}" for u, r, v in walk))
+# Project Sentinel DETECTED 2024 Halden Reef bleaching event ; Kestrel Labs RUNS Project Sentinel ;
+# Lena Park BOARD_MEMBER_OF Kestrel Labs ; Lena Park PARTNER_AT Brightwater Capital</code></pre>
+    <p>Question 3: <code>follow_metapath(G, "Priya Nair", [("FORMERLY_WORKED_AT", "ORGANIZATION"), ("ACQUIRED", "ORGANIZATION")])</code> returns Priya Nair FORMERLY_WORKED_AT Marlow Dynamics ; Marlow Dynamics ACQUIRED Deepcast. It misses the second connection in the expected answer: Priya co-leads Project Tern, which replaces the Deepcast sonar. That link is not a Person→Organization edge at all; in our typed view “REPLACES Deepcast sonar” has no entity target, so no metapath can reach it. A “what connects X to Y” question is better served by path search over all relation types (<code>find_relational_paths</code>, <a href="18-paths-and-agents.html">Chapter 18</a>), with metapaths reserved for question shapes you know in advance.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 21.5 <span class="level">Stretch</span></h4>
+  <p>Using <code>facts_in_window</code>, answer canonical questions 6 and 7 for the windows 2024-01 to 2024-12 (supplier), 2026-03 (CTO) and 2026-04 (CTO). One of these gives an ambiguous result. Explain why, and change the interval semantics so that each month has exactly one CTO. What does your change cost for facts dated only by year?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>2024: the only SUPPLIED fact touching Kestrel Labs is Deepcast (2022-08 to 2025-06), so the answer is Deepcast. 2026-04: only Priya Nair's CTO_OF (from 2026-03, open) overlaps. <strong>2026-03 is ambiguous</strong>: Vehl's role has <code>valid_to = "2026-03"</code> and Nair's has <code>valid_from = "2026-03"</code>, and the inclusive overlap test keeps both.</p>
+    <p>Fix: treat intervals as half-open, [valid_from, valid_to), so a fact is valid up to but not including its end month:</p>
+    <pre><code class="language-python">def overlaps_half_open(d, start, end):
+    f = _to_date(d.get("valid_from"), date.min)
+    t = _to_date(d.get("valid_to"), date.max, end=False)       # first month it is no longer valid
+    return f &lt;= _to_date(end, date.max, end=True) and t &gt; _to_date(start, date.min)</code></pre>
+    <p>Now March 2026 returns only Priya Nair. This is the semantics <code>minigraphrag/temporal.py</code> uses: its <code>is_valid</code> tests <code>valid_from &lt;= at &lt; valid_to</code>, and <code>holders(kestrel_timeline(), "CTO_OF", "Kestrel Labs", "2026-03")</code> returns only Priya Nair. The cost shows up with year-only dates. Mira Okafor's FORMERLY_WORKED_AT Tidewater has <code>valid_to = "2021"</code>, which <code>_to_date(..., end=False)</code> reads as January 2021, so the half-open test says she had left by February 2021, which the corpus does not say. Either store an explicit precision next to each date and treat a year-only end as “end of that year”, or keep dates at the precision the source gives and report uncertainty (“Vehl until March 2026, Nair from March 2026”) instead of forcing one answer. Chapter 27's bi-temporal model stores both when a fact was true and when the system learned it, which also handles corrections.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In BM25, what happens to a passage's score for a term as that term's frequency in the passage grows from 1 to 10?</p>
+  <ol>
+    <li>It grows linearly, ten times the single-hit score</li>
+    <li>It stays constant after the first occurrence regardless of k1</li>
+    <li data-correct>It grows with diminishing returns and approaches IDF × (k1 + 1)</li>
+    <li>It decreases because long passages are penalized</li>
+  </ol>
+  <div class="explain">The tf component f(k1 + 1)/(f + k1 · norm) saturates toward k1 + 1 as f grows. Only as k1 approaches 0 does it become constant after the first occurrence.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does min-max normalization followed by a weighted sum often fuse badly?</p>
+  <ol>
+    <li data-correct>It stretches tiny, meaningless score differences in one list to the full 0 to 1 range</li>
+    <li>It can only fuse two lists</li>
+    <li>It ignores items that appear in only one list</li>
+    <li>It requires the lists to have the same length</li>
+  </ol>
+  <div class="explain">A retriever that scores three passages 0.39, 0.40, 0.41 is saying “no idea”, but min-max turns that into 0, 0.5 and 1, as confident as a list with a clear winner.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">With RRF and k = 60, an item ranked first by only the graph retriever competes with an item ranked second by both BM25 and dense. Which scores higher, and what is the GraphRAG-specific concern?</p>
+  <ol>
+    <li>The graph item, because first place always wins</li>
+    <li>They tie, because RRF ignores position</li>
+    <li>The graph item, because graph retrievers get a bonus by default</li>
+    <li data-correct>The item found by two retrievers (about 0.032 vs 0.016), which can bury multi-hop evidence only the graph finds</li>
+  </ol>
+  <div class="explain">1/62 + 1/62 = 0.0323 beats 1/61 = 0.0164. That is usually a feature, but graph-only evidence is often the reason you added a graph, so weight the graph list or reserve slots for it.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why is a cross-encoder applied only to the top 20 to 50 fused candidates rather than to the whole corpus?</p>
+  <ol>
+    <li>Cross-encoders cannot read passages longer than 50 tokens</li>
+    <li data-correct>It needs one joint forward pass per (query, passage) pair at query time, so its cost grows with the number of candidates</li>
+    <li>Cross-encoders are less accurate than BM25 on large sets</li>
+    <li>Passage vectors from a cross-encoder must be recomputed every day</li>
+  </ol>
+  <div class="explain">A bi-encoder precomputes passage vectors once; a cross-encoder cannot, because it encodes query and passage together. That accuracy costs a model call per candidate.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">The metapath Organization -ACQUIRED-> Organization -SUPPLIED-> Organization suddenly returns nothing after a re-index, although the corpus did not change. What is the most likely cause?</p>
+  <ol>
+    <li>RRF weights were reset</li>
+    <li>The temporal window is too narrow</li>
+    <li data-correct>Extraction produced different relation labels (for example SUPPLIES_TO) or types, so no edge matches the pattern</li>
+    <li>The graph has too many hubs</li>
+  </ol>
+  <div class="explain">Metapaths match labels exactly. They depend on a stable schema, so normalize relation labels after extraction and test metapaths as part of indexing.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the event-centered briefing, three undated facts (LOCATED_IN, BOARD_MEMBER_OF, COMPETES_WITH) appeared in a 2024 window. What does that reveal?</p>
+  <ol>
+    <li>The metapath expanded too far</li>
+    <li data-correct>The window treats a missing date as “always valid”, a recall-over-precision choice you must make explicitly</li>
+    <li>The facts were extracted with wrong dates</li>
+    <li>Temporal windows cannot be combined with metapaths</li>
+  </ol>
+  <div class="explain">Defaulting a missing date to <code>date.min</code> or <code>date.max</code> makes undated facts overlap every window. Sometimes that is right (location rarely changes), sometimes it leaks stale facts; you can flag undated facts in the panel instead.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I use a vector database's built-in hybrid search instead of writing RRF myself?</summary>
+  <div><p>In production, often yes: Elasticsearch, OpenSearch, Weaviate, Qdrant and others offer BM25 plus vector search with RRF or weighted fusion in one query, which saves a network round trip and keeps pagination correct. Write it yourself once, as here, so you know what the knobs do, and keep your own fusion when one of the lists comes from outside that database, as graph rankings usually do.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does BM25 still matter when embeddings keep getting better?</summary>
+  <div><p>Yes, for the queries embeddings are structurally bad at: exact identifiers, rare proper names, codes, numbers and quoted phrases. It is also a strong baseline that costs nothing to run and catches embedding regressions. Learned sparse retrievers such as SPLADE sit between the two, but plain BM25 remains the usual keyword leg of a hybrid system.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I pick RRF weights without labeled data?</summary>
+  <div><p>Start equal. Then write 30 to 50 questions with the documents that answer them; that small set is enough to see whether a retriever is dragging results down (Exercise 21.3). Weight changes that do not move recall on that set are not worth keeping. If you truly have no labels, a safer move than weights is slot reservation: guarantee each retriever its top one or two items in the context.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Are metapaths just Cypher queries?</summary>
+  <div><p>A metapath is a pattern; a Cypher MATCH clause is one way to execute it. The distinction matters for where it comes from. Metapaths are usually curated per question type and reused, which makes them reviewable and fast. Text2Cypher generates a pattern per question, which covers novel questions but can hallucinate relation types. A good combination is to give the Text2Cypher prompt your curated metapaths as examples.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is “panels” an established term?</summary>
+  <div><p>Not as a standard research term. We took the name from the Thinking Loop list and gave it the interpretation described above, because structuring context into labeled evidence sections is a well-established practice (GraphRAG local search's tables are one example). If you read a different definition elsewhere, the underlying engineering question is the same: how to split a token budget across kinds of evidence.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a hybrid retrieval bench for Kestrel</h3>
+  <p>Build a small evaluation runner that lets you switch retrievers, fusion methods and designs on and off, and see what each does to recall and to the final context.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>retrieve(question, config)</code> function that runs any subset of BM25, dense and graph rankings and fuses them with RRF (configurable <code>k</code> and weights) or CombSUM</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A router with labeled routes for all canonical questions and a printed router accuracy</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Recall@5 per question type for at least five configurations, in one table</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>At least three of the seven designs implemented on the typed Kestrel view, including a temporal window with an explicit undated-fact policy</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A panel-style context printout for canonical question 3, where every line carries a source id</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can name the configuration you would ship for the Kestrel corpus and point to the table row and the failure example that justify it.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Keyword, dense and graph retrievers fail on different questions; hybrid systems run several and merge them.</li>
+    <li>BM25 is IDF times saturated, length-normalized term frequency; <code>k1</code> controls saturation and <code>b</code> length normalization.</li>
+    <li>RRF fuses by rank, needs no score calibration, and with <code>k ≈ 60</code> rewards agreement across lists. Weight or reserve slots for graph-only evidence so fusion does not bury it.</li>
+    <li>Cross-encoders and graph-aware rerankers are affordable only on a short list; routing avoids running retrievers that will hurt.</li>
+    <li>The seven designs (neighborhood expansion, metapaths, subgraph assembly, temporal windows, hybrid rerankers, panels, provenance) are composable; each has a characteristic failure you should test for.</li>
+    <li>Seed on an event, walk a metapath, apply a time window: that combination turns a sprawling graph into a focused, dated briefing.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Robertson, S. and Zaragoza, H. <a href="https://www.nowpublishers.com/article/Details/INR-019">The Probabilistic Relevance Framework: BM25 and Beyond</a>. <span class="venue">Foundations and Trends in Information Retrieval, 2009</span></li>
+  <li>Cormack, G. V., Clarke, C. L. A. and Büttcher, S. <a href="https://dl.acm.org/doi/10.1145/1571941.1572114">Reciprocal Rank Fusion outperforms Condorcet and individual rank learning methods</a>. <span class="venue">SIGIR, 2009</span></li>
+  <li>Nogueira, R. and Cho, K. <a href="https://arxiv.org/abs/1901.04085">Passage Re-ranking with BERT</a>. <span class="venue">arXiv 1901.04085, 2019</span></li>
+  <li>Sarmah et al. <a href="https://arxiv.org/abs/2408.04948">HybridRAG: Integrating Knowledge Graphs and Vector Retrieval Augmented Generation for Efficient Information Extraction</a>. <span class="venue">arXiv 2408.04948, 2024</span></li>
+  <li>Dong et al. <a href="https://arxiv.org/abs/2405.18414">Don't Forget to Connect! Improving RAG with Graph-based Reranking</a>. <span class="venue">arXiv 2405.18414, 2024</span></li>
+  <li>Sun, Y. et al. <a href="https://www.vldb.org/pvldb/vol4/p992-sun.pdf">PathSim: Meta Path-Based Top-K Similarity Search in Heterogeneous Information Networks</a>. <span class="venue">VLDB, 2011</span></li>
+  <li>He et al. <a href="https://arxiv.org/abs/2402.07630">G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering</a>. <span class="venue">arXiv 2402.07630, 2024</span></li>
+  <li>Thinking Loop. 7 Graph RAG Designs That Outperform Keyword Search. <span class="venue">Medium, October 2025 (source of the list of seven designs; paywalled, not quoted)</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch21-window", function (el, cfg, api) {
+  const { stage } = api.frame(el, cfg);
+  const facts = cfg.facts || [];
+  const y0 = cfg.startYear, y1 = cfg.endYear, months = (y1 - y0 + 1) * 12;
+  const MN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const idx = (s, end) => s == null ? null : (parseInt(s.slice(0, 4), 10) - y0) * 12 + (s.length >= 7 ? parseInt(s.slice(5, 7), 10) - 1 : (end ? 11 : 0));
+  const label = (i) => MN[i % 12] + " " + (y0 + Math.floor(i / 12));
+  const W = 720, left = 250, right = 14, top = 30, rowH = 25, H = top + facts.length * rowH + 8;
+  const x = (i) => left + (i / months) * (W - left - right);
+  const svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Timeline" }, stage);
+  for (let y = y0; y <= y1 + 1; y++) {
+    const xi = x((y - y0) * 12);
+    api.svgEl("line", { x1: xi, y1: top - 6, x2: xi, y2: H - 4, style: "stroke:var(--rule);stroke-width:1" }, svg);
+    if (y <= y1) { const t = api.svgEl("text", { x: xi + 4, y: top - 12, style: "fill:var(--muted);font-size:12px" }, svg); t.textContent = y; }
+  }
+  const win = api.svgEl("rect", { y: top - 6, height: H - top + 2, style: "fill:var(--edge-soft);stroke:var(--edge);stroke-width:1.5" }, svg);
+  const rows = facts.map((f, r) => {
+    const cy = top + r * rowH + rowH / 2;
+    const t = api.svgEl("text", { x: left - 8, y: cy + 4, "text-anchor": "end", style: "fill:var(--ink);font-size:12.5px" }, svg);
+    t.textContent = f.label;
+    const a = f.from == null ? 0 : idx(f.from, false), b = f.to == null ? months - 1 : idx(f.to, true);
+    const undated = f.from == null && f.to == null;
+    const col = api.groupColor(f.group || 1);
+    const bar = api.svgEl("rect", { x: x(a), y: cy - 7, width: Math.max(4, x(b + 1) - x(a)), height: 14, rx: 3,
+      style: "fill:color-mix(in srgb," + col + " " + (undated ? 12 : 55) + "%, var(--panel));stroke:" + col + ";stroke-width:1.2" + (undated ? ";stroke-dasharray:4 3" : "") }, svg);
+    return { f, t, bar, a: f.from == null ? -Infinity : idx(f.from, false), b: f.to == null ? Infinity : idx(f.to, true), undated };
+  });
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const bar = api.controls(el);
+  const mk = (name, val) => { const L = api.h("label", {}, bar, name + " "); const s = api.h("input", { type: "range", min: 0, max: months - 1, value: val }, L); const v = api.h("b", {}, L); return { s, v }; };
+  const w0 = cfg.window || ["2024-02", "2025-02"];
+  const from = mk("From", idx(w0[0], false)), to = mk("To", idx(w0[1], false));
+  const uL = api.h("label", {}, bar); const und = api.h("input", { type: "checkbox" }, uL); und.checked = true; uL.appendChild(document.createTextNode(" undated facts always valid"));
+  function render() {
+    let s = +from.s.value, e = +to.s.value;
+    if (s > e) { const tmp = s; s = e; e = tmp; }
+    from.v.textContent = label(+from.s.value); to.v.textContent = label(+to.s.value);
+    win.setAttribute("x", x(s)); win.setAttribute("width", Math.max(3, x(e + 1) - x(s)));
+    let dated = 0, undatedIn = 0; const out = [];
+    rows.forEach((r) => {
+      const inside = r.undated ? und.checked : (r.a <= e && r.b >= s);
+      r.bar.style.opacity = inside ? 1 : 0.22; r.t.style.opacity = inside ? 1 : 0.4;
+      if (inside) { if (r.undated) undatedIn++; else dated++; } else out.push(r.f.label);
+    });
+    cap.innerHTML = "Window <strong>" + label(s) + " to " + label(e) + "</strong>: " + dated + " dated facts and " + undatedIn + " undated facts reach the context." +
+      (out.length ? " Excluded: " + out.slice(0, 4).map((o) => '<span class="viz-chip">' + api.escapeHtml(o) + "</span>").join(" ") + (out.length > 4 ? " and " + (out.length - 4) + " more." : "") : "");
+  }
+  [from.s, to.s].forEach((s) => s.addEventListener("input", render)); und.addEventListener("change", render);
+  render();
+});
+</script>
+</body>
+</html>

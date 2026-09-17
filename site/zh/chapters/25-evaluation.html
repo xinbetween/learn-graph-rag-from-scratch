@@ -1,0 +1,938 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evaluating GraphRAG | Graph RAG from Scratch</title>
+<meta name="description" content="Measure every stage of a GraphRAG pipeline, run fair LLM-as-judge comparisons, pick benchmarks, and build a golden set for your own corpus.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/25-evaluation.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/25-evaluation.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/25-evaluation.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="25-evaluation" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Evaluating GraphRAG</h1>
+  <p class="lede">A GraphRAG system has five places to go wrong and one number most people report. In this chapter you build an evaluation harness that measures each stage, runs pairwise LLM judging without fooling yourself, and tells you whether basic, local, global or PPR search actually wins on the Kestrel questions.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Choose a metric for each pipeline stage: extraction, resolution, communities, retrieval and answers</li>
+      <li>Compute exact match, token F1, recall@k, nDCG, context recall and citation precision by hand and in code</li>
+      <li>Run pairwise LLM-as-judge comparisons with the GraphRAG criteria, order swapping and repeated runs, and turn verdicts into win rates</li>
+      <li>Pick benchmarks that match your question types, and recognize unfair baselines, judge bias, leakage and ignored cost</li>
+      <li>Build a golden set for your own corpus and report results sliced by question type with confidence intervals</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why one number is not enough</h2>
+<p>Suppose you run the canonical question “Why did Kestrel Labs start Project Tern?” through local search and the answer is wrong. The cause could be any of these:</p>
+<ul>
+  <li>The extractor never produced the edge <em>Marlow Dynamics → Deepcast</em> from the acquisition article.</li>
+  <li>Entity resolution kept “Deepcast” and “Deepcast sonar” as two nodes, so the path broke.</li>
+  <li>Community detection put Deepcast in a cluster whose report never mentions Kestrel.</li>
+  <li>Retrieval picked the right entities but the token budget cut the text unit that says Deepcast ended outside contracts.</li>
+  <li>The generator had the evidence and still wrote a vague answer.</li>
+</ul>
+<p>An end-to-end accuracy number tells you that something broke. It does not tell you what. Worse, errors can cancel: a sloppier graph can produce a longer context that happens to contain the answer. So you measure each stage against its own gold data, and you measure the final answers in two ways: against reference answers where a question has one, and by pairwise judgment where it does not (“What are the main themes in this corpus?” has no single right string).</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 270" role="img" aria-labelledby="stages-title">
+      <title id="stages-title">Each GraphRAG stage with the metrics that evaluate it and the gold data each metric needs</title>
+      <defs>
+        <marker id="ar25a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box node" x="10" y="14" width="118" height="42" rx="6"/>
+      <text class="d-text bold" x="69" y="40" text-anchor="middle">Extraction</text>
+      <rect class="d-box node" x="144" y="14" width="118" height="42" rx="6"/>
+      <text class="d-text bold" x="203" y="40" text-anchor="middle">Resolution</text>
+      <rect class="d-box comm" x="278" y="14" width="118" height="42" rx="6"/>
+      <text class="d-text bold" x="337" y="40" text-anchor="middle">Communities</text>
+      <rect class="d-box edge" x="412" y="14" width="118" height="42" rx="6"/>
+      <text class="d-text bold" x="471" y="40" text-anchor="middle">Retrieval</text>
+      <rect class="d-box edge" x="546" y="14" width="124" height="42" rx="6"/>
+      <text class="d-text bold" x="608" y="40" text-anchor="middle">Answer</text>
+      <line class="d-line" x1="128" y1="35" x2="142" y2="35" marker-end="url(#ar25a)"/>
+      <line class="d-line" x1="262" y1="35" x2="276" y2="35" marker-end="url(#ar25a)"/>
+      <line class="d-line" x1="396" y1="35" x2="410" y2="35" marker-end="url(#ar25a)"/>
+      <line class="d-line" x1="530" y1="35" x2="544" y2="35" marker-end="url(#ar25a)"/>
+      <text class="d-text small" x="16" y="82">Metrics</text>
+      <text class="d-text" x="16" y="104">triple P, R, F1</text>
+      <text class="d-text" x="16" y="122">type accuracy</text>
+      <text class="d-text" x="16" y="140">dropped records</text>
+      <text class="d-text" x="150" y="104">pairwise P, R</text>
+      <text class="d-text" x="150" y="122">wrong merges</text>
+      <text class="d-text" x="150" y="140">missed merges</text>
+      <text class="d-text" x="284" y="104">modularity</text>
+      <text class="d-text" x="284" y="122">seed stability</text>
+      <text class="d-text" x="284" y="140">report grounding</text>
+      <text class="d-text" x="418" y="104">recall@k, nDCG</text>
+      <text class="d-text" x="418" y="122">context recall</text>
+      <text class="d-text" x="418" y="140">context precision</text>
+      <text class="d-text" x="552" y="104">EM, token F1</text>
+      <text class="d-text" x="552" y="122">faithfulness</text>
+      <text class="d-text" x="552" y="140">citation precision</text>
+      <text class="d-text" x="552" y="158">pairwise win rate</text>
+      <line class="d-line faint" x1="10" y1="178" x2="670" y2="178"/>
+      <text class="d-text small" x="16" y="200">Gold data needed</text>
+      <text class="d-text small" x="16" y="222">hand-labeled triples</text>
+      <text class="d-text small" x="16" y="238">for a few chunks</text>
+      <text class="d-text small" x="150" y="222">alias clusters</text>
+      <text class="d-text small" x="150" y="238">(canonical names)</text>
+      <text class="d-text small" x="284" y="222">none, or expected</text>
+      <text class="d-text small" x="284" y="238">groups as a soft check</text>
+      <text class="d-text small" x="418" y="222">supporting docs</text>
+      <text class="d-text small" x="418" y="238">per question</text>
+      <text class="d-text small" x="552" y="222">reference answers,</text>
+      <text class="d-text small" x="552" y="238">or a calibrated judge</text>
+    </svg>
+  </div>
+  <figcaption>Stage metrics localize failures. The bottom row is the real cost of evaluation: each metric needs a kind of gold data that someone has to write.</figcaption>
+</figure>
+
+<h2>Measuring each stage</h2>
+
+<h3>Extraction: precision and recall against gold triples</h3>
+<p>Pick three to five text units and label them by hand, exactly as you did in Exercise 8.1. Each gold record is a triple <code>(source, relation, target)</code> or an entity <code>(name, type)</code>. Then compare the extractor's output:</p>
+<p class="formula">precision = |predicted ∩ gold| / |predicted| &nbsp;&nbsp; recall = |predicted ∩ gold| / |gold| &nbsp;&nbsp; F1 = 2PR / (P + R)</p>
+<p>The hard part is the ∩. LLM extraction writes free-text relationship descriptions, so exact string matching undercounts. Use a matching rule you can defend and keep it fixed across runs:</p>
+<ul>
+  <li><strong>Entities</strong>: match on normalized name (uppercase, strip titles such as “DR.”) and, separately, report type accuracy on matched pairs.</li>
+  <li><strong>Relationships</strong>: match on the unordered endpoint pair after normalization. If you keep typed labels (<code>ACQUIRED</code>), also require the label to match. For description-only edges, an LLM or embedding check of “does this description express the gold relation?” is acceptable if you spot-check it.</li>
+</ul>
+<p>A worked example on the acquisition article (<code>07_marlow_acquires_deepcast</code>). Gold has four relationships: Marlow Dynamics–Deepcast (acquired), Deepcast–Kestrel Labs (supplied), Marlow Dynamics–Kestrel Labs (competes with), Priya Nair–Marlow Dynamics (formerly worked at). The extractor returns five: the first three, plus Deepcast–Project Tern and Marlow Dynamics–Port Avalon. Precision is 3/5 = 0.60, recall is 3/4 = 0.75, F1 = 2(0.60)(0.75)/(1.35) = 0.667. The miss (Priya's former employer) matters for canonical question 3; the extra Deepcast–Project Tern edge may be correct but unsupported by this chunk, which is exactly the kind of inferred edge Chapter 8 warned about.</p>
+
+<h3>Entity resolution: pairwise precision and recall</h3>
+<p>Resolution produces clusters of surface forms that should mean the same entity. Evaluate it on pairs: every pair of mentions in the same predicted cluster is a predicted merge; every pair in the same gold cluster is a gold merge.</p>
+<p class="formula">pairwise precision = correct merges / predicted merges &nbsp;&nbsp; pairwise recall = correct merges / gold merges</p>
+<p>Gold for Kestrel: {Dr. Mira Okafor, Mira Okafor, Okafor} and {Tidewater Institute, Tidewater, TWI}. That is 3 + 3 = 6 gold pairs. If your resolver outputs {Dr. Mira Okafor, Mira Okafor, Okafor} and {Tidewater Institute, Tidewater}, leaving TWI alone, it predicts 3 + 1 = 4 merges, all correct: precision 4/4 = 1.0, recall 4/6 = 0.667. Precision errors (wrong merges, like fusing Port Avalon with Port Avalon City Council) are usually worse than recall errors, because a wrong merge invents paths that retrieval will happily follow. Report the two separately rather than as one F1.</p>
+
+<h3>Communities: structure, stability and report grounding</h3>
+<p>Community detection has no single gold answer, so use three weaker checks:</p>
+<ul>
+  <li><strong>Modularity</strong> (Chapter 11) tells you whether the partition is better than chance for this graph. Use it to compare settings on the same graph, not across graphs.</li>
+  <li><strong>Stability</strong>: run Leiden or Louvain with five seeds and compare partitions with the adjusted Rand index (ARI) or normalized mutual information. Low agreement means your reports, and therefore global search answers, will change between index builds for no reason.</li>
+  <li><strong>Report grounding</strong>: sample findings from community reports and check each against the entity and relationship rows it cites. A report that says “Kestrel Labs was acquired by Marlow Dynamics” is a hallucination that global search will repeat confidently.</li>
+</ul>
+<p>The running example lists expected communities, such as {Marlow Dynamics, Deepcast} and {Brightwater Capital, Lena Park}. Treat these as a soft sanity check, not as gold: several reasonable partitions exist.</p>
+
+<h3>Retrieval: did the evidence reach the context?</h3>
+<p>For each question in <code>code/data/questions.jsonl</code> you have <code>supporting_docs</code>, the documents a correct answer needs. Every search method in <code>minigraphrag</code> returns a <code>SearchResult</code> whose <code>sources</code> field lists the document ids that reached the context. That gives you retrieval metrics without looking at the answer at all.</p>
+<p class="formula">recall@k = |top-k ∩ gold| / |gold| &nbsp;&nbsp; precision@k = |top-k ∩ gold| / k &nbsp;&nbsp; MRR = 1 / rank of first gold item</p>
+<p>Recall and precision ignore order. <strong>nDCG</strong> (normalized discounted cumulative gain) rewards putting gold documents near the top, which matters when a token budget truncates the tail:</p>
+<p class="formula">DCG@k = Σ<sub>i=1..k</sub> rel<sub>i</sub> / log<sub>2</sub>(i + 1) &nbsp;&nbsp; nDCG@k = DCG@k / IDCG@k</p>
+<p>IDCG is the DCG of the best possible ranking. Worked example for question q01 (“Why did Kestrel Labs start Project Tern?”), gold documents 07, 08 and 09. Basic search ranks <code>[09, 01, 07, 05, 03]</code>:</p>
+<ul>
+  <li>recall@5 = 2/3 = 0.667, precision@5 = 2/5 = 0.40, MRR = 1/1 = 1.0</li>
+  <li>DCG@5 = 1/log<sub>2</sub>2 + 1/log<sub>2</sub>4 = 1 + 0.5 = 1.5</li>
+  <li>IDCG@5 = 1/log<sub>2</sub>2 + 1/log<sub>2</sub>3 + 1/log<sub>2</sub>4 = 1 + 0.631 + 0.5 = 2.131</li>
+  <li>nDCG@5 = 1.5 / 2.131 = 0.704</li>
+</ul>
+<p>The missing board memo (08) is the document that says Deepcast stopped supplying Kestrel, so the answer will likely skip the middle hop even though two of three documents arrived.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Context recall can be trivially high</span>
+  <p>Global search answers from community reports, and each report summarizes many text units. If you map a report back to every document under it, global search “retrieves” most of the corpus and scores context recall near 1.0 on every question. Always pair recall with context precision (the share of retrieved documents that are gold), or count only the documents whose content the final answer actually cites.</p>
+</div>
+
+<h3>Answers: exact match and token F1</h3>
+<p>For short factual questions, the SQuAD-style metrics are still the workhorse. Both normalize first: lowercase, strip punctuation, drop the articles <em>a</em>, <em>an</em>, <em>the</em>, collapse whitespace.</p>
+<ul>
+  <li><strong>Exact match (EM)</strong> is 1 if the normalized strings are equal, else 0.</li>
+  <li><strong>Token F1</strong> treats both strings as bags of tokens: precision is shared tokens over prediction tokens, recall is shared tokens over gold tokens.</li>
+</ul>
+<p>For gold “Priya Nair” and prediction “The CTO is Priya Nair.”, normalization gives <code>cto is priya nair</code> (4 tokens) against <code>priya nair</code> (2). Shared: 2. Precision 2/4 = 0.5, recall 2/2 = 1.0, F1 = 0.667, EM = 0. Now try “Jonas Vehl”: F1 = 0, correctly, because that was the CTO before March 2026. Token metrics catch that temporal error. They do not handle long, free-form answers well: the gold answer for “What risks does Kestrel Labs face?” has dozens of tokens, and a correct answer written in different words scores low. For those, use an LLM grader against the reference (“does the prediction contain each key point?”) or pairwise judging.</p>
+
+<h3>Faithfulness and citation precision</h3>
+<p>An answer can be correct and still unsupported (the model knew it), or supported and still wrong (the context was wrong). Two metrics separate these:</p>
+<ul>
+  <li><strong>Faithfulness</strong> (also called groundedness): split the answer into atomic claims, then check each claim against the retrieved context. Faithfulness = supported claims / all claims. RAGAS popularized an LLM-based version of this.</li>
+  <li><strong>Citation precision</strong>: of the sources an answer cites, how many actually support the sentence they are attached to. <strong>Citation recall</strong>: of the claims that need support, how many carry a supporting citation.</li>
+</ul>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="cite-title">
+      <title id="cite-title">Scoring the retrieved set versus the cited set for the same answer gives different pictures</title>
+      <rect class="d-box ghost" x="10" y="30" width="330" height="200" rx="10"/>
+      <text class="d-text bold" x="24" y="22">Retrieved context: 8 documents</text>
+      <rect class="d-box good" x="30" y="56" width="64" height="40" rx="5"/><text class="d-text mono" x="62" y="81" text-anchor="middle">07</text>
+      <rect class="d-box good" x="108" y="56" width="64" height="40" rx="5"/><text class="d-text mono" x="140" y="81" text-anchor="middle">08</text>
+      <rect class="d-box good" x="186" y="56" width="64" height="40" rx="5"/><text class="d-text mono" x="218" y="81" text-anchor="middle">09</text>
+      <rect class="d-box" x="264" y="56" width="64" height="40" rx="5"/><text class="d-text mono" x="296" y="81" text-anchor="middle">12</text>
+      <rect class="d-box" x="30" y="116" width="64" height="40" rx="5"/><text class="d-text mono" x="62" y="141" text-anchor="middle">01</text>
+      <rect class="d-box" x="108" y="116" width="64" height="40" rx="5"/><text class="d-text mono" x="140" y="141" text-anchor="middle">03</text>
+      <rect class="d-box" x="186" y="116" width="64" height="40" rx="5"/><text class="d-text mono" x="218" y="141" text-anchor="middle">05</text>
+      <rect class="d-box" x="264" y="116" width="64" height="40" rx="5"/><text class="d-text mono" x="296" y="141" text-anchor="middle">10</text>
+      <rect class="d-line hot" x="24" y="50" width="76" height="52" rx="7"/>
+      <rect class="d-line hot" x="102" y="50" width="76" height="52" rx="7"/>
+      <rect class="d-line hot" x="258" y="50" width="76" height="52" rx="7"/>
+      <rect class="d-box good" x="30" y="182" width="16" height="14" rx="3"/><text class="d-text small" x="54" y="194">gold supporting doc</text>
+      <rect class="d-line hot" x="180" y="180" width="18" height="18" rx="3"/><text class="d-text small" x="206" y="194">cited in the answer</text>
+      <text class="d-text small" x="30" y="218">Question q01, gold = {07, 08, 09}</text>
+      <text class="d-text bold" x="370" y="52">Score the retrieved set</text>
+      <text class="d-text" x="370" y="74">context recall = 3/3 = 1.00</text>
+      <text class="d-text" x="370" y="94">context precision = 3/8 = 0.38</text>
+      <text class="d-text bold" x="370" y="136">Score the cited set</text>
+      <text class="d-text" x="370" y="158">citation precision = 2/3 = 0.67</text>
+      <text class="d-text" x="370" y="178">citation recall = 2/3 = 0.67</text>
+      <text class="d-text small" x="370" y="210">Two systems can swap places depending</text>
+      <text class="d-text small" x="370" y="226">on which set you score. Report both.</text>
+    </svg>
+  </div>
+  <figcaption>The same answer to q01 looks perfect on context recall and mediocre on citations: it retrieved all three gold documents but cited a leadership interview (12) and never cited the Project Tern blog post (09).</figcaption>
+</figure>
+
+<div class="callout paper">
+  <span class="callout-title">Akarsu et al., Triple-robustness analysis of RAG for requirements traceability (2026)</span>
+  <p>Two related papers (arXiv 2608.00705 and 2608.05153) compare GraphRAG and vector RAG on multi-hop traceability while varying embedders, corpora and judges. Their abstracts report that scoring the retrieved set as the attribution set can invert the architecture ranking, that GraphRAG over-cites with low citation precision, that the winning architecture depends on the corpus rather than the embedder, and that single-judge LLM faithfulness verdicts are fragile. The practical lesson: say exactly which set you scored, and do not trust one judge.</p>
+</div>
+
+<table>
+  <thead><tr><th>Stage</th><th>Metric</th><th>Gold data</th><th>Cost to run</th><th>Catches</th></tr></thead>
+  <tbody>
+    <tr><td>Extraction</td><td>Triple P, R, F1</td><td>Labeled triples for a few chunks</td><td>Free after labeling</td><td>Missed and invented edges, type drift</td></tr>
+    <tr><td>Resolution</td><td>Pairwise P, R</td><td>Alias clusters</td><td>Free</td><td>Wrong merges, split entities</td></tr>
+    <tr><td>Communities</td><td>Modularity, ARI across seeds, report grounding</td><td>None (grounding needs spot checks)</td><td>Cheap; grounding needs an LLM or a person</td><td>Unstable clusters, hallucinated reports</td></tr>
+    <tr><td>Retrieval</td><td>recall@k, nDCG, context recall and precision</td><td>Supporting docs per question</td><td>Free</td><td>Evidence that never reached the prompt</td></tr>
+    <tr><td>Answer (short)</td><td>EM, token F1</td><td>Reference answers</td><td>Free</td><td>Wrong or stale facts</td></tr>
+    <tr><td>Answer (long)</td><td>LLM-graded key points, pairwise win rate</td><td>Reference key points, or none</td><td>One or more judge calls per pair</td><td>Thin or unfocused answers</td></tr>
+    <tr><td>Grounding</td><td>Faithfulness, citation P and R</td><td>None beyond the context</td><td>Claim splitting plus checks</td><td>Unsupported claims, over-citation</td></tr>
+  </tbody>
+</table>
+
+<h2>LLM as judge: pairwise comparisons</h2>
+<p>Global questions have no reference string. “What are the main themes in this corpus?” can be answered well in many ways. The GraphRAG paper's answer was head-to-head comparison: show an LLM the question and two answers, and ask which is better on one criterion at a time.</p>
+
+<h3>The four criteria</h3>
+<p>The paper's definitions (Edge et al., 2024, section 3.3), quoted because the exact wording is what the judge sees:</p>
+<ul>
+  <li><strong>Comprehensiveness</strong>: “How much detail does the answer provide to cover all aspects and details of the question?”</li>
+  <li><strong>Diversity</strong>: “How varied and rich is the answer in providing different perspectives and insights on the question?”</li>
+  <li><strong>Empowerment</strong>: “How well does the answer help the reader understand and make informed judgments about the topic?”</li>
+  <li><strong>Directness</strong>: “How specifically and clearly does the answer address the question?”</li>
+</ul>
+<p>Directness is the clever one. The paper calls it a control criterion: because it pulls in the opposite direction from comprehensiveness and diversity, no method should be expected to win all four, and in the paper's runs vector RAG produced the most direct responses in every comparison. If your “better” system also wins directness by a wide margin on long, sprawling answers, suspect the judge rather than celebrating. <code>minigraphrag/prompts.py</code> already ships <code>PAIRWISE_JUDGE_PROMPT</code> and <code>CRITERIA_DESCRIPTIONS</code> with these four criteria.</p>
+
+<h3>Position bias and how to cancel it</h3>
+<p>LLM judges prefer answers in a particular slot, prefer longer answers, and can prefer text written by their own model family. Wang et al. showed that simply swapping the order of two responses can flip an LLM judge's verdict; Zheng et al. documented position, verbosity and self-enhancement biases in MT-Bench judging. Three mitigations cover most of it:</p>
+<ol>
+  <li><strong>Swap the order.</strong> Judge each pair twice, once with each answer in slot A. If the verdicts agree, keep the win. If they disagree, the slot decided, not the content, so count it as a tie.</li>
+  <li><strong>Repeat runs.</strong> Judges are stochastic even at low temperature. The GraphRAG paper repeated each comparison five times and averaged. Two to five runs per order is typical.</li>
+  <li><strong>Blind the names and control length.</strong> Never tell the judge which system wrote which answer. Give both systems the same response type (“multiple paragraphs”) and report average answer length next to win rates.</li>
+</ol>
+<p>Score each question for system X as 1 for a consistent win, 0 for a consistent loss, and 0.5 for a tie or an inconsistent pair. The win rate is the mean:</p>
+<p class="formula">win rate(X over Y) = (consistent wins + 0.5 × (ties + inconsistent pairs)) / questions</p>
+<p>Step through six Kestrel questions below. The judge compares global search (X) with basic RAG (Y) on comprehensiveness. Watch the two win rates diverge: the one that uses only the first ordering is inflated by the judge's preference for slot A.</p>
+
+<div class="viz" data-viz="ch25-judge">
+<script type="application/json">
+{
+  "title": "Pairwise judging with order swap",
+  "subtitle": "Global search (X) vs. basic RAG (Y), criterion: comprehensiveness",
+  "x": "Global search",
+  "y": "Basic RAG",
+  "criterion": "comprehensiveness",
+  "items": [
+    {"id": "q04", "question": "What are the main themes in this corpus?", "xAnswer": "Four themes: reef monitoring, supply-chain risk, funding, regulation...", "yAnswer": "Kestrel Labs builds underwater drones and runs Project Sentinel...", "run1": "A", "run2": "B", "note": "Both orders pick global search. A clean, consistent win."},
+    {"id": "q05", "question": "What risks does Kestrel Labs face?", "xAnswer": "Supplier dependence, Tern execution, Marlow competition, regulation...", "yAnswer": "Deepcast stopped supplying sonar after the acquisition...", "run1": "A", "run2": "A", "note": "The judge picks slot A both times, so it picked the position, not the answer. Counted as a tie."},
+    {"id": "q21", "question": "How has Kestrel Labs' leadership evolved since its founding?", "xAnswer": "Founded by Okafor and Vehl in 2021; Nair joined in 2023, CTO in 2026...", "yAnswer": "Priya Nair became CTO in March 2026...", "run1": "A", "run2": "B", "note": "Consistent win for global search."},
+    {"id": "q22", "question": "What role does regulation play in Kestrel Labs' business?", "xAnswer": "Regulation is one of several themes, alongside funding and research...", "yAnswer": "The Ocean Health Act requires quarterly monitoring, which led to the council contract...", "run1": "B", "run2": "A", "note": "Consistent win for basic RAG: the focused chunk about the Ocean Health Act beats a broad summary."},
+    {"id": "q23", "question": "Summarize the relationship between Kestrel Labs and Tidewater Institute.", "xAnswer": "Research partner on Sentinel; Okafor's former employer; data review...", "yAnswer": "Tidewater Institute partners with Kestrel on Project Sentinel...", "run1": "A", "run2": "A", "note": "Another slot-A preference. Tie."},
+    {"id": "q01", "question": "Why did Kestrel Labs start Project Tern?", "xAnswer": "Supply-chain risk after Marlow Dynamics bought Deepcast...", "yAnswer": "Marlow acquired Deepcast, which stopped supplying Kestrel...", "run1": "TIE", "run2": "TIE", "note": "The judge calls it a tie in both orders."}
+  ]
+}
+</script>
+</div>
+
+<p>With swapping, global search scores (2 + 0.5 × 3) / 6 = 0.583. Using only the first order it scores (4 + 0.5 × 1) / 6 = 0.75. The judge agreed with itself across orders on 4 of 6 questions; that <strong>consistency rate</strong> is worth reporting too, because a judge that flips on a third of pairs is barely measuring content.</p>
+
+<h3>Calibrating the judge</h3>
+<p>Before you trust a judge on 200 questions, check it on 20 you judge yourself. Record your own verdicts for both orderings, run the judge, and compute the agreement rate on decisive items. If agreement is poor, the fixes are usually a more specific criterion description, a stronger judge model, or asking for a short justification before the verdict. Use a judge from a different model family than the one that generated the answers when you can, and try a second judge on a sample to see whether conclusions hold.</p>
+
+<div class="callout note">
+  <span class="callout-title">Claims-based alternatives</span>
+  <p>The revised GraphRAG paper (v2, February 2025) supplements judging with claim-based measures: extract factual claims from each answer with the Claimify method, count them as a proxy for comprehensiveness, and cluster them and count the clusters to measure diversity. These are less sensitive to position and style than a pairwise verdict, but they still depend on the claim extractor, and they reward volume unless you also check that claims are supported.</p>
+</div>
+
+<h2>Benchmarks and what they actually test</h2>
+<p>Public benchmarks let you compare with published systems, but each tests a narrow slice. The most important distinction for GraphRAG is whether the benchmark gives you a graph or makes you build one. Knowledge-graph QA benchmarks (MetaQA, WebQSP, CWQ, FactKG) hand you a curated graph, so they measure retrieval and reasoning over clean structure, not extraction quality. Text benchmarks (HotpotQA, MuSiQue, MultiHop-RAG) make you build the graph from passages, which is the setting this course is about.</p>
+
+<table>
+  <thead><tr><th>Benchmark</th><th>Input</th><th>Task</th><th>Usual metrics</th><th>What it tells you about GraphRAG</th></tr></thead>
+  <tbody>
+    <tr><td>HotpotQA (Yang et al., 2018)</td><td>Wikipedia paragraphs</td><td>Multi-hop QA with supporting-fact labels</td><td>EM, F1; supporting-fact EM, F1</td><td>Multi-hop retrieval from text. Many questions admit shortcuts, and the content is in every LLM's pretraining data.</td></tr>
+    <tr><td>2WikiMultiHopQA (Ho et al., 2020)</td><td>Wikipedia plus Wikidata</td><td>Template multi-hop questions (comparison, inference, compositional, bridge comparison) with evidence triples</td><td>EM, F1; evidence metrics</td><td>Whether retrieval follows the right chain; evidence triples double as gold paths.</td></tr>
+    <tr><td>MuSiQue (Trivedi et al., 2022)</td><td>Wikipedia paragraphs</td><td>2 to 4 hop questions composed from single-hop ones, built to resist shortcuts</td><td>EM, F1; support F1</td><td>Harder chains; a common test for PPR-style methods such as HippoRAG.</td></tr>
+    <tr><td>MultiHop-RAG (Tang and Yang, 2024)</td><td>News articles</td><td>Inference, comparison, temporal and null queries with evidence</td><td>Hits@k, MAP@k, MRR@k; answer accuracy</td><td>Retrieval over a corpus newer than older models' training data; null queries test refusal.</td></tr>
+    <tr><td>CRUD-RAG (Lyu et al., 2024)</td><td>Chinese news</td><td>Create, read, update and delete style RAG tasks</td><td>Text overlap and QA-based metrics</td><td>RAG beyond QA (continuation, summarization, error correction); Chinese only.</td></tr>
+    <tr><td>MetaQA (Zhang et al., 2018)</td><td>WikiMovies knowledge base</td><td>1, 2 and 3 hop questions over a given KG</td><td>Hits@1</td><td>Graph traversal and path reasoning with a clean, given schema.</td></tr>
+    <tr><td>WebQSP and CWQ (Yih et al., 2016; Talmor and Berant, 2018)</td><td>Freebase</td><td>KBQA; CWQ composes more complex questions from WebQSP</td><td>Hits@1, F1</td><td>Standard tests for think-on-graph and reasoning-on-graph retrievers.</td></tr>
+    <tr><td>FactKG (Kim et al., 2023)</td><td>DBpedia</td><td>Claim verification with five reasoning types (one-hop, conjunction, existence, multi-hop, negation)</td><td>Accuracy</td><td>Verification over a KG rather than open answers.</td></tr>
+    <tr><td>GraphRAG-Bench (Xiang et al., 2025)</td><td>Text corpora</td><td>Tasks from fact retrieval through complex reasoning, summarization and creative generation</td><td>Per-stage and answer metrics</td><td>When graphs help at all; evaluates construction, retrieval and generation.</td></tr>
+    <tr><td>DIGIMON (Zhou et al., 2025)</td><td>Several QA datasets</td><td>A unified framework, not a dataset: re-implements many graph-based RAG methods on shared components</td><td>Dataset-specific</td><td>Fair comparisons of methods on specific versus abstract questions.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">Two papers named GraphRAG-Bench</span>
+  <p>At least two 2025 papers use the name GraphRAG-Bench: “When to use Graphs in RAG” (arXiv 2506.05690) and a domain-specific reasoning benchmark (arXiv 2506.02404). Cite benchmarks by arXiv id, not by name.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Xiang et al., When to use Graphs in RAG (2025)</span>
+  <p>The authors start from an uncomfortable observation: GraphRAG frequently underperforms vanilla RAG on many real tasks. Their benchmark grades tasks by difficulty and evaluates the whole pipeline, from graph construction through retrieval to generation, to identify the conditions under which graph structure actually pays off. Read it before you promise stakeholders that a graph will beat vectors on their questions.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Zhou et al., In-depth Analysis of Graph-based RAG in a Unified Framework (2025)</span>
+  <p>DIGIMON decomposes graph-based RAG methods into shared operators (graph types, retrieval operators, generation) and runs them under the same conditions on specific and abstract QA. Because every method shares components, differences come from the method, not from a better chunker or prompt. The authors also combine existing operators into new variants that outperform the originals, a reminder that “method X beats method Y” often means “component choices beat component choices”.</p>
+</div>
+
+<h2>How GraphRAG evaluations go wrong</h2>
+<p>Most GraphRAG papers and vendor posts report that GraphRAG wins. Some of those wins are real. Read any comparison, including your own, against this list.</p>
+
+<h3>Unfair baselines</h3>
+<p>The vector RAG baseline often uses a small top-k, no reranker, no hybrid keyword search, large chunks, and a smaller context budget than the graph method. Meanwhile the graph method gets tuned prompts. A fair comparison fixes the generator model, the response type, the context token budget and the embedding model, and tunes the baseline with the same effort. <a href="21-hybrid-design-patterns.html">Hybrid retrieval with BM25 and a reranker</a> is the baseline to beat in 2026, not naive top-5 cosine.</p>
+
+<h3>Judge bias</h3>
+<p>Comprehensiveness and diversity reward longer answers. Global search's map-reduce naturally produces longer, broader answers than a single-context RAG call. Without length control and order swaps, a pairwise win can mostly measure verbosity. The traceability studies by Akarsu and colleagues add a subtler point: judge verdicts can change when only the retrieval state changes, so one judge on one configuration is not evidence.</p>
+
+<h3>Leakage</h3>
+<ul>
+  <li><strong>Pretraining leakage.</strong> HotpotQA and 2WikiMultiHopQA are built from Wikipedia; a strong model answers many questions with no retrieval. Always run a closed-book baseline (the generator with an empty context). If it scores close to your RAG system, the benchmark is not measuring retrieval.</li>
+  <li><strong>Generator leakage.</strong> If the same LLM writes the questions, builds the index and judges the answers, it can favor its own phrasings. GraphRAG-style evaluation sets are often LLM-generated from the corpus, so check a sample by hand.</li>
+  <li><strong>Gold leakage.</strong> If you wrote reference answers by reading your own graph, you have measured agreement with the graph, not correctness. Write gold from the source documents.</li>
+</ul>
+<p>The Kestrel corpus is fictional precisely so that closed-book answers fail. A model cannot know that Priya Nair became CTO in March 2026 without reading document 12.</p>
+
+<h3>Cost ignored</h3>
+<p>Indexing a corpus with LLM extraction, summarization and reports costs far more than embedding it, and global search makes many more calls per question than basic RAG. A win that costs an order of magnitude more per question is a different product decision from a free win.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Sanchez and Dehnad, The Commercial Tax (2026)</span>
+  <p>This audit of multi-hop retrieval benchmarks (arXiv 2608.16096) points at what leaderboards leave out. The paper reports that several leading MuSiQue systems rely on an embedder licensed for non-commercial use without saying so, that most audited systems do not disclose indexing cost, and that GraphRAG indexing cost varies widely for the same corpus. It separates embedding, graph construction and query answering costs, and finds embedding is the small part. Report license and cost next to accuracy.</p>
+</div>
+
+<p>A fair-comparison checklist to paste into every evaluation report:</p>
+<ul class="checklist">
+  <li><input type="checkbox" aria-label="Done"> <span>Same generator, response type, context budget and embedder for every method</span></li>
+  <li><input type="checkbox" aria-label="Done"> <span>Baselines tuned: chunk size, top-k, hybrid search, reranker</span></li>
+  <li><input type="checkbox" aria-label="Done"> <span>Closed-book baseline reported</span></li>
+  <li><input type="checkbox" aria-label="Done"> <span>Pairwise judging with swapped orders, repeated runs, and consistency rate</span></li>
+  <li><input type="checkbox" aria-label="Done"> <span>Judge calibrated on a hand-labeled sample; answer lengths reported</span></li>
+  <li><input type="checkbox" aria-label="Done"> <span>Results sliced by question type, with confidence intervals</span></li>
+  <li><input type="checkbox" aria-label="Done"> <span>Indexing cost, cost per query and latency reported next to quality</span></li>
+</ul>
+
+<h2>Building a golden set for your corpus</h2>
+<p>Public benchmarks will not tell you whether GraphRAG helps on your contracts, tickets or research notes. You need a golden set: questions, reference answers and supporting evidence, written from your documents. <code>code/data/questions.jsonl</code> is a small one for Kestrel. Each line looks like this:</p>
+
+<pre data-file="code/data/questions.jsonl"><code class="language-json">{"id": "q06", "question": "Who is the CTO of Kestrel Labs?", "type": "temporal",
+ "answer": "Priya Nair, since March 2026. Jonas Vehl was CTO from 2021 until March 2026, when he became Chief Scientist.",
+ "supporting_docs": ["01_herald_kestrel_founding", "12_interview_leadership_change_2026"]}</code></pre>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "From documents to a golden set",
+  "perRow": 3,
+  "stages": [
+    {"label": "Sample documents", "detail": "Pick documents across sources and time. For Kestrel: news, blog posts, the board memo, council minutes and the 2026 interview."},
+    {"label": "Draft by type", "detail": "Write questions per type: single-hop, multi-hop, temporal, global, and unanswerable. An LLM may draft; a person decides."},
+    {"label": "Answer from sources", "detail": "Write the reference answer by reading the documents, never the graph. Record <strong>supporting_docs</strong> (or text unit ids)."},
+    {"label": "Second reviewer", "detail": "Someone else answers the question blind. Disagreements reveal ambiguous questions; rewrite or drop them."},
+    {"label": "Freeze and version", "detail": "Commit the file with a version. Never tune prompts on the test split; keep a separate dev split."},
+    {"label": "Grow from failures", "detail": "Every production failure becomes a new question in the dev split, so the set tracks what users actually ask."}
+  ]
+}
+</script>
+</div>
+
+<h3>What to include</h3>
+<ul>
+  <li><strong>Every question type you serve.</strong> The Kestrel set has five single-hop, eight multi-hop, five temporal and five global questions. Types are the slices you will report.</li>
+  <li><strong>Unanswerable questions.</strong> “What is Kestrel Labs' stock price?” The correct answer is a refusal. Without these, a system that always guesses looks as good as one that knows when to stop. MultiHop-RAG's null queries exist for this reason.</li>
+  <li><strong>As-of questions.</strong> “Who was CTO when the bleaching was detected?” (Jonas Vehl) tests whether retrieval respects time, a topic <a href="27-incremental-temporal.html">Chapter 27</a> builds on.</li>
+  <li><strong>Evidence at the right granularity.</strong> Document ids are easy to label and good enough for context recall. Text-unit ids let you measure precision, but they change when you re-chunk, so store character offsets if you want both.</li>
+</ul>
+
+<h3>How many questions?</h3>
+<p>Fewer than you fear for a first signal, more than you think for a decision. The standard error of an accuracy p over n independent questions is √(p(1 − p) / n). With n = 23 and p = 0.6, that is √(0.24 / 23) ≈ 0.10. A 95% interval spans roughly ±0.20. Two systems at 0.55 and 0.65 are indistinguishable on the Kestrel set. At n = 200 the standard error falls to about 0.035, and ten-point gaps start to mean something.</p>
+<p>Because every system answers the same questions, use a <strong>paired</strong> comparison: compute the per-question difference in score and bootstrap the mean difference. Paired tests are much more sensitive than comparing two independent intervals, because question difficulty cancels out.</p>
+
+<h3>Slice by question type</h3>
+<p>An overall average hides the result that matters most: different methods win different question types. The GraphRAG paper's own framing is that global search is for sensemaking questions and local search is for entity-specific ones. Your report should look like this, with one row per method and one column per type, plus cost:</p>
+<table>
+  <thead><tr><th>Method</th><th>Single-hop F1</th><th>Multi-hop F1</th><th>Temporal F1</th><th>Global win rate vs. basic</th><th>Context recall</th><th>LLM calls per question</th></tr></thead>
+  <tbody>
+    <tr><td>basic</td><td>…</td><td>…</td><td>…</td><td>0.50 (by definition)</td><td>…</td><td>1</td></tr>
+    <tr><td>local</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>1</td></tr>
+    <tr><td>global</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>map batches + 1</td></tr>
+    <tr><td>ppr</td><td>…</td><td>…</td><td>…</td><td>…</td><td>…</td><td>2</td></tr>
+  </tbody>
+</table>
+<p>The cells are empty on purpose: fill them from your own run in the project. What you should expect to see, and check, is a pattern rather than a winner: global search strong on the global slice and weak on single-hop facts, local and PPR search stronger on multi-hop, and temporal questions weak everywhere until you add time-aware retrieval.</p>
+
+<h2>The evaluation harness in code</h2>
+<p>The harness has three layers: metric functions that know nothing about GraphRAG, a pairwise judge that handles order swapping, and <code>run_eval</code>, which runs each system on each question and writes one row per question and system. Search functions in <code>minigraphrag.search</code> all take <code>(index, query, llm)</code> and return a <code>SearchResult</code> with <code>answer</code>, <code>sources</code> (document ids) and <code>llm_calls</code>. <code>run_eval</code> only needs a function from question to result, so any system, including a framework from <a href="28-frameworks-in-practice.html">Chapter 28</a>, can be plugged in with a one-line wrapper.</p>
+
+<pre data-file="minigraphrag/evaluation.py"><code class="language-python">import json
+import re
+import string
+from collections import Counter
+from pathlib import Path
+from typing import Callable
+
+from . import prompts as P
+from .llm import LLM, parse_json_response
+
+def normalize_answer(text: str) -&gt; str:
+    """SQuAD-style normalisation: lowercase, strip punctuation, articles and extra whitespace."""
+    text = text.lower()
+    text = "".join(ch for ch in text if ch not in set(string.punctuation))
+    text = re.sub(r"\b(a|an|the)\b", " ", text)
+    return " ".join(text.split())
+
+def exact_match(prediction: str, gold: str) -&gt; float:
+    return float(normalize_answer(prediction) == normalize_answer(gold))
+
+def token_f1(prediction: str, gold: str) -&gt; float:
+    pred, ref = normalize_answer(prediction).split(), normalize_answer(gold).split()
+    common = Counter(pred) &amp; Counter(ref)          # multiset intersection
+    overlap = sum(common.values())
+    if not pred or not ref or overlap == 0:
+        return 0.0
+    precision, recall = overlap / len(pred), overlap / len(ref)
+    return 2 * precision * recall / (precision + recall)
+
+def context_recall(retrieved_doc_ids: list[str], supporting_docs: list[str]) -&gt; float:
+    """Fraction of the supporting documents that made it into the context."""
+    if not supporting_docs:
+        return 1.0
+    return len(set(retrieved_doc_ids) &amp; set(supporting_docs)) / len(set(supporting_docs))
+
+def load_questions(path: str | Path) -&gt; list[dict]:
+    return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+
+def llm_judge_pairwise(
+    llm: LLM, question: str, answer_a: str, answer_b: str,
+    criteria: tuple[str, ...] = ("comprehensiveness", "diversity", "empowerment", "directness"),
+    swap: bool = True,
+) -&gt; dict[str, dict]:
+    """Per criterion: {"comprehensiveness": {"winner": "A"|"B"|"TIE", "reasoning": ...}}.
+
+    With swap=True we ask twice with the order reversed and only declare a
+    winner if both orders agree; otherwise the position decided, so it is a TIE.
+    """
+    results = {}
+    for criterion in criteria:
+        def ask(a: str, b: str) -&gt; dict:
+            prompt = P.PAIRWISE_JUDGE_PROMPT.format(
+                criterion=criterion, question=question, answer_a=a, answer_b=b,
+                criterion_description=P.CRITERIA_DESCRIPTIONS.get(criterion, ""))
+            return parse_json_response(llm.complete(prompt, json=True))
+
+        first = ask(answer_a, answer_b)
+        winner = str(first.get("winner", "TIE")).upper()
+        if swap:
+            second = str(ask(answer_b, answer_a).get("winner", "TIE")).upper()
+            flipped = {"A": "B", "B": "A"}.get(second, "TIE")   # map the slot back to the answer
+            winner = winner if winner == flipped else "TIE"
+        results[criterion] = {"winner": winner, "reasoning": first.get("reasoning", "")}
+    return results
+
+def run_eval(questions: list[dict], systems: dict[str, Callable[[str], object]]) -&gt; dict:
+    """Run every system on every question. systems: name -&gt; (question -&gt; SearchResult).
+
+    Returns per-question rows and per-system means, overall and by question type.
+    """
+    rows = []
+    for q in questions:
+        for name, fn in systems.items():
+            result = fn(q["question"])
+            rows.append({
+                "id": q["id"], "type": q.get("type", ""), "system": name, "answer": result.answer,
+                "exact_match": exact_match(result.answer, q["answer"]),
+                "token_f1": token_f1(result.answer, q["answer"]),
+                "context_recall": context_recall(getattr(result, "sources", []), q.get("supporting_docs", [])),
+            })
+    summary: dict[str, dict] = {}
+    for name in systems:
+        mine = [r for r in rows if r["system"] == name]
+        groups = {"all": mine, **{t: [r for r in mine if r["type"] == t] for t in sorted({r["type"] for r in mine})}}
+        summary[name] = {
+            g: {m: round(sum(r[m] for r in rs) / len(rs), 3) for m in ("exact_match", "token_f1", "context_recall")}
+            | {"n": len(rs)}
+            for g, rs in groups.items() if rs
+        }
+    return {"rows": rows, "summary": summary}</code></pre>
+
+<p>The package also ships <code>format_summary(result)</code> for a plain-text table, and the CLI wires everything together. Slicing by question type is built into <code>summary</code>:</p>
+
+<pre data-file="terminal"><code class="language-bash">python -m minigraphrag index --input data/corpus --output .index --llm openai --cache-dir .cache/llm
+python -m minigraphrag eval --index .index --methods basic,local,global,ppr --llm openai --cache-dir .cache/llm
+# pairwise judge of the first two methods (global = A, basic = B), both orders per criterion
+python -m minigraphrag eval --index .index --methods global,basic --llm openai --judge --cache-dir .cache/llm</code></pre>
+
+<p>The same run from Python, with a judge from a different model family than the system under test:</p>
+
+<pre data-file="scripts/eval_kestrel.py"><code class="language-python">from minigraphrag.llm import get_llm
+from minigraphrag.indexer import load_index
+from minigraphrag.cli import make_search
+from minigraphrag.evaluation import load_questions, run_eval, format_summary, llm_judge_pairwise
+
+llm = get_llm("openai", cache_dir=".cache/llm")          # the system under test
+judge = get_llm("anthropic", cache_dir=".cache/judge")    # a different model family judges
+index = load_index(".index")
+questions = load_questions("data/questions.jsonl")
+
+systems = {m: make_search(m, index, llm) for m in ("basic", "local", "global", "ppr")}
+result = run_eval(questions, systems)
+print(format_summary(result))
+
+answers = {(r["id"], r["system"]): r["answer"] for r in result["rows"]}
+for method in ("local", "global", "ppr"):
+    score = {c: 0.0 for c in ("comprehensiveness", "diversity", "empowerment", "directness")}
+    for q in questions:
+        verdicts = llm_judge_pairwise(judge, q["question"], answers[q["id"], method], answers[q["id"], "basic"])
+        for c, v in verdicts.items():
+            score[c] += {"A": 1.0, "TIE": 0.5, "B": 0.0}[v["winner"]]
+    print(method, "vs basic:", {c: round(s / len(questions), 2) for c, s in score.items()})</code></pre>
+
+<div class="callout tip">
+  <span class="callout-title">Cache everything, but know what the cache does to repeats</span>
+  <p>Wrap both the system LLM and the judge in <code>CachedLLM</code> (here via <code>get_llm(..., cache_dir=...)</code>). When you change only the judge prompt, the system's answers come from cache and you pay only for judging. The cache key is a hash of model, system prompt, prompt and JSON flag, so repeating the same judgment returns the identical cached verdict. For repeated runs, either skip the cache for the judge or make each run's prompt differ (for example a “Run 2” line).</p>
+</div>
+
+<h3>Extensions: precision, nDCG and paired intervals</h3>
+<p>The reference module keeps to the essentials. Add these to your copy of <code>evaluation.py</code> in the project; they operate on the same rows <code>run_eval</code> returns.</p>
+
+<pre data-file="minigraphrag/evaluation.py"><code class="language-python">import math
+import random
+
+def context_precision(retrieved_doc_ids: list[str], supporting_docs: list[str]) -&gt; float:
+    """Share of retrieved documents that are gold. Guards against 'retrieve everything'."""
+    if not retrieved_doc_ids:
+        return 0.0
+    return len(set(retrieved_doc_ids) &amp; set(supporting_docs)) / len(set(retrieved_doc_ids))
+
+def ndcg_at_k(ranked: list[str], supporting_docs: list[str], k: int) -&gt; float:
+    gold = set(supporting_docs)
+    dcg = sum(1 / math.log2(i + 2) for i, d in enumerate(ranked[:k]) if d in gold)
+    idcg = sum(1 / math.log2(i + 2) for i in range(min(k, len(gold))))
+    return dcg / idcg if idcg else 0.0
+
+def paired_bootstrap(rows: list[dict], system_a: str, system_b: str, metric: str = "token_f1",
+                     n_boot: int = 2000, seed: int = 0) -&gt; tuple[float, float, float]:
+    """Mean per-question difference (a - b) with a 95% bootstrap interval."""
+    a = {r["id"]: r[metric] for r in rows if r["system"] == system_a}
+    b = {r["id"]: r[metric] for r in rows if r["system"] == system_b}
+    diffs = [a[q] - b[q] for q in a if q in b]
+    rng = random.Random(seed)
+    means = sorted(sum(rng.choices(diffs, k=len(diffs))) / len(diffs) for _ in range(n_boot))
+    return sum(diffs) / len(diffs), means[int(0.025 * n_boot)], means[int(0.975 * n_boot) - 1]</code></pre>
+<p>If the interval for local minus basic contains zero, you have not shown a difference. Say so in the report instead of rounding the means and calling one bigger.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 25.1 <span class="level">Warm-up</span></h4>
+  <p>The gold answer to “Who is the CTO of Kestrel Labs?” is <em>Priya Nair</em>. Compute exact match and token F1 by hand for (a) “Priya Nair is the CTO.” and (b) “Jonas Vehl and Priya Nair”. What does (b) tell you about token F1 on temporal questions?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Normalized prediction: <code>priya nair is cto</code> (the article “the” is removed), 4 tokens. Gold: <code>priya nair</code>, 2 tokens. Shared 2. Precision 2/4 = 0.5, recall 2/2 = 1.0, F1 = 2(0.5)(1.0)/1.5 = 0.667. EM = 0.</p>
+    <p>(b) Normalized: <code>jonas vehl and priya nair</code>, 5 tokens. Shared 2. Precision 2/5 = 0.4, recall 1.0, F1 = 2(0.4)(1.0)/1.4 = 0.571. EM = 0.</p>
+    <p>Answer (b) hedges between the former and current CTO and still earns 0.571, only a little below the correct (a). Token F1 rewards naming every candidate. For temporal questions, pair it with a check that penalizes the stale fact, for example an LLM-graded rubric (“names Priya Nair as current CTO; does not present Jonas Vehl as current”) or a short-answer format with EM.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 25.2 <span class="level">Core</span></h4>
+  <p>PPR search returns documents for q01 in the order <code>[08, 07, 12, 09, 04]</code>. Gold is {07, 08, 09}. Compute recall@3, precision@3, MRR, nDCG@3 and nDCG@5. Compare with basic search's nDCG@5 of 0.704 from the chapter.</p>
+  <details class="hint"><summary>Hint</summary><p>1/log<sub>2</sub>2 = 1, 1/log<sub>2</sub>3 ≈ 0.631, 1/log<sub>2</sub>4 = 0.5, 1/log<sub>2</sub>5 ≈ 0.431.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ul>
+      <li>Top 3 is 08, 07, 12: two gold. recall@3 = 2/3 = 0.667, precision@3 = 2/3 = 0.667.</li>
+      <li>First gold document at rank 1: MRR = 1.0.</li>
+      <li>DCG@3 = 1 + 0.631 + 0 = 1.631. IDCG@3 = 1 + 0.631 + 0.5 = 2.131. nDCG@3 = 0.765.</li>
+      <li>DCG@5 adds 09 at rank 4: 1.631 + 0.431 = 2.062. IDCG@5 is still 2.131 (only three gold documents). nDCG@5 = 0.967. recall@5 = 1.0.</li>
+    </ul>
+    <p>PPR puts both the acquisition article and the board memo at the top and gets all three gold documents in the top 5, so nDCG@5 is 0.967 versus 0.704 for basic search. If the context budget only fits three documents, though, both methods miss one hop, so check k against your actual budget.</p>
+    <pre><code class="language-python">from minigraphrag.evaluation import ndcg_at_k
+assert round(ndcg_at_k(["08", "07", "12", "09", "04"], ["07", "08", "09"], 3), 3) == 0.765
+assert round(ndcg_at_k(["08", "07", "12", "09", "04"], ["07", "08", "09"], 5), 3) == 0.967</code></pre>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 25.3 <span class="level">Core</span></h4>
+  <p>A judge compares local search (L) with basic RAG (B) on eight questions. Run 1 puts L in slot A; run 2 puts B in slot A. Verdicts (run 1, run 2): Q1 (A, B), Q2 (A, A), Q3 (B, A), Q4 (A, B), Q5 (TIE, TIE), Q6 (A, A), Q7 (A, B), Q8 (B, B). Compute: the swapped win rate for L, the run-1-only win rate, the consistency rate, and the share of decisive verdicts that chose slot A.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Translate each verdict to a winner. Run 1: A means L, B means B. Run 2: A means B, B means L.</p>
+    <table>
+      <thead><tr><th>Q</th><th>Run 1</th><th>Run 2</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>L</td><td>L</td><td>L wins</td></tr>
+        <tr><td>2</td><td>L</td><td>B</td><td>inconsistent, 0.5</td></tr>
+        <tr><td>3</td><td>B</td><td>B</td><td>B wins</td></tr>
+        <tr><td>4</td><td>L</td><td>L</td><td>L wins</td></tr>
+        <tr><td>5</td><td>tie</td><td>tie</td><td>tie, 0.5</td></tr>
+        <tr><td>6</td><td>L</td><td>B</td><td>inconsistent, 0.5</td></tr>
+        <tr><td>7</td><td>L</td><td>L</td><td>L wins</td></tr>
+        <tr><td>8</td><td>B</td><td>L</td><td>inconsistent, 0.5</td></tr>
+      </tbody>
+    </table>
+    <ul>
+      <li>Swapped win rate for L: (3 + 0.5 × 4) / 8 = 5/8 = 0.625.</li>
+      <li>Run 1 only: L wins Q1, Q2, Q4, Q6, Q7 (5), tie Q5, B wins Q3, Q8. (5 + 0.5) / 8 = 0.6875.</li>
+      <li>Consistency: Q1, Q3, Q4, Q5, Q7 agree across orders: 5/8 = 0.625.</li>
+      <li>Slot A share: run 1 has A in Q1, Q2, Q4, Q6, Q7 (5) and B in Q3, Q8 (2); run 2 has A in Q2, Q3, Q6 (3) and B in Q1, Q4, Q7, Q8 (4). A = 8 of 14 decisive verdicts = 0.571.</li>
+    </ul>
+    <p>A judge with no position bias would sit near 0.5 on slot share. Here the bias is mild, but it still inflates L's single-order win rate by six points, and three of eight pairs were decided by position. With this few questions, neither 0.625 nor 0.6875 is distinguishable from 0.5 anyway.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 25.4 <span class="level">Core</span></h4>
+  <p>Extend the harness to (a) add a closed-book method that answers with an empty context, and (b) print, for each question type, the mean F1 of every method with a paired bootstrap interval against basic search. Run it with <code>MockLLM</code> first to check the plumbing.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.llm import MockLLM
+from minigraphrag.indexer import build_index
+from minigraphrag.cli import make_search
+from minigraphrag.search.common import SearchResult, generate_answer
+from minigraphrag.evaluation import load_questions, run_eval
+# paired_bootstrap is the extension you added from this chapter
+from minigraphrag.evaluation import paired_bootstrap
+
+llm = MockLLM()
+index = build_index("data/corpus", ".index", llm)
+questions = load_questions("data/questions.jsonl")
+
+def closed_book(question):
+    # Same system prompt and generator, no evidence: measures what the model already knows.
+    return SearchResult(generate_answer(llm, question, ""), "closed_book", "", {}, [], llm_calls=1)
+
+systems = {m: make_search(m, index, llm) for m in ("basic", "local", "global", "ppr")}
+systems["closed_book"] = closed_book
+rows = run_eval(questions, systems)["rows"]
+
+for qtype in sorted({q["type"] for q in questions}):
+    sliced = [r for r in rows if r["type"] == qtype]
+    for name in systems:
+        if name == "basic":
+            continue
+        mean_diff, lo, hi = paired_bootstrap(sliced, name, "basic", "token_f1")
+        flag = "" if lo &gt; 0 or hi &lt; 0 else "  (no clear difference)"
+        print(f"{qtype:11s} {name:11s} - basic: {mean_diff:+.3f} [{lo:+.3f}, {hi:+.3f}]{flag}")</code></pre>
+    <p>With five questions per slice, expect wide intervals, many of which contain zero; that is the correct conclusion, not a bug. (With <code>MockLLM</code> the F1 differences are tiny anyway, because its answers are extractive heuristics.) The closed-book row should be far below every retrieval method on Kestrel, because the corpus is fictional. On HotpotQA the same row will be surprisingly close, which is the leakage check doing its job.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 25.5 <span class="level">Stretch</span></h4>
+  <p>A vendor reports that its GraphRAG product beats vector RAG with a 78% win rate on comprehensiveness across 100 LLM-generated questions about your documents. Design the follow-up evaluation you would run before believing it. Be specific about controls, metrics and what result would change your mind.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>A good design attacks each way the number could be inflated:</p>
+    <ol>
+      <li><strong>Baseline strength.</strong> Rebuild the vector baseline with tuned chunking, hybrid BM25 plus embeddings, a reranker, and the same context budget and generator as the product. Report the win rate against both the vendor's baseline and yours.</li>
+      <li><strong>Judge controls.</strong> Swap orders, repeat runs, report consistency rate. Use a judge from a different model family. Add directness as a control criterion and report mean answer length for both systems. Recompute win rate on a length-matched subset (answers within 20% of each other in words).</li>
+      <li><strong>Questions.</strong> Replace LLM-generated questions with a golden set written by users, sliced into single-hop, multi-hop, temporal, global and unanswerable. Include at least 30 per slice you care about.</li>
+      <li><strong>Reference-based metrics.</strong> For factual slices, measure EM or F1 and context recall against supporting documents. For all answers, measure faithfulness and citation precision.</li>
+      <li><strong>Cost and latency.</strong> Record indexing cost, cost per query and p95 latency for both systems.</li>
+    </ol>
+    <p>What would change your mind: if the tuned baseline ties on single-hop and multi-hop slices, the product wins only on the global slice, and the win shrinks sharply on length-matched pairs, then the 78% mostly measured verbosity on sensemaking questions. That can still justify the product for sensemaking use cases, but at its measured cost, not as a general upgrade.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why judge each answer pair twice with the order swapped?</p>
+  <ol>
+    <li>To double the sample size cheaply</li>
+    <li>Because the judge's temperature is random</li>
+    <li data-correct>LLM judges can prefer a slot regardless of content; disagreement across orders exposes those cases so they count as ties</li>
+    <li>The GraphRAG paper requires exactly two runs</li>
+  </ol>
+  <div class="explain">Order swapping targets position bias specifically. Repeated runs handle sampling noise; swaps handle the systematic preference for slot A or B.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the GraphRAG paper's evaluation, what role does the directness criterion play?</p>
+  <ol>
+    <li>It is the main metric for global questions</li>
+    <li data-correct>It acts as a control, since it pulls against comprehensiveness and diversity and no method should win everything</li>
+    <li>It measures citation precision</li>
+    <li>It replaces exact match for long answers</li>
+  </ol>
+  <div class="explain">A focused answer is more direct but less comprehensive. If one system wins all four criteria by large margins, the judge may be rewarding something other than the criteria, such as length or position.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Global search scores context recall of 1.0 on every question, including single-hop facts. What is the most likely explanation?</p>
+  <ol>
+    <li>Global search is the best retriever for all question types</li>
+    <li>The golden set's supporting docs are wrong</li>
+    <li>Token F1 was computed incorrectly</li>
+    <li data-correct>Its sources are mapped from community reports that cover most documents, so recall is trivially high; check context precision</li>
+  </ol>
+  <div class="explain">Retrieving everything maximizes recall. Context precision, or scoring only cited sources, reveals whether the evidence was actually targeted.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">On the 23 Kestrel questions, local search scores 0.61 accuracy and basic RAG 0.55. What can you conclude?</p>
+  <ol>
+    <li>Local search is about 11% better</li>
+    <li data-correct>Nothing yet: with n = 23 the standard error is about 0.10, so a paired test would likely not separate them</li>
+    <li>Basic RAG is better because it is cheaper</li>
+    <li>The judge is biased</li>
+  </ol>
+  <div class="explain">√(0.6 × 0.4 / 23) ≈ 0.10. A six-point gap is well inside the noise. Use a paired bootstrap and more questions before deciding.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Your RAG system scores well on HotpotQA, and so does the same model with an empty context. What does that indicate?</p>
+  <ol>
+    <li>The retriever is excellent</li>
+    <li>HotpotQA is too hard</li>
+    <li data-correct>The benchmark largely measures pretraining knowledge for this model, so it says little about your retrieval</li>
+    <li>You should switch to token F1</li>
+  </ol>
+  <div class="explain">A closed-book baseline is the standard leakage check. Wikipedia-derived benchmarks are heavily represented in pretraining data. A fictional or private corpus avoids this.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which benchmark would you use to evaluate extraction and graph construction as well as reasoning over a graph?</p>
+  <ol>
+    <li>MetaQA</li>
+    <li>WebQSP</li>
+    <li data-correct>MuSiQue, because you must build any graph from its text passages</li>
+    <li>FactKG</li>
+  </ol>
+  <div class="explain">MetaQA, WebQSP and FactKG provide a curated knowledge graph (WikiMovies, Freebase, DBpedia), so construction quality is not tested. Text benchmarks make you extract the graph yourself.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">An answer cites five documents; two of them support the sentences they are attached to. What is its citation precision?</p>
+  <ol>
+    <li>0.2</li>
+    <li data-correct>0.4</li>
+    <li>0.5</li>
+    <li>It depends on how many gold documents exist</li>
+  </ol>
+  <div class="explain">Citation precision is supporting citations over all citations: 2/5. The number of gold documents affects citation recall, not precision.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I use RAGAS or a similar library instead of writing metrics myself?</summary>
+  <div><p>Use one once you understand what it computes. Libraries such as RAGAS and ARES package faithfulness, answer relevance and context metrics with LLM graders, which saves time. But their scores depend on their prompts and judge models, and version changes can shift numbers. Writing EM, F1, recall and a pairwise judge yourself (about 100 lines) teaches you what the library numbers mean, and gives you a stable baseline to check the library against.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How many judge runs are enough?</summary>
+  <div><p>Start with one run per order (two calls per pair) and measure consistency. If consistency is high (say above 0.85), extra runs change little. If it is low, more runs average out noise but cannot fix a judge that does not understand the criterion; improve the prompt or the judge model first. The GraphRAG paper used five repetitions per comparison.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I evaluate global search with EM or F1?</summary>
+  <div><p>Not meaningfully. The reference answer to “What are the main themes?” is one reasonable summary among many. Use pairwise judging, or a key-point rubric: list the points a good answer should cover (for Kestrel: reef monitoring, supply-chain risk, funding, regulation) and have an LLM or a person mark which points each answer covers. The rubric gives a recall-like score that is less sensitive to style than a pairwise verdict.</p></div>
+</details>
+
+<details class="qa">
+  <summary>My golden set is small. Is an LLM-generated set better than nothing?</summary>
+  <div><p>For development, yes: generate many questions per document, filter them, and use them to catch regressions. For decisions, keep a smaller human-verified test set. Generated questions tend to copy phrasing from the source, which favors lexical retrieval, and they rarely include unanswerable or as-of questions unless you ask for them explicitly.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I evaluate the graph itself when I have no labels at all?</summary>
+  <div><p>Use proxies and spot checks. Track dropped-record rate, entities per chunk, the share of relationships whose endpoints appear in the cited text unit, community stability across seeds, and the rate of report findings that cite rows that do not support them. Then label a small sample (three chunks, twenty findings); an hour of labeling gives you a far better signal than any proxy.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a Kestrel evaluation report</h3>
+  <p>Produce the evaluation report you would hand to a team deciding whether to ship GraphRAG: stage metrics, answer metrics, judged comparisons, cost, and an honest conclusion.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>minigraphrag/evaluation.py</code> with <code>exact_match</code>, <code>token_f1</code>, <code>context_recall</code>, <code>context_precision</code>, <code>ndcg_at_k</code>, <code>llm_judge_pairwise</code>, <code>run_eval</code> and unit tests using the worked numbers in this chapter</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Extraction precision and recall on three hand-labeled text units, and resolution pairwise precision and recall on the Kestrel alias clusters</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A results table for basic, local, global and PPR search sliced by question type, with context recall, context precision, F1 and LLM calls per question</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Pairwise win rates against basic search on all four criteria, with order swapping, consistency rate and mean answer length</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A closed-book baseline, paired bootstrap intervals, and at least three new questions you added (one unanswerable, one as-of)</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A one-paragraph conclusion that names which method to use for which question type and what the result cost</span></li>
+  </ul>
+  <p><strong>Done when</strong> someone else can rerun your script from a clean checkout, get the same tables from the cache, and agree with your conclusion from the numbers alone.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Measure each stage against its own gold data; end-to-end accuracy alone cannot tell you what broke.</li>
+    <li>Use EM and token F1 for short answers, context recall with context precision for retrieval, and faithfulness and citation precision for grounding.</li>
+    <li>For global questions, use pairwise LLM judging with the four GraphRAG criteria, swapped orders, repeated runs, a consistency rate and length reporting.</li>
+    <li>Pick benchmarks by what they test: KGQA sets give you the graph; text sets make you build it. Run a closed-book baseline to detect leakage.</li>
+    <li>Distrust wins that come from weak baselines, verbose answers, a single judge or ignored cost, including your own.</li>
+    <li>Build a versioned golden set by question type, include unanswerable and as-of questions, and report sliced results with paired confidence intervals.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Xiang et al. <a href="https://arxiv.org/abs/2506.05690">When to use Graphs in RAG: A Comprehensive Analysis for Graph Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2506.05690, 2025</span></li>
+  <li>Zhou et al. <a href="https://arxiv.org/abs/2503.04338">In-depth Analysis of Graph-based RAG in a Unified Framework</a> (DIGIMON). <span class="venue">arXiv 2503.04338, 2025</span></li>
+  <li>Tang and Yang. <a href="https://arxiv.org/abs/2401.15391">MultiHop-RAG: Benchmarking Retrieval-Augmented Generation for Multi-Hop Queries</a>. <span class="venue">arXiv 2401.15391, 2024</span></li>
+  <li>Lyu et al. <a href="https://arxiv.org/abs/2401.17043">CRUD-RAG: A Comprehensive Chinese Benchmark for Retrieval-Augmented Generation of Large Language Models</a>. <span class="venue">arXiv 2401.17043, 2024</span></li>
+  <li>Yang et al. <a href="https://arxiv.org/abs/1809.09600">HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering</a>. <span class="venue">EMNLP 2018</span></li>
+  <li>Ho et al. <a href="https://arxiv.org/abs/2011.01060">Constructing A Multi-hop QA Dataset for Comprehensive Evaluation of Reasoning Steps</a> (2WikiMultiHopQA). <span class="venue">COLING 2020</span></li>
+  <li>Trivedi et al. <a href="https://arxiv.org/abs/2108.00573">MuSiQue: Multihop Questions via Single-hop Question Composition</a>. <span class="venue">TACL 2022</span></li>
+  <li>Zhang et al. <a href="https://arxiv.org/abs/1709.04071">Variational Reasoning for Question Answering with Knowledge Graph</a> (MetaQA). <span class="venue">AAAI 2018</span></li>
+  <li>Yih et al. <a href="https://aclanthology.org/P16-2033/">The Value of Semantic Parse Labeling for Knowledge Base Question Answering</a> (WebQSP). <span class="venue">ACL 2016</span></li>
+  <li>Talmor and Berant. <a href="https://arxiv.org/abs/1803.06643">The Web as a Knowledge-base for Answering Complex Questions</a> (ComplexWebQuestions). <span class="venue">NAACL 2018</span></li>
+  <li>Kim et al. <a href="https://arxiv.org/abs/2305.06590">FactKG: Fact Verification via Reasoning on Knowledge Graphs</a>. <span class="venue">ACL 2023</span></li>
+  <li>Zheng et al. <a href="https://arxiv.org/abs/2306.05685">Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena</a>. <span class="venue">NeurIPS 2023 Datasets and Benchmarks</span></li>
+  <li>Wang et al. <a href="https://arxiv.org/abs/2305.17926">Large Language Models are not Fair Evaluators</a>. <span class="venue">arXiv 2305.17926, 2023</span></li>
+  <li>Es et al. <a href="https://arxiv.org/abs/2309.15217">Ragas: Automated Evaluation of Retrieval Augmented Generation</a>. <span class="venue">arXiv 2309.15217, 2023</span></li>
+  <li>Saad-Falcon et al. <a href="https://arxiv.org/abs/2311.09476">ARES: An Automated Evaluation Framework for Retrieval-Augmented Generation Systems</a>. <span class="venue">arXiv 2311.09476, 2023</span></li>
+  <li>Sanchez and Dehnad. <a href="https://arxiv.org/abs/2608.16096">The Commercial Tax: Rent-vs-Own Blind Spots in Multi-Hop Retrieval Benchmarks</a>. <span class="venue">arXiv 2608.16096, 2026</span></li>
+  <li>Akarsu et al. <a href="https://arxiv.org/abs/2608.00705">A Triple-Robustness Analysis of Retrieval-Augmented Generation for Multi-Hop Requirements Traceability</a>. <span class="venue">arXiv 2608.00705, 2026</span></li>
+  <li>Akarsu and Ozdemir. <a href="https://arxiv.org/abs/2608.05153">Universal Pathologies, Conditional Consequences: A Triple-Robustness Analysis of RAG for Multi-Hop Traceability</a>. <span class="venue">arXiv 2608.05153, 2026</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch25-judge", function (el, cfg, api) {
+  var W = 720, H = 300;
+  var stage = api.frame(el, cfg).stage;
+  var svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Pairwise judging" }, stage);
+  var cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  var items = cfg.items || [];
+  var steps = [{ intro: true }];
+  items.forEach(function (it, i) { steps.push({ i: i, run: 1 }); steps.push({ i: i, run: 2 }); });
+
+  function wrap(text, n) {
+    var words = String(text).split(/\s+/), lines = [], cur = "";
+    words.forEach(function (w) {
+      if ((cur + " " + w).trim().length > n) { lines.push(cur.trim()); cur = w; } else { cur += " " + w; }
+    });
+    if (cur.trim()) lines.push(cur.trim());
+    return lines;
+  }
+  function text(x, y, str, cls, anchor) {
+    var t = api.svgEl("text", { x: x, y: y, class: "d-text " + (cls || ""), "text-anchor": anchor || "start" }, svg);
+    t.textContent = str; return t;
+  }
+  function winner(it, run) {            // which system the verdict favors
+    var v = run === 1 ? it.run1 : it.run2;
+    if (v === "TIE") return "tie";
+    if (run === 1) return v === "A" ? "x" : "y";
+    return v === "A" ? "y" : "x";
+  }
+  function tally(k) {
+    var t = { xw: 0, yw: 0, ties: 0, flips: 0, done: 0, naive: 0, naiveN: 0 };
+    for (var s = 1; s <= k; s++) {
+      var st = steps[s], it = items[st.i];
+      if (st.run === 1) {
+        var w1 = winner(it, 1); t.naiveN++;
+        t.naive += w1 === "x" ? 1 : w1 === "tie" ? 0.5 : 0;
+      } else {
+        var a = winner(it, 1), b = winner(it, 2); t.done++;
+        if (a !== b) t.flips++;
+        else if (a === "x") t.xw++;
+        else if (a === "y") t.yw++;
+        else t.ties++;
+      }
+    }
+    return t;
+  }
+  function card(y, slot, sys, answer, win) {
+    api.svgEl("rect", { x: 14, y: y, width: 316, height: 92, rx: 8, class: "d-box " + (win ? "good" : (sys === cfg.x ? "node" : "edge")) }, svg);
+    text(28, y + 22, "Slot " + slot + ": " + sys, "bold");
+    wrap(answer, 44).slice(0, 3).forEach(function (ln, j) { text(28, y + 44 + j * 17, ln, "small"); });
+  }
+  function bar(x, y, label, value, n) {
+    text(x, y, label, "small");
+    api.svgEl("rect", { x: x, y: y + 6, width: 160, height: 12, rx: 3, class: "d-box ghost" }, svg);
+    if (n > 0) api.svgEl("rect", { x: x, y: y + 6, width: 160 * value, height: 12, rx: 3, class: "d-fill-node" }, svg);
+    api.svgEl("line", { x1: x + 80, y1: y + 6, x2: x + 80, y2: y + 18, class: "d-line dash" }, svg);
+    text(x + 168, y + 17, n > 0 ? api.fmt(value, 2) : "–", "mono");
+  }
+
+  function render(k) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    var st = steps[k];
+    var t = tally(k);
+    // Tally panel (right)
+    var tx = 494;
+    api.svgEl("rect", { x: tx - 12, y: 14, width: 234, height: 272, rx: 8, class: "d-box" }, svg);
+    text(tx, 38, "Tally for " + cfg.x, "bold");
+    text(tx, 62, "Consistent wins, X: " + t.xw);
+    text(tx, 82, "Consistent wins, Y: " + t.yw);
+    text(tx, 102, "Ties in both orders: " + t.ties);
+    text(tx, 122, "Position flips: " + t.flips);
+    var swapRate = t.done ? (t.xw + 0.5 * (t.ties + t.flips)) / t.done : 0;
+    var naiveRate = t.naiveN ? t.naive / t.naiveN : 0;
+    bar(tx, 156, "Win rate, both orders (" + t.done + " q)", swapRate, t.done);
+    bar(tx, 204, "Win rate, run 1 only (" + t.naiveN + " q)", naiveRate, t.naiveN);
+    text(tx, 262, "Dashed line: 0.5 (no difference)", "small");
+
+    if (st.intro) {
+      text(14, 30, "Each question is judged twice.", "bold");
+      wrap("Run 1 puts " + cfg.x + " in slot A. Run 2 swaps the answers, so " + cfg.y + " is in slot A. A win only counts if both runs agree.", 58)
+        .forEach(function (ln, j) { text(14, 58 + j * 20, ln); });
+      api.svgEl("rect", { x: 14, y: 150, width: 150, height: 40, rx: 6, class: "d-box node" }, svg);
+      text(89, 175, cfg.x, "small", "middle");
+      api.svgEl("rect", { x: 180, y: 150, width: 150, height: 40, rx: 6, class: "d-box edge" }, svg);
+      text(255, 175, cfg.y, "small", "middle");
+      text(14, 222, "Criterion: " + cfg.criterion, "mono");
+      cap.innerHTML = "Press <strong>Next</strong> to judge the first question. Green marks the slot the judge picked.";
+      return;
+    }
+    var it = items[st.i];
+    var xSlot = st.run === 1 ? "A" : "B";
+    var v = st.run === 1 ? it.run1 : it.run2;
+    wrap(it.id + ": " + it.question, 64).slice(0, 2).forEach(function (ln, j) { text(14, 26 + j * 17, ln, j ? "" : "bold"); });
+    var aSys = xSlot === "A" ? cfg.x : cfg.y, bSys = xSlot === "A" ? cfg.y : cfg.x;
+    var aAns = xSlot === "A" ? it.xAnswer : it.yAnswer, bAns = xSlot === "A" ? it.yAnswer : it.xAnswer;
+    card(66, "A", aSys, aAns, v === "A");
+    card(178, "B", bSys, bAns, v === "B");
+    // Judge box
+    api.svgEl("rect", { x: 346, y: 118, width: 126, height: 90, rx: 8, class: "d-box comm" }, svg);
+    text(409, 142, "Judge, run " + st.run, "small", "middle");
+    text(409, 176, v === "TIE" ? "TIE" : "picks " + v, "bold", "middle");
+    text(409, 196, v === "TIE" ? "" : "(" + (winner(it, st.run) === "x" ? cfg.x : cfg.y) + ")", "small", "middle");
+    api.svgEl("line", { x1: 330, y1: 112, x2: 346, y2: 140, class: "d-line faint" }, svg);
+    api.svgEl("line", { x1: 330, y1: 224, x2: 346, y2: 190, class: "d-line faint" }, svg);
+
+    if (st.run === 1) {
+      cap.innerHTML = "<strong>" + it.id + ", run 1.</strong> " + api.escapeHtml(cfg.x) + " sits in slot A. The judge " +
+        (v === "TIE" ? "calls a tie." : "picks slot " + v + ", which favors " + api.escapeHtml(winner(it, 1) === "x" ? cfg.x : cfg.y) + ".") +
+        " The run-1-only win rate updates now; the swapped win rate waits for run 2.";
+    } else {
+      cap.innerHTML = "<strong>" + it.id + ", run 2 (swapped).</strong> " + api.escapeHtml(it.note);
+    }
+  }
+  api.player(el, steps.length, render, { interval: 2200 });
+});
+</script>
+</body>
+</html>

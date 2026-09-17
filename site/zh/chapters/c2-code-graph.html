@@ -1,0 +1,1022 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capstone 2: a codebase assistant on a code graph | Graph RAG from Scratch</title>
+<meta name="description" content="Parse a Python repository with ast into a symbol graph, answer questions with symbol lookup, call chains, impact analysis, architecture communities, Text2Cypher and hybrid code search, and evaluate on a real open-source repository.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c2-code-graph.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c2-code-graph.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c2-code-graph.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="c2-code-graph" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Capstone 2: a codebase assistant on a code graph</h1>
+  <p class="lede">Code is the one corpus where the graph comes for free: imports, calls and class hierarchies are already there, precisely, in the syntax tree. In this capstone you parse a real Python repository into a symbol graph and build an assistant that answers “what calls this?”, “what breaks if I change it?” and “how is this package organized?” with evidence it can cite by file and line.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Parse a Python package with <code>ast</code> into modules, classes, functions, methods and CALLS, IMPORTS, CONTAINS and INHERITS edges, with docstrings as text</li>
+      <li>Answer structural questions with symbol lookup, call-chain paths and reverse-BFS impact analysis</li>
+      <li>Summarize architecture with community detection and minigraphrag's report generator</li>
+      <li>Load the graph into Neo4j and answer counting and listing questions with validated Text2Cypher</li>
+      <li>Combine BM25 over identifiers, embeddings over docstrings and call-graph expansion with reciprocal rank fusion</li>
+      <li>Evaluate the assistant on a golden set for a real repository and explain where static analysis misses edges</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Overview and architecture</h2>
+<p>Ask a vector RAG system over a repository “what breaks if I change <code>fit_to_budget</code>?” and it returns chunks that <em>mention</em> budgets. The answer you need is a set of functions reachable backwards through the call graph, most of which never mention budgets at all. That is a graph traversal, and <a href="32-domain-graphrag.html">Chapter 32</a> showed the two-pass parser that recovers the graph. This capstone turns it into an assistant with the same shape as the GraphRAG systems in the rest of the course: an index (the symbol graph plus text units), several retrievers, a router, cited answers and an evaluation harness.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 360" role="img" aria-labelledby="c2-arch-title">
+      <title id="c2-arch-title">Architecture of the codebase assistant: ast parsing builds a symbol graph stored in NetworkX and optionally Neo4j; a router chooses among lookup, call chains, impact, architecture reports, Text2Cypher and hybrid search; answers cite file and line</title>
+      <defs><marker id="c2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box ghost" x="10" y="20" width="118" height="56" rx="6"/>
+      <text class="d-text bold" x="22" y="44">Repository</text>
+      <text class="d-text small" x="22" y="62">*.py files</text>
+      <line class="d-line" x1="128" y1="48" x2="158" y2="48" marker-end="url(#c2a)"/>
+      <rect class="d-box node" x="160" y="20" width="160" height="56" rx="6"/>
+      <text class="d-text bold" x="172" y="44">parse.py (ast)</text>
+      <text class="d-text small" x="172" y="62">declare, then resolve</text>
+      <line class="d-line" x1="320" y1="48" x2="350" y2="48" marker-end="url(#c2a)"/>
+      <rect class="d-box node" x="352" y="12" width="318" height="72" rx="6"/>
+      <text class="d-text bold" x="364" y="34">Symbol graph (MultiDiGraph)</text>
+      <text class="d-text small" x="364" y="52">Module, Class, Function, Method nodes</text>
+      <text class="d-text small" x="364" y="68">CONTAINS, CALLS, IMPORTS, INHERITS edges</text>
+
+      <line class="d-line dash" x1="420" y1="84" x2="420" y2="112" marker-end="url(#c2a)"/>
+      <line class="d-line dash" x1="600" y1="84" x2="600" y2="112" marker-end="url(#c2a)"/>
+      <rect class="d-box" x="352" y="114" width="150" height="46" rx="6"/>
+      <text class="d-text bold" x="364" y="134">NetworkX</text>
+      <text class="d-text small" x="364" y="150">traversals in process</text>
+      <rect class="d-box" x="520" y="114" width="150" height="46" rx="6"/>
+      <text class="d-text bold" x="532" y="134">Neo4j (optional)</text>
+      <text class="d-text small" x="532" y="150">Text2Cypher target</text>
+
+      <rect class="d-box edge" x="10" y="130" width="118" height="56" rx="6"/>
+      <text class="d-text bold" x="22" y="154">Question</text>
+      <text class="d-text small" x="22" y="172">"What calls X?"</text>
+      <line class="d-line" x1="128" y1="158" x2="158" y2="158" marker-end="url(#c2a)"/>
+      <rect class="d-box edge" x="160" y="130" width="160" height="56" rx="6"/>
+      <text class="d-text bold" x="172" y="154">assistant.classify</text>
+      <text class="d-text small" x="172" y="172">symbols + intent rules</text>
+      <line class="d-line" x1="240" y1="186" x2="240" y2="206" marker-end="url(#c2a)"/>
+
+      <rect class="d-box comm" x="10" y="208" width="660" height="70" rx="6"/>
+      <text class="d-text small mono" x="24" y="232">callers / impact</text>
+      <text class="d-text small" x="24" y="250">reverse BFS</text>
+      <text class="d-text small mono" x="150" y="232">chain</text>
+      <text class="d-text small" x="150" y="250">k shortest paths</text>
+      <text class="d-text small mono" x="270" y="232">architecture</text>
+      <text class="d-text small" x="270" y="250">Louvain + reports</text>
+      <text class="d-text small mono" x="400" y="232">structural</text>
+      <text class="d-text small" x="400" y="250">Text2Cypher</text>
+      <text class="d-text small mono" x="520" y="232">search</text>
+      <text class="d-text small" x="520" y="250">BM25 + vectors + graph</text>
+      <text class="d-text small" x="24" y="268">Each tool returns facts and the symbols to show; unanswered tools fall back to search.</text>
+
+      <line class="d-line" x1="340" y1="278" x2="340" y2="298" marker-end="url(#c2a)"/>
+      <rect class="d-box good" x="160" y="300" width="360" height="50" rx="6"/>
+      <text class="d-text bold" x="172" y="322">Context: Facts table + code Sources</text>
+      <text class="d-text small" x="172" y="340">answer cites [Data: Sources (chunking.py:38)]</text>
+    </svg>
+  </div>
+  <figcaption>The symbol graph is the index. Each question type gets a deterministic tool; the LLM only writes the final answer from the facts and code snippets those tools return, and Text2Cypher is the one place the model writes a query.</figcaption>
+</figure>
+
+<h3>Which repository?</h3>
+<p>Use two. Develop against <strong>minigraphrag itself</strong> (<code>code/minigraphrag</code>): you know it well, so you can write gold answers quickly and notice wrong ones. Then evaluate on a small, well-known open-source package you did not write. <strong><code>requests</code></strong> is a good choice: about 18 modules, real class hierarchies, and a famous indirection (a session picks a transport adapter at run time) that exposes the limits of static call graphs. <code>click</code>, <code>attrs</code> or <code>httpx</code> work too. Pin the version you parse; call graphs change between releases.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Impact analysis is reverse BFS over CALLS",
+  "subtitle": "What breaks if context.fit_to_budget changes? All callers live in reports.py",
+  "height": 330,
+  "directed": true,
+  "nodes": [
+    {"id": "fit", "label": "fit_to_budget", "group": 1, "x": 10, "y": 45},
+    {"id": "fitrows", "label": "_fit_rows", "group": 2, "x": 31, "y": 45},
+    {"id": "bcc", "label": "build_community_context", "group": 2, "x": 54, "y": 15},
+    {"id": "sub", "label": "_substituted_context", "group": 2, "x": 54, "y": 80},
+    {"id": "full", "label": "_full_context_tokens", "group": 2, "x": 86, "y": 15},
+    {"id": "gar", "label": "generate_all_reports", "group": 3, "x": 86, "y": 80},
+    {"id": "count", "label": "count_tokens", "group": 4, "x": 10, "y": 85}
+  ],
+  "edges": [
+    {"source": "fitrows", "target": "fit", "label": "CALLS"},
+    {"source": "bcc", "target": "fitrows", "label": "CALLS"},
+    {"source": "sub", "target": "fitrows", "label": "CALLS"},
+    {"source": "sub", "target": "bcc", "label": "CALLS"},
+    {"source": "full", "target": "bcc", "label": "CALLS"},
+    {"source": "gar", "target": "full", "label": "CALLS"},
+    {"source": "gar", "target": "sub", "label": "CALLS"},
+    {"source": "gar", "target": "bcc", "label": "CALLS"},
+    {"source": "fit", "target": "count", "label": "CALLS"}
+  ],
+  "legend": {"1": "Changed symbol", "2": "Caller within reach", "3": "Top-level caller", "4": "Callee (not impacted)"},
+  "steps": [
+    {"caption": "Start at the changed symbol. Impact follows edges <strong>backwards</strong>: we want callers, not callees. <code>count_tokens</code> is called <em>by</em> fit_to_budget, so a change to fit_to_budget cannot break it.", "active": ["fit"]},
+    {"caption": "Depth 1: the only direct caller is <code>reports._fit_rows</code>.", "active": ["fitrows"], "visited": ["fit"], "edges": ["fitrows>fit"]},
+    {"caption": "Depth 2: both builders of report context call <code>_fit_rows</code>. <code>_substituted_context</code> also calls <code>build_community_context</code>, but BFS records each node once, at its shortest distance.", "active": ["bcc", "sub"], "visited": ["fit", "fitrows"], "edges": ["bcc>fitrows", "sub>fitrows"], "visitedEdges": ["fitrows>fit"]},
+    {"caption": "Depth 3: <code>_full_context_tokens</code> and <code>generate_all_reports</code>. Every community report the indexer writes passes through the changed function, which is exactly what a reviewer needs to know.", "active": ["full", "gar"], "visited": ["fit", "fitrows", "bcc", "sub"], "edges": ["full>bcc", "gar>sub", "gar>bcc", "gar>full"], "visitedEdges": ["fitrows>fit", "bcc>fitrows", "sub>fitrows"]}
+  ]
+}
+</script>
+</div>
+
+<h2>Requirements</h2>
+<h3>Functional</h3>
+<ul>
+  <li>Parse any pure-Python package directory into a <code>networkx.MultiDiGraph</code> with node kinds module, class, function and method, and edge keys CONTAINS, CALLS, IMPORTS and INHERITS. Each node keeps its path, line range, signature, docstring and source.</li>
+  <li>Tools: <code>lookup(name)</code>, <code>call_chains(src, dst, k)</code>, <code>impact(symbol, max_depth)</code>, architecture reports, Text2Cypher over Neo4j with validation, and hybrid search.</li>
+  <li>An assistant that classifies each question, runs the right tool, falls back to hybrid search when a tool returns nothing, and answers with <code>file:line</code> citations.</li>
+</ul>
+<h3>Evidence</h3>
+<ul>
+  <li>A golden set of at least 30 questions about your chosen repository, covering callers, impact, chains, locate-by-description and structural counts, with hand-checked gold symbol sets.</li>
+  <li>Per-type precision and recall of retrieved symbols, validity of returned call chains, and routing accuracy.</li>
+  <li>A written list of the false negatives with their cause (dynamic dispatch, local variables, callbacks, decorators).</li>
+</ul>
+<h3>Constraints</h3>
+<ul>
+  <li>Parsing and every structural tool run without an LLM. The LLM writes Cypher and final answers only.</li>
+  <li>Generated Cypher is validated with minigraphrag's <code>validate_cypher</code> before it reaches the database, and runs in a read transaction.</li>
+  <li>Never execute the code you analyze.</li>
+</ul>
+
+<h2>Milestones</h2>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C2.1 <span class="level">Parse the repository into a symbol graph</span></h4>
+  <p>Build the index. Resolution is the hard part: <code>count_tokens(text)</code> in <code>chunking.py</code> must become an edge to <code>minigraphrag.tokens.count_tokens</code>, which requires knowing that <code>chunking.py</code> did <code>from .tokens import count_tokens</code>.</p>
+  <ol>
+    <li>Pass one: walk every <code>.py</code> file, compute its dotted module name, declare modules, classes, functions and methods (qualified ids such as <code>minigraphrag.indexer.Index.report</code>), and record each module's import table, resolving relative imports.</li>
+    <li>Pass two: add IMPORTS edges between modules, INHERITS edges for base classes, and CALLS edges by resolving each call's dotted name through: <code>self.method</code> within a class, the import table, then the current module.</li>
+    <li>Calling a class is a call to its constructor: resolve to the class node (or <code>__init__</code>).</li>
+    <li>Keep the source text of every symbol; docstrings plus signatures are the text units for search.</li>
+  </ol>
+  <pre data-file="codegraph/parse.py (starter)"><code class="language-python">import ast
+from pathlib import Path
+
+import networkx as nx
+
+
+def parse_repo(package_dir) -&gt; nx.MultiDiGraph:
+    root = Path(package_dir).resolve()
+    G = nx.MultiDiGraph()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        # TODO pass 1: module name, declarations, import table (ast.Import, ast.ImportFrom with level)
+    # TODO pass 2: IMPORTS, INHERITS, CALLS via name resolution
+    return G</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>On minigraphrag, the callers of <code>minigraphrag.tokens.count_tokens</code> match what <code>grep -rn "count_tokens(" --include='*.py'</code> finds, attributed to their enclosing functions (13 at the time of writing).</li>
+    <li><code>build_index</code> has CALLS edges to <code>chunk_documents</code>, <code>extract_from_unit</code>, <code>resolve_entities</code>, <code>build_graph</code>, <code>hierarchical_communities</code> and <code>generate_all_reports</code>.</li>
+    <li>On <code>requests</code>, class <code>HTTPAdapter</code> has an INHERITS edge to <code>BaseAdapter</code>.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="codegraph/parse.py"><code class="language-python">"""Parse a Python repository into a symbol graph with Python's own ast module."""
+from __future__ import annotations
+
+import ast
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import networkx as nx
+
+
+@dataclass
+class Symbol:
+    id: str              # qualified name, e.g. minigraphrag.chunking.chunk_fixed
+    kind: str            # module | class | function | method
+    path: str
+    lineno: int
+    end_lineno: int
+    signature: str = ""
+    docstring: str = ""
+    source: str = ""
+
+
+@dataclass
+class ModuleInfo:
+    name: str
+    tree: ast.Module
+    imports: dict[str, str] = field(default_factory=dict)   # local alias -&gt; qualified target
+
+
+def module_name(root: Path, path: Path) -&gt; str:
+    rel = path.relative_to(root.parent).with_suffix("")
+    parts = list(rel.parts)
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _resolve_relative(current: str, is_package: bool, level: int, target: str | None) -&gt; str:
+    base = current.split(".")
+    base = base if is_package else base[:-1]
+    if level &gt; 1:
+        base = base[: len(base) - (level - 1)]
+    return ".".join(base + ([target] if target else []))
+
+
+def _signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -&gt; str:
+    return f"def {node.name}({ast.unparse(node.args)})" + (f" -&gt; {ast.unparse(node.returns)}" if node.returns else "")
+
+
+def parse_repo(package_dir: str | Path) -&gt; nx.MultiDiGraph:
+    root = Path(package_dir).resolve()
+    G = nx.MultiDiGraph()
+    modules: dict[str, ModuleInfo] = {}
+
+    # Pass 1: declare every module, class, function and method, and record imports.
+    for path in sorted(root.rglob("*.py")):
+        name = module_name(root, path)
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text, filename=str(path))
+        info = modules[name] = ModuleInfo(name, tree)
+        G.add_node(name, **vars(Symbol(name, "module", str(path), 1, len(text.splitlines()),
+                                       docstring=ast.get_docstring(tree) or "")))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    info.imports[a.asname or a.name.split(".")[0]] = a.name if a.asname else a.name.split(".")[0]
+            elif isinstance(node, ast.ImportFrom):
+                src = _resolve_relative(name, path.name == "__init__.py", node.level, node.module) if node.level else node.module
+                for a in node.names:
+                    info.imports[a.asname or a.name] = f"{src}.{a.name}"
+        for node in tree.body:
+            _declare(G, node, name, "module", str(path), text)
+
+    # Pass 2: IMPORTS edges, then CALLS and INHERITS edges resolved through each module's names.
+    for name, info in modules.items():
+        for target in set(info.imports.values()):
+            mod = target if target in modules else target.rsplit(".", 1)[0]
+            if mod in modules and mod != name:
+                G.add_edge(name, mod, key="IMPORTS", type="IMPORTS")
+        for node in ast.walk(info.tree):
+            if isinstance(node, ast.ClassDef):
+                cls = f"{name}.{node.name}"
+                for base in node.bases:
+                    target = _resolve(G, info, ast.unparse(base), None)
+                    if target:
+                        G.add_edge(cls, target, key="INHERITS", type="INHERITS")
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        _add_calls(G, info, f"{cls}.{item.name}", item, cls)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and f"{name}.{node.name}" in G:
+                if G.nodes[f"{name}.{node.name}"]["kind"] == "function":
+                    _add_calls(G, info, f"{name}.{node.name}", node, None)
+    return G
+
+
+def _declare(G, node, parent: str, parent_kind: str, path: str, text: str) -&gt; None:
+    lines = text.splitlines()
+    if isinstance(node, ast.ClassDef):
+        qid, kind, sig = f"{parent}.{node.name}", "class", f"class {node.name}"
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        qid, kind, sig = f"{parent}.{node.name}", "method" if parent_kind == "class" else "function", _signature(node)
+    else:
+        return
+    source = "\n".join(lines[node.lineno - 1: node.end_lineno])
+    G.add_node(qid, **vars(Symbol(qid, kind, path, node.lineno, node.end_lineno, sig,
+                                  ast.get_docstring(node) or "", source)))
+    G.add_edge(parent, qid, key="CONTAINS", type="CONTAINS")
+    if kind == "class":
+        for item in node.body:
+            _declare(G, item, qid, "class", path, text)
+
+
+def _resolve(G, info: ModuleInfo, dotted: str, cls: str | None) -&gt; str | None:
+    """Map a name used in module `info` to a declared symbol id, or None if it is external."""
+    head, _, rest = dotted.partition(".")
+    candidates = []
+    if head == "self" and cls and rest:
+        candidates.append(f"{cls}.{rest}")
+    if head in info.imports:
+        candidates.append(info.imports[head] + (f".{rest}" if rest else ""))
+    candidates.append(f"{info.name}.{dotted}")
+    for c in candidates:
+        if c in G:
+            return c
+        if c.endswith("__init__") is False and f"{c}.__init__" in G:
+            return f"{c}.__init__"   # calling a class runs its constructor
+    return None
+
+
+def _add_calls(G, info: ModuleInfo, caller: str, fn, cls: str | None) -&gt; None:
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            try:
+                dotted = ast.unparse(node.func)
+            except Exception:
+                continue
+            target = _resolve(G, info, dotted, cls)
+            if target and target != caller:
+                G.add_edge(caller, target, key="CALLS", type="CALLS", lineno=node.lineno)</code></pre>
+    <p>Counts at the time of writing: minigraphrag parses to about 220 nodes and 510 edges; <code>requests</code> 2.32.3 to 292 nodes (18 modules, 44 classes, 72 functions, 158 methods) and 568 edges (274 CONTAINS, 207 CALLS, 55 IMPORTS, 32 INHERITS). Your numbers will differ with versions.</p>
+    <p>Two simplifications to know about. Nested functions are not declared, so calls inside them are attributed to the enclosing function (which is what you want for impact analysis). And <code>ast.walk</code> over a method includes calls in nested lambdas and comprehensions, also attributed to the method.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C2.2 <span class="level">Lookup, call chains and impact</span></h4>
+  <p>Three deterministic tools cover most developer questions about structure.</p>
+  <ol>
+    <li><code>lookup(name)</code>: exact qualified id, then suffix match (<code>report</code> matches <code>Index.report</code>), then fuzzy match on short names for typos.</li>
+    <li><code>edge_view(G, *types)</code>: a simple <code>DiGraph</code> with only the requested edge types, so traversals do not wander through CONTAINS or IMPORTS.</li>
+    <li><code>call_chains(src, dst, k)</code>: the k shortest simple paths over CALLS with <code>nx.shortest_simple_paths</code>.</li>
+    <li><code>impact(symbol, max_depth)</code>: BFS over reversed CALLS and INHERITS edges, grouped by distance.</li>
+  </ol>
+  <pre data-file="codegraph/structure.py (starter)"><code class="language-python">import networkx as nx
+
+
+def impact(G: nx.MultiDiGraph, symbol: str, max_depth: int = 3) -&gt; dict[int, list[str]]:
+    # TODO: reverse the CALLS view, BFS from symbol, record the first depth each caller is reached
+    ...</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li><code>call_chains(G, "minigraphrag.indexer.build_index", "minigraphrag.communities.louvain_communities")</code> returns the path through <code>hierarchical_communities</code>.</li>
+    <li><code>impact(G, "minigraphrag.context.fit_to_budget")</code> returns depth 1 <code>_fit_rows</code>, depth 2 the two context builders, depth 3 <code>_full_context_tokens</code> and <code>generate_all_reports</code>, as in the animation above.</li>
+    <li><code>lookup(G, "chunk_fixd")</code> still finds <code>chunk_fixed</code>.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="codegraph/structure.py"><code class="language-python">"""Structural retrieval over the code graph: symbol lookup, call chains, impact analysis."""
+from __future__ import annotations
+
+from collections import deque
+from difflib import get_close_matches
+from itertools import islice
+
+import networkx as nx
+
+
+def edge_view(G: nx.MultiDiGraph, *types: str) -&gt; nx.DiGraph:
+    """A simple DiGraph holding only edges of the given types (CALLS, IMPORTS...)."""
+    H = nx.DiGraph()
+    H.add_nodes_from(G.nodes(data=True))
+    H.add_edges_from((u, v) for u, v, k in G.edges(keys=True) if k in types)
+    return H
+
+
+def lookup(G: nx.MultiDiGraph, name: str, limit: int = 5) -&gt; list[str]:
+    """Exact qualified name, then suffix match (`chunk_fixed`, `Index.report`), then fuzzy."""
+    if name in G:
+        return [name]
+    suffix = sorted((n for n in G if n.endswith("." + name)), key=len)
+    if suffix:
+        return suffix[:limit]
+    short = {n.rsplit(".", 1)[-1]: n for n in G}
+    return [short[m] for m in get_close_matches(name, list(short), n=limit, cutoff=0.75)]
+
+
+def call_chains(G: nx.MultiDiGraph, source: str, target: str, k: int = 3) -&gt; list[list[str]]:
+    """Up to k shortest call paths source -&gt; ... -&gt; target."""
+    calls = edge_view(G, "CALLS")
+    try:
+        return list(islice(nx.shortest_simple_paths(calls, source, target), k))
+    except (nx.NetworkXNoPath, nx.NodeNotFound):
+        return []
+
+
+def impact(G: nx.MultiDiGraph, symbol: str, max_depth: int = 3) -&gt; dict[int, list[str]]:
+    """Reverse BFS over CALLS (and INHERITS): who breaks if `symbol` changes, grouped by distance."""
+    reverse = edge_view(G, "CALLS", "INHERITS").reverse(copy=False)
+    depth = {symbol: 0}
+    queue = deque([symbol])
+    while queue:
+        node = queue.popleft()
+        if depth[node] == max_depth:
+            continue
+        for caller in reverse.successors(node):
+            if caller not in depth:
+                depth[caller] = depth[node] + 1
+                queue.append(caller)
+    levels: dict[int, list[str]] = {}
+    for node, d in depth.items():
+        if d &gt; 0:
+            levels.setdefault(d, []).append(node)
+    return {d: sorted(ns) for d, ns in sorted(levels.items())}</code></pre>
+    <p>Complexity: BFS is O(V + E) over the reversed view, so impact on a repository of tens of thousands of symbols is milliseconds; build the views once and cache them in a real service. <code>shortest_simple_paths</code> uses Yen's algorithm and can be slow when many long paths exist; bound <code>k</code> and stop after a timeout.</p>
+    <p>Why INHERITS is included in impact: if <code>BaseAdapter.send</code> changes its contract, subclasses that override or call it are affected even without a direct call edge. Whether to include IMPORTS is a policy choice; a changed module-level constant affects every importer, but most importers only use one or two names, so including IMPORTS inflates impact sets. Report both and let the user choose.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C2.3 <span class="level">Hybrid code search</span></h4>
+  <p>“Where is reciprocal rank fusion implemented?” names no symbol. Structural tools need a starting point, and this is how you find one.</p>
+  <ol>
+    <li>Build one document per non-module symbol: qualified name, signature and docstring.</li>
+    <li>Keyword channel: minigraphrag's <code>BM25</code> with a tokenizer that splits <code>snake_case</code> and <code>CamelCase</code> identifiers, because <code>reciprocal_rank_fusion</code> should match “rank fusion”.</li>
+    <li>Vector channel: embed the same documents into a <code>VectorStore</code>.</li>
+    <li>Graph channel: the callers and callees of the top textual hits.</li>
+    <li>Fuse with <code>reciprocal_rank_fusion</code> from <code>minigraphrag.search.hybrid</code>, giving the graph channel a lower weight.</li>
+  </ol>
+  <pre data-file="codegraph/search.py (starter)"><code class="language-python">from minigraphrag.search.bm25 import BM25
+from minigraphrag.search.hybrid import reciprocal_rank_fusion
+
+
+def split_identifier(text: str) -&gt; list[str]:
+    # TODO: "chunk_by_sentences" -&gt; ["chunk", "by", "sentences"]; "TextUnit" -&gt; ["text", "unit"]
+    ...</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>The top hit for “reciprocal rank fusion” is <code>minigraphrag.search.hybrid.reciprocal_rank_fusion</code>.</li>
+    <li>For “bi-temporal invalidation of facts”, all top five hits are in <code>minigraphrag.temporal</code>.</li>
+    <li>Removing the graph channel changes the ranking for at least one of your questions; record which.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="codegraph/search.py"><code class="language-python">"""Hybrid code search: identifiers (BM25), docstrings (embeddings) and the call graph, fused with RRF."""
+from __future__ import annotations
+
+import re
+
+import networkx as nx
+
+from minigraphrag.embeddings import HashingEmbedder
+from minigraphrag.search.bm25 import BM25
+from minigraphrag.search.hybrid import reciprocal_rank_fusion
+from minigraphrag.vector_store import VectorStore
+
+from .structure import edge_view
+
+
+def split_identifier(text: str) -&gt; list[str]:
+    """chunk_by_sentences -&gt; chunk, by, sentences; TextUnit -&gt; text, unit."""
+    words = re.findall(r"[A-Za-z][a-z0-9]*|[A-Z]+(?![a-z])|\d+", text.replace("_", " "))
+    return [w.lower() for w in words if len(w) &gt; 1]
+
+
+def symbol_document(G: nx.MultiDiGraph, node: str) -&gt; str:
+    d = G.nodes[node]
+    return f"{node} {d.get('signature', '')}\n{d.get('docstring', '')}"
+
+
+class CodeSearch:
+    """BM25 over identifiers + embeddings over docstrings + one hop of call-graph expansion, fused with RRF."""
+
+    def __init__(self, G: nx.MultiDiGraph, embedder=None):
+        self.G = G
+        self.ids = [n for n, d in G.nodes(data=True) if d.get("kind") != "module"]
+        docs = [symbol_document(G, n) for n in self.ids]
+        self.bm25 = BM25(docs, tokenizer=split_identifier)
+        self.embedder = embedder or HashingEmbedder()
+        self.store = VectorStore()
+        self.store.add(self.ids, self.embedder.embed(docs), [{"path": G.nodes[n]["path"]} for n in self.ids])
+        self.calls = edge_view(G, "CALLS")
+
+    def search(self, query: str, k: int = 8, candidates: int = 30) -&gt; list[tuple[str, float]]:
+        keyword = [self.ids[i] for i, _ in self.bm25.search(query, candidates)]
+        vector = [sid for sid, _, _ in self.store.search(self.embedder.embed([query])[0], k=candidates)]
+        # Graph channel: neighbours of the top textual hits are often the real answer
+        # ("where is the budget enforced?" -&gt; the caller of fit_to_budget).
+        graph = []
+        for sid in (keyword[:3] + vector[:3]):
+            graph += [n for n in list(self.calls.predecessors(sid)) + list(self.calls.successors(sid)) if n not in graph]
+        return reciprocal_rank_fusion([keyword, vector, graph], k=60, weights=[1.0, 1.0, 0.5])[:k]</code></pre>
+    <p>With <code>HashingEmbedder</code>, the vector channel is only lexical, so BM25 does most of the work. Swap in a code embedding model through <code>SentenceTransformerEmbedder</code> or an API embedder and embed the source body as well as the docstring to catch undocumented functions; that is where the vector channel starts to add hits BM25 misses. The graph channel's value shows on questions like “where is the token budget enforced?”: the textual hit is <code>fit_to_budget</code>, and its callers in <code>reports</code> are where the budget is actually applied to report context.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C2.4 <span class="level">Architecture summaries from communities</span></h4>
+  <p>“How is this package organized?” is the code version of a global question. Answer it the GraphRAG way: cluster the graph and summarize each cluster.</p>
+  <ol>
+    <li>Project the multigraph to an undirected weighted graph. Weight CONTAINS highest (a class and its methods belong together), CALLS and INHERITS next, IMPORTS lowest.</li>
+    <li>Run <code>louvain_communities</code> from minigraphrag and compute <code>modularity</code>.</li>
+    <li>For each cluster of at least three symbols, build Entities and Relationships tables in the format <code>reports.py</code> uses and call <code>generate_report</code>.</li>
+    <li>Record the top modules per cluster so a reader can check the report against the file layout.</li>
+  </ol>
+  <pre data-file="codegraph/communities.py (starter)"><code class="language-python">from minigraphrag.communities import louvain_communities, modularity
+from minigraphrag.reports import ENTITY_HEADER, RELATIONSHIP_HEADER, generate_report
+
+EDGE_WEIGHTS = {"CALLS": 1.0, "CONTAINS": 2.0, "INHERITS": 1.0, "IMPORTS": 0.5}
+# TODO: undirected_projection, cluster_context, architecture_reports</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>Modularity above 0.3 (the reference gets about 0.75 on both minigraphrag and requests).</li>
+    <li>Most clusters are dominated by one or two modules; list any cluster that mixes three or more modules and explain why.</li>
+    <li>Each report's title names real symbols from its cluster.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="codegraph/communities.py"><code class="language-python">"""Architecture summaries: cluster the symbol graph, then write a report per cluster."""
+from __future__ import annotations
+
+from collections import Counter
+
+import networkx as nx
+
+from minigraphrag.communities import louvain_communities, modularity
+from minigraphrag.context import format_table
+from minigraphrag.reports import ENTITY_HEADER, RELATIONSHIP_HEADER, generate_report
+
+EDGE_WEIGHTS = {"CALLS": 1.0, "CONTAINS": 2.0, "INHERITS": 1.0, "IMPORTS": 0.5}
+
+
+def undirected_projection(G: nx.MultiDiGraph) -&gt; nx.Graph:
+    U = nx.Graph()
+    U.add_nodes_from(G.nodes(data=True))
+    for u, v, k in G.edges(keys=True):
+        w = EDGE_WEIGHTS.get(k, 1.0)
+        U.add_edge(u, v, weight=U.get_edge_data(u, v, {"weight": 0.0})["weight"] + w)
+    return U
+
+
+def architecture_clusters(G: nx.MultiDiGraph, seed: int = 42) -&gt; tuple[list[set], float]:
+    U = undirected_projection(G)
+    parts = louvain_communities(U, seed=seed)
+    return parts, modularity(U, parts)
+
+
+def cluster_context(G: nx.MultiDiGraph, members: set, max_rows: int = 40) -&gt; str:
+    U = undirected_projection(G)
+    ranked = sorted(members, key=lambda n: (-U.degree(n, weight="weight"), n))[:max_rows]
+    ents = [[i, n, G.nodes[n]["kind"], (G.nodes[n].get("signature", "") + " " + G.nodes[n].get("docstring", "")[:200]).strip(),
+             U.degree(n)] for i, n in enumerate(ranked)]
+    rels = [[i, u, v, f"{u.rsplit('.', 1)[-1]} {k.lower()} {v.rsplit('.', 1)[-1]}", U.degree(u) + U.degree(v)]
+            for i, (u, v, k) in enumerate((u, v, k) for u, v, k in G.edges(keys=True)
+                                          if u in members and v in members and k != "CONTAINS")][:max_rows]
+    return format_table("Entities", ENTITY_HEADER, ents) + "\n\n" + format_table("Relationships", RELATIONSHIP_HEADER, rels)
+
+
+def architecture_reports(G: nx.MultiDiGraph, llm, min_size: int = 3):
+    parts, q = architecture_clusters(G)
+    reports = []
+    for cid, members in enumerate(parts):
+        if len(members) &lt; min_size:
+            continue
+        modules = Counter(n.rsplit(".", 1)[0] if G.nodes[n]["kind"] != "module" else n for n in members)
+        report = generate_report(llm, cluster_context(G, members), community_id=cid)
+        reports.append({"id": cid, "size": len(members), "top_modules": modules.most_common(3),
+                        "title": report.title, "summary": report.summary, "report": report})
+    return reports, q</code></pre>
+    <p>On minigraphrag the reference finds 15 clusters with modularity about 0.75. The largest one mixes <code>context</code>, <code>search.global_</code> and <code>search.local</code>, because the table-formatting and budgeting helpers in <code>context.py</code> are called by every search method. That is a real architectural fact (context construction is shared infrastructure), and it is exactly what a new contributor needs to hear. The second-largest cluster is the <code>llm</code> module with <code>MockLLM</code>'s nineteen handler methods, held together by the CONTAINS edges from one class.</p>
+    <p>Try the weights: with CONTAINS at 1.0, classes split from their methods more often; with IMPORTS at 1.0, clusters collapse toward modules, which reproduces the directory structure and tells the reader nothing new.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C2.5 <span class="level">Neo4j and Text2Cypher for structural questions</span></h4>
+  <p>“Which class in llm.py has the most methods?” and “List functions that call both count_tokens and format_table” are aggregations and pattern matches: a query language answers them exactly. Follow <a href="20-text2cypher.html">Chapter 20</a>.</p>
+  <ol>
+    <li>Load symbols with <code>UNWIND $rows ... MERGE</code> in batches: a <code>Symbol</code> label plus one of Module, Class, Function, Method, and a uniqueness constraint on <code>id</code>.</li>
+    <li>Write a code-specific Text2Cypher prompt with the schema and two worked examples.</li>
+    <li>Validate with <code>validate_cypher(query, labels, relationship_types)</code> from <code>minigraphrag.search.text2cypher</code>, append a LIMIT if missing, and run in a read transaction.</li>
+    <li>On a database error, retry once with the error message appended to the question.</li>
+  </ol>
+  <pre data-file="codegraph/cypher.py (starter)"><code class="language-python">from minigraphrag.search.text2cypher import validate_cypher
+
+LABELS = {"module": "Module", "class": "Class", "function": "Function", "method": "Method"}
+REL_TYPES = ["CONTAINS", "CALLS", "IMPORTS", "INHERITS"]
+
+
+def load_into_neo4j(G, driver, database="neo4j"):
+    ...  # TODO: constraint, UNWIND batches per label, then per relationship type</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li><code>MATCH (s:Symbol) RETURN count(s)</code> equals <code>G.number_of_nodes()</code>, and relationship counts per type match the graph.</li>
+    <li>A generated <code>DETACH DELETE</code>, an unknown label such as <code>Klass</code>, or an unknown relationship type such as <code>IMPORT</code> is rejected before execution.</li>
+    <li>“Which classes are defined in extraction.py?” returns Entity, Relationship, Claim and ExtractionResult.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="codegraph/cypher.py"><code class="language-python">"""Load the code graph into Neo4j and answer structural questions with validated Text2Cypher."""
+from __future__ import annotations
+
+import re
+
+import networkx as nx
+
+from minigraphrag.search.text2cypher import validate_cypher
+
+LABELS = {"module": "Module", "class": "Class", "function": "Function", "method": "Method"}
+REL_TYPES = ["CONTAINS", "CALLS", "IMPORTS", "INHERITS"]
+
+CODE_SCHEMA = """Node labels: Symbol plus one of Module, Class, Function, Method
+Node properties: id (qualified name, e.g. 'minigraphrag.chunking.chunk_fixed'), name (short name), path, lineno, signature, docstring
+Relationship types: (Module)-[:CONTAINS]-&gt;(Class|Function), (Class)-[:CONTAINS]-&gt;(Method),
+  (Function|Method)-[:CALLS]-&gt;(Function|Method|Class), (Module)-[:IMPORTS]-&gt;(Module), (Class)-[:INHERITS]-&gt;(Class)"""
+
+CODE_TEXT2CYPHER_PROMPT = """Task: write one read-only Cypher query that answers the question about a Python codebase.
+Use only this schema:
+{schema}
+Rules: MATCH/OPTIONAL MATCH/WHERE/WITH/RETURN/ORDER BY/LIMIT only. Match symbols by `name` or by `id ENDS WITH`.
+Always RETURN the `id` of every symbol you list. Return only the query.
+
+Examples:
+Question: Which functions call chunk_fixed?
+Cypher: MATCH (f:Symbol)-[:CALLS]-&gt;(t:Symbol {{name: 'chunk_fixed'}}) RETURN f.id ORDER BY f.id
+Question: How many methods does each class in llm.py have?
+Cypher: MATCH (c:Class)-[:CONTAINS]-&gt;(m:Method) WHERE c.path ENDS WITH 'llm.py' RETURN c.id, count(m) AS methods ORDER BY methods DESC
+
+Question: {question}
+Cypher:"""
+
+
+def load_into_neo4j(G: nx.MultiDiGraph, driver, database: str = "neo4j", batch: int = 500) -&gt; None:
+    """Idempotent bulk load with UNWIND + MERGE, parameters only (no string-built Cypher)."""
+    nodes = [{"id": n, "name": n.rsplit(".", 1)[-1], "label": LABELS[d["kind"]], "path": d["path"],
+              "lineno": d["lineno"], "signature": d.get("signature", ""), "docstring": d.get("docstring", "")}
+             for n, d in G.nodes(data=True)]
+    driver.execute_query("CREATE CONSTRAINT symbol_id IF NOT EXISTS FOR (s:Symbol) REQUIRE s.id IS UNIQUE",
+                         database_=database)
+    for label in LABELS.values():                       # labels cannot be parameters, so one query per label
+        rows = [n for n in nodes if n["label"] == label]
+        for i in range(0, len(rows), batch):
+            driver.execute_query(
+                f"UNWIND $rows AS row MERGE (s:Symbol {{id: row.id}}) SET s:{label}, s += row {{.name, .path, "
+                ".lineno, .signature, .docstring}", rows=rows[i:i + batch], database_=database)
+    for rel in REL_TYPES:
+        rows = [{"u": u, "v": v} for u, v, k in G.edges(keys=True) if k == rel]
+        for i in range(0, len(rows), batch):
+            driver.execute_query(
+                f"UNWIND $rows AS row MATCH (a:Symbol {{id: row.u}}), (b:Symbol {{id: row.v}}) MERGE (a)-[:{rel}]-&gt;(b)",
+                rows=rows[i:i + batch], database_=database)
+
+
+def text2cypher(llm, question: str, max_rows: int = 50) -&gt; str:
+    raw = llm.complete(CODE_TEXT2CYPHER_PROMPT.format(schema=CODE_SCHEMA, question=question))
+    query = re.sub(r"^```(?:cypher)?|```$", "", raw.strip(), flags=re.M).strip().rstrip(";")
+    errors = validate_cypher(query, ["Symbol", *LABELS.values()], REL_TYPES)
+    if errors:
+        raise ValueError("; ".join(errors))
+    if not re.search(r"\bLIMIT\s+\d+\s*$", query, re.I):
+        query += f" LIMIT {max_rows}"                     # never let a model dump the whole graph
+    return query
+
+
+def answer_structural(llm, driver, question: str, database: str = "neo4j", retries: int = 1) -&gt; dict:
+    """Generate, validate, run; on a database error, show the model the error once and retry."""
+    feedback = ""
+    for attempt in range(retries + 1):
+        try:
+            query = text2cypher(llm, question + feedback)
+            records, _, _ = driver.execute_query(query, database_=database, routing_="r")
+            return {"cypher": query, "rows": [r.data() for r in records], "attempts": attempt + 1}
+        except Exception as err:                          # validation or Neo4j syntax error
+            feedback = f"\n(Your previous query failed with: {str(err)[:300]}. Fix it.)"
+    return {"cypher": None, "rows": [], "error": feedback.strip(), "attempts": retries + 1}</code></pre>
+    <p>Run Neo4j locally with Docker (<code>docker run -p 7687:7687 -p 7474:7474 -e NEO4J_AUTH=neo4j/password neo4j:5</code>), then:</p>
+    <pre><code class="language-python">from neo4j import GraphDatabase
+from minigraphrag.llm import get_llm
+from codegraph.cypher import answer_structural, load_into_neo4j
+from codegraph.parse import parse_repo
+
+G = parse_repo("code/minigraphrag")
+with GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "password")) as driver:
+    load_into_neo4j(G, driver)
+    print(answer_structural(get_llm("openai"), driver, "Which classes are defined in extraction.py?"))</code></pre>
+    <p>The validator is tested offline with a stub model; these three generated queries are rejected with the messages shown:</p>
+    <pre><code class="language-bash">MATCH (n:Symbol) DETACH DELETE n  -&gt; query contains a write clause; only read-only queries are allowed; query must contain MATCH and RETURN
+MATCH (n:Klass) RETURN n.id       -&gt; unknown label 'Klass'
+MATCH (a)-[:IMPORT]-&gt;(b) RETURN a.id -&gt; unknown relationship type 'IMPORT'</code></pre>
+    <p>The second message on the first line is a side effect of the first: a query with no RETURN fails that check too. Report every error the validator finds, because the retry prompt in <code>answer_structural</code> shows them all to the model.</p>
+    <p>Why both NetworkX and Neo4j: BFS and shortest paths are simpler and faster in process, and they need no model. Cypher earns its place for questions whose shape you cannot anticipate, where letting the model compose a pattern is the point. <code>routing_="r"</code> sends the query to a read replica in a cluster; combine it with a database user that has only read privileges, so validation is not your only defense.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C2.6 <span class="level">The assistant: route, retrieve, answer with file:line</span></h4>
+  <ol>
+    <li>Find code-like tokens in the question (underscores, dots, inner capitals) and resolve them with <code>lookup</code>.</li>
+    <li>Classify intent: callers, impact, chain (needs two symbols), architecture, structural, or search.</li>
+    <li>Run the tool; turn its output into a Facts table and the relevant symbols' source into a Sources table with <code>file:line</code> ids.</li>
+    <li>If the tool produced nothing, fall back to hybrid search and record the fallback in the route name.</li>
+    <li>Answer with minigraphrag's <code>generate_answer</code>, asking for <code>[Data: Sources (file:line)]</code> citations.</li>
+  </ol>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>“What calls count_tokens?”, “What breaks if I change fit_to_budget?”, “How does build_index reach louvain_communities?” and “Where is reciprocal rank fusion implemented?” route to callers, impact, chain and search.</li>
+    <li>Every <code>file:line</code> in an answer's citations exists in the repository.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="codegraph/assistant.py"><code class="language-python">"""Route a question to the right structural tool, build a cited context, and answer."""
+from __future__ import annotations
+
+import re
+
+import networkx as nx
+
+from minigraphrag.context import format_table
+from minigraphrag.search.common import generate_answer
+
+from .search import CodeSearch
+from .structure import call_chains, impact, lookup
+
+IDENT = re.compile(r"`?([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)`?")
+
+
+def mentioned_symbols(G: nx.MultiDiGraph, question: str) -&gt; list[str]:
+    found = []
+    for token in IDENT.findall(question):
+        if "_" in token or "." in token or any(c.isupper() for c in token[1:]):   # looks like code
+            found += [s for s in lookup(G, token, limit=1) if s not in found]
+    return found
+
+
+def classify(question: str, symbols: list[str]) -&gt; str:
+    q = question.lower()
+    if re.search(r"\b(what|which|who)\b.*\bcalls?\b|\bcallers? of\b|\bused by\b", q) and symbols:
+        return "callers"
+    if re.search(r"\b(break|impact|affected|if i change|depends? on)\b", q) and symbols:
+        return "impact"
+    if re.search(r"\b(reach|get from|path|chain|lead to|end up)\b", q) and len(symbols) &gt;= 2:
+        return "chain"
+    if re.search(r"\b(architecture|overview|main (components|parts)|how is .* organi[sz]ed)\b", q):
+        return "architecture"
+    if re.search(r"\b(how many|list all|count|which classes|largest|most)\b", q):
+        return "structural"
+    return "search"
+
+
+def snippet_rows(G: nx.MultiDiGraph, symbols: list[str], max_lines: int = 25) -&gt; list[list]:
+    rows = []
+    for s in symbols:
+        d = G.nodes[s]
+        body = "\n".join(d.get("source", "").splitlines()[:max_lines])
+        rows.append([f"{d['path'].rsplit('/', 1)[-1]}:{d['lineno']}", s, body.replace("|", "/")])
+    return rows
+
+
+class CodeAssistant:
+    def __init__(self, G: nx.MultiDiGraph, llm, reports: list[dict] | None = None, neo4j_driver=None):
+        self.G, self.llm, self.reports, self.driver = G, llm, reports or [], neo4j_driver
+        self.search = CodeSearch(G)
+
+    def ask(self, question: str) -&gt; dict:
+        symbols = mentioned_symbols(self.G, question)
+        kind = classify(question, symbols)
+        facts, focus = [], []
+        if kind in ("callers", "impact"):
+            levels = impact(self.G, symbols[-1], max_depth=1 if kind == "callers" else 3)
+            for depth, nodes in levels.items():
+                facts += [[depth, n, "calls" if depth == 1 else f"reaches it in {depth} hops"] for n in nodes]
+            focus = [symbols[-1]] + [n for ns in levels.values() for n in ns][:8]
+        elif kind == "chain":
+            for i, path in enumerate(call_chains(self.G, symbols[0], symbols[-1])):
+                facts.append([i, " -&gt; ".join(p.rsplit(".", 1)[-1] for p in path), " -&gt; ".join(path)])
+                focus += [p for p in path if p not in focus]
+        elif kind == "architecture":
+            facts = [[r["id"], r["title"], r["summary"]] for r in self.reports]
+        elif kind == "structural" and self.driver is not None:
+            from .cypher import answer_structural
+            result = answer_structural(self.llm, self.driver, question)
+            facts = [[i, str(row), result["cypher"]] for i, row in enumerate(result["rows"])]
+        if kind == "search" or not facts:
+            kind = "search" if kind == "search" else f"{kind}-&gt;search"
+            focus = [s for s, _ in self.search.search(question, k=6)]
+        context = format_table("Facts", ["id", "description", "detail"], facts) + "\n\n" + \
+            format_table("Sources", ["id", "symbol", "text"], snippet_rows(self.G, focus[:8]))
+        answer = generate_answer(self.llm, question, context,
+                                 "a short technical answer; cite symbols as [Data: Sources (file:line)]")
+        return {"kind": kind, "symbols": symbols, "focus": focus[:8], "facts": facts, "answer": answer}</code></pre>
+    <p>The table columns are named <code>description</code> and <code>text</code> because those are the columns minigraphrag's answer prompt, and MockLLM, read as evidence. With MockLLM the answer for “What calls count_tokens?” quotes docstrings with citations such as <code>[Data: Sources (tokens.py:33)]</code>; with a real model you get a readable list of callers grouped by module. Keep the Facts table even when the model is strong: it is the deterministic part of the answer and the part your evaluation scores.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C2.7 <span class="level">Evaluate on a real repository</span></h4>
+  <p>Grade retrieval, not prose. For each question the gold answer is a set of symbols or a path, checked by hand against the source.</p>
+  <ol>
+    <li>Write at least 30 questions: 8 callers, 6 impact, 6 chain, 6 locate-by-description, 4 structural.</li>
+    <li>Build gold sets from the source with grep and reading, not from your own tools; otherwise you are testing the tool against itself.</li>
+    <li>Score set precision, recall and F1 for callers, impact and search; for chains, whether the gold path is returned and whether every returned hop is a real CALLS edge.</li>
+    <li>Report routing accuracy and list every false negative with its cause.</li>
+  </ol>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>A results table by question type on minigraphrag and on your chosen repository.</li>
+    <li>At least three false negatives explained, with a proposed fix for one.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="codegraph/evaluate.py"><code class="language-python">"""Score the assistant's retrieval against a hand-checked golden set of code questions."""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+from .assistant import CodeAssistant
+from .parse import parse_repo
+from .structure import edge_view
+
+
+def set_scores(predicted: list[str], gold: list[str]) -&gt; dict:
+    p, g = set(predicted), set(gold)
+    tp = len(p &amp; g)
+    precision = tp / len(p) if p else 0.0
+    recall = tp / len(g) if g else 1.0
+    f1 = 2 * precision * recall / (precision + recall) if tp else 0.0
+    return {"precision": round(precision, 3), "recall": round(recall, 3), "f1": round(f1, 3)}
+
+
+def valid_chain(G, chain: str) -&gt; bool:
+    """Every hop of 'a -&gt; b -&gt; c' must be a real CALLS edge."""
+    calls = edge_view(G, "CALLS")
+    hops = [h.strip() for h in chain.split("-&gt;")]
+    return len(hops) &gt; 1 and all(calls.has_edge(a, b) for a, b in zip(hops, hops[1:]))
+
+
+def evaluate(G, assistant: CodeAssistant, questions: list[dict]) -&gt; list[dict]:
+    rows = []
+    for q in questions:
+        r = assistant.ask(q["question"])
+        row = {"id": q["id"], "type": q["type"], "routed": r["kind"], "route_ok": r["kind"] == q["type"]}
+        if q["type"] in ("callers", "impact"):
+            predicted = [f[1] for f in r["facts"]]
+            row.update(set_scores(predicted, q["gold"]))
+        elif q["type"] == "chain":
+            chains = [f[2] for f in r["facts"]]
+            row["valid_chains"] = sum(valid_chain(G, c) for c in chains)
+            row["recall"] = float(any(c == " -&gt; ".join(q["gold"]) for c in chains))
+        else:  # search / structural: did the right symbols reach the context?
+            row.update(set_scores(r["focus"], q["gold"]))
+        rows.append(row)
+    return rows
+
+
+if __name__ == "__main__":
+    from minigraphrag.llm import get_llm
+
+    repo, questions_path = sys.argv[1], sys.argv[2]
+    G = parse_repo(repo)
+    assistant = CodeAssistant(G, get_llm(sys.argv[3] if len(sys.argv) &gt; 3 else "mock"))
+    rows = evaluate(G, assistant, [json.loads(l) for l in Path(questions_path).read_text().splitlines() if l.strip()])
+    for row in rows:
+        print(row)
+    routed = sum(r["route_ok"] for r in rows) / len(rows)
+    recall = sum(r.get("recall", 0) for r in rows) / len(rows)
+    print(f"routing accuracy {routed:.2f}, mean recall {recall:.2f}")</code></pre>
+    <pre data-file="code_questions.jsonl"><code class="language-json">{"id": "c01", "type": "callers", "question": "What calls count_tokens?", "gold": ["minigraphrag.chunking.chunk_by_sentences", "minigraphrag.chunking.chunk_fixed", "minigraphrag.context.fit_to_budget", "minigraphrag.graph_build.summarize_descriptions", "minigraphrag.reports._full_context_tokens", "minigraphrag.search.basic.basic_search", "minigraphrag.search.global_._batches", "minigraphrag.search.hybrid.hybrid_search", "minigraphrag.search.lightrag._fill", "minigraphrag.search.local._fill", "minigraphrag.search.local.build_local_context", "minigraphrag.search.ppr.hipporag_search", "minigraphrag.tokens.truncate_to_tokens"]}
+{"id": "c02", "type": "chain", "question": "How does build_index reach louvain_communities?", "gold": ["minigraphrag.indexer.build_index", "minigraphrag.communities.hierarchical_communities", "minigraphrag.communities.louvain_communities"]}
+{"id": "c03", "type": "impact", "question": "What breaks if I change fit_to_budget?", "gold": ["minigraphrag.reports._fit_rows", "minigraphrag.reports._substituted_context", "minigraphrag.reports.build_community_context", "minigraphrag.reports._full_context_tokens", "minigraphrag.reports.generate_all_reports"]}
+{"id": "c04", "type": "search", "question": "Where is reciprocal rank fusion implemented?", "gold": ["minigraphrag.search.hybrid.reciprocal_rank_fusion"]}
+{"id": "c05", "type": "search", "question": "Which function parses the delimited extraction output of the LLM?", "gold": ["minigraphrag.extraction.parse_extraction_output"]}
+{"id": "c06", "type": "callers", "question": "What calls MockLLM._answer?", "gold": ["minigraphrag.llm.MockLLM.complete"]}</code></pre>
+    <pre><code class="language-bash">$ python -m codegraph.evaluate code/minigraphrag code_questions.jsonl
+{'id': 'c01', 'type': 'callers', 'routed': 'callers', 'route_ok': True, 'precision': 1.0, 'recall': 1.0, 'f1': 1.0}
+{'id': 'c02', 'type': 'chain', 'routed': 'chain', 'route_ok': True, 'valid_chains': 1, 'recall': 1.0}
+{'id': 'c03', 'type': 'impact', 'routed': 'impact', 'route_ok': True, 'precision': 1.0, 'recall': 1.0, 'f1': 1.0}
+{'id': 'c04', 'type': 'search', 'routed': 'search', 'route_ok': True, 'precision': 0.167, 'recall': 1.0, 'f1': 0.286}
+{'id': 'c05', 'type': 'search', 'routed': 'search', 'route_ok': True, 'precision': 0.167, 'recall': 1.0, 'f1': 0.286}
+{'id': 'c06', 'type': 'callers', 'routed': 'callers', 'route_ok': True, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0}
+routing accuracy 1.00, mean recall 0.83</code></pre>
+    <p>Search precision is low by construction (six symbols shown, one gold), so report recall at k for search questions. Question c06 is the interesting failure. <code>MockLLM.complete</code> dispatches with <code>getattr(self, f"_{task}")</code>, so no static CALLS edge runs from <code>complete</code> to <code>_answer</code>. The one caller the graph does find is <code>MockLLM._drift_primer</code>, which calls <code>self._answer(...)</code> directly; it is not in the gold set, so precision and recall are both zero, and the answer never mentions the dispatch site a developer actually cares about.</p>
+    <p>On <code>requests</code> 2.32.3 the same limits show up in the most important path in the library. <code>impact(G, "requests.sessions.Session.request", 1)</code> returns the seven HTTP-verb methods on <code>Session</code> but misses <code>requests.api.request</code>, which calls <code>session.request(...)</code> on a local variable created in a <code>with</code> statement. And <code>call_chains(G, "requests.api.get", "requests.adapters.HTTPAdapter.send")</code> returns nothing, because <code>Session.send</code> calls <code>adapter.send(...)</code> on an object returned by <code>get_adapter</code>. Grep confirms both calls exist (<code>api.py</code> line 59 and <code>sessions.py</code> line 703).</p>
+    <table>
+      <thead><tr><th>False negative</th><th>Cause</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td><code>MockLLM.complete</code> to <code>_answer</code></td><td><code>getattr</code> dispatch</td><td>Heuristic edge from a method to same-class methods whose names match an f-string pattern; mark as inferred</td></tr>
+        <tr><td><code>api.request</code> to <code>Session.request</code></td><td>Method call on a local variable</td><td>Track assignments and <code>with ... as x</code> whose value is a class call; resolve <code>x.method</code> to that class</td></tr>
+        <tr><td><code>Session.send</code> to <code>HTTPAdapter.send</code></td><td>Receiver is a return value chosen at run time</td><td>Follow return annotations, or add edges to every override of <code>send</code> in the class hierarchy and mark them as possible</td></tr>
+      </tbody>
+    </table>
+    <p>Mark inferred edges with a <code>confidence</code> attribute and show them differently in answers (“possibly called via adapter.send”). Precision matters for impact analysis only a little; recall matters a lot, since a missed caller is a missed breakage.</p>
+  </details>
+</section>
+
+<h2>Evaluation rubric</h2>
+<table>
+  <thead><tr><th>Area</th><th>Weight</th><th>Meets expectations</th><th>Exceeds expectations</th></tr></thead>
+  <tbody>
+    <tr><td>Parser</td><td>20%</td><td>Four node kinds, four edge types, relative imports, constructor calls, source and docstrings kept</td><td>Local-variable type tracking or inferred edges with confidence; parse time reported for a large repo</td></tr>
+    <tr><td>Structural tools</td><td>20%</td><td>Lookup, call chains and impact correct on the checkpoints</td><td>Impact reports distinguish direct, transitive and inheritance-based effects</td></tr>
+    <tr><td>Search and architecture</td><td>15%</td><td>Hybrid search with three channels and RRF; community reports with modularity</td><td>Code embeddings evaluated against hashing; weights of the projection justified with results</td></tr>
+    <tr><td>Text2Cypher</td><td>15%</td><td>Batched load, validation, LIMIT, read transaction, retry on error</td><td>A 15-question structural set with execution accuracy and a list of rejected queries</td></tr>
+    <tr><td>Assistant</td><td>10%</td><td>Routing, fallback, file:line citations that resolve</td><td>Answers mark inferred edges and uncertainty explicitly</td></tr>
+    <tr><td>Evaluation</td><td>20%</td><td>30+ hand-checked questions on a real repository; per-type metrics; false negatives explained</td><td>Comparison with a vector RAG baseline over code chunks on the same questions</td></tr>
+  </tbody>
+</table>
+
+<h2>Stretch goals</h2>
+<ul>
+  <li><strong>Vector RAG baseline.</strong> Chunk the repository's files with <code>chunk_by_sentences</code> or by function, index them with <code>basic_search</code>, and compare recall on callers and impact questions. Expect a large gap; quantify it.</li>
+  <li><strong>Receiver type tracking.</strong> Implement the local-variable fix from the table above and measure recall before and after on <code>requests</code>.</li>
+  <li><strong>Pull-request impact.</strong> Given <code>git diff</code>, map changed line ranges to symbols with each node's <code>lineno</code> and <code>end_lineno</code>, and post the union of their impact sets as a review comment.</li>
+  <li><strong>Incremental updates.</strong> Re-parse only changed files, remove their nodes and outgoing edges, and re-resolve calls into them from other modules.</li>
+  <li><strong>Tests as evidence.</strong> Add TESTS edges from test functions to the symbols they call and answer “which tests cover this function?”.</li>
+  <li><strong>Compare with the research systems.</strong> Read the RepoGraph and CodexGraph papers and implement one idea, such as CodexGraph's approach of letting the model query the code graph database as a tool in a loop.</li>
+</ul>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why does impact analysis traverse CALLS edges in reverse?</p>
+  <ol>
+    <li>Reversed graphs have fewer edges</li>
+    <li data-correct>A change to a function can break the functions that call it, so we follow edges from callee back to callers</li>
+    <li>NetworkX BFS only works on reversed graphs</li>
+    <li>Callees are always in other modules</li>
+  </ol>
+  <div class="explain">Edges point from caller to callee. The set affected by a change is everything that can reach the changed symbol, which is the forward reachability set in the reversed graph.</div>
+</div>
+
+<div class="quiz">
+  <p class="q"><code>call_chains(G, "requests.api.get", "requests.adapters.HTTPAdapter.send")</code> returns nothing, although <code>requests.get</code> does end up sending through the adapter. What is the best description of the problem?</p>
+  <ol>
+    <li>The graph is disconnected because IMPORTS edges are missing</li>
+    <li>Yen's algorithm cannot find paths longer than three hops</li>
+    <li data-correct>Static resolution cannot type receivers such as a local <code>session</code> or an adapter returned at run time, so those CALLS edges are missing</li>
+    <li>HTTPAdapter.send is not declared because it is a method</li>
+  </ol>
+  <div class="explain">Both missing hops are calls on objects whose class is only known at run time or through assignment. That is the central limitation of static call graphs in dynamic languages.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A golden set's gold callers were generated by running your own <code>impact()</code> function. What is wrong?</p>
+  <ol>
+    <li>Nothing, as long as the function is deterministic</li>
+    <li>The set is too small</li>
+    <li>Gold sets must be written in JSON</li>
+    <li data-correct>The evaluation can never reveal the tool's false negatives, because the gold set shares them</li>
+  </ol>
+  <div class="explain">Build gold answers independently, from grep and reading the code, so the evaluation measures the tool against reality rather than against itself.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">When is Text2Cypher a better tool than a NetworkX traversal in this assistant?</p>
+  <ol>
+    <li>For every question, since databases are faster</li>
+    <li data-correct>For aggregations and ad hoc patterns whose shape you cannot predict, such as counts per class or symbols matching two conditions</li>
+    <li>For impact analysis, because Cypher supports variable-length paths</li>
+    <li>Only when the repository is larger than 10,000 files</li>
+  </ol>
+  <div class="explain">Known question shapes get deterministic code with no model in the loop. Text2Cypher is for the long tail of structural questions, and it needs validation because the model writes the query.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Why not use an LLM to extract the code graph like we did for Kestrel?</summary>
+  <div><p>Because the parser is exact, free and fast for the structure it can see. An LLM is useful on top: to describe undocumented functions, to label modules with responsibilities, or to propose likely edges for dynamic dispatch that static analysis misses, marked as inferred. Use the model where the syntax tree runs out.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should I use a language server or a tool like tree-sitter instead of <code>ast</code>?</summary>
+  <div><p>For Python only, <code>ast</code> is in the standard library and gives you a complete tree, which is ideal for learning. Tree-sitter parses many languages with one API and tolerates syntax errors, which matters for multi-language repositories and code being edited. Language servers (for example Pyright or Jedi-based ones) add type inference and resolve many of the receiver calls this capstone misses, at the cost of setup and speed. The graph schema and every retrieval tool in this capstone stay the same whichever front end you choose.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How big a repository can this handle?</summary>
+  <div><p>Parsing is linear in code size and NetworkX comfortably holds hundreds of thousands of nodes in memory. The slow parts are <code>shortest_simple_paths</code> on dense call graphs and embedding every symbol. For very large monorepos, keep the graph in Neo4j, precompute reverse adjacency for impact, embed symbols incrementally, and bound path searches by depth and time.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is it safe to point this at an untrusted repository?</summary>
+  <div><p>Parsing with <code>ast.parse</code> does not execute code, so building the graph is safe. The risks are elsewhere: docstrings and comments can contain instructions aimed at the answering model (treat them as untrusted data, as in <a href="29-production-ops.html">Chapter 29</a>), and generated Cypher must stay read-only. Never import the analyzed package to “help” resolution.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How does this relate to GraphRAG with community reports?</summary>
+  <div><p>Directly. Symbols are entities, calls and imports are relationships, docstrings and source are text units, and Louvain clusters with reports are the communities that answer global questions about architecture. The difference is that edges come from a parser instead of an LLM, so structural questions can be answered exactly, and the LLM is left for summarizing and explaining.</p></div>
+</details>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>A two-pass <code>ast</code> parser recovers modules, classes, functions, methods and their CONTAINS, CALLS, IMPORTS and INHERITS edges with no model.</li>
+    <li>Callers and impact are reverse BFS; call chains are k shortest paths over CALLS only; both are exact within what static analysis sees.</li>
+    <li>Community detection plus minigraphrag's report generator turns the symbol graph into an architecture overview.</li>
+    <li>Text2Cypher covers ad hoc structural questions, with validation, limits and read-only execution.</li>
+    <li>Hybrid search with identifier-aware BM25, embeddings and call-graph expansion finds entry points when no symbol is named.</li>
+    <li>Evaluate against hand-built gold sets; dynamic dispatch and untyped receivers are the main source of false negatives.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Ouyang et al. <a href="https://arxiv.org/abs/2410.14684">RepoGraph: Enhancing AI Software Engineering with Repository-level Code Graph</a>. <span class="venue">arXiv 2410.14684, 2024</span></li>
+  <li>Liu et al. <a href="https://arxiv.org/abs/2408.03910">CodexGraph: Bridging Large Language Models and Code Repositories via Code Graph Databases</a>. <span class="venue">arXiv 2408.03910, 2024</span></li>
+  <li>Liu et al. <a href="https://arxiv.org/abs/2406.07003">GraphCoder: Enhancing Repository-Level Code Completion via Code Context Graph-based Retrieval and Language Model</a>. <span class="venue">arXiv 2406.07003, 2024</span></li>
+  <li>Du et al. <a href="https://arxiv.org/abs/2405.02355">CodeGRAG: Bridging the Gap between Natural Language and Programming Language via Graphical Retrieval Augmented Generation</a>. <span class="venue">arXiv 2405.02355, 2024</span></li>
+  <li>Python Software Foundation. <a href="https://docs.python.org/3/library/ast.html">ast: Abstract Syntax Trees</a>. <span class="venue">Python documentation</span></li>
+  <li>NetworkX. <a href="https://networkx.org/documentation/stable/reference/algorithms/generated/networkx.algorithms.simple_paths.shortest_simple_paths.html">shortest_simple_paths</a>. <span class="venue">NetworkX documentation</span></li>
+  <li>Neo4j. <a href="https://neo4j.com/docs/python-manual/current/">Neo4j Python driver manual</a>. <span class="venue">Neo4j documentation</span></li>
+  <li>psf. <a href="https://github.com/psf/requests">requests</a>. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+</body>
+</html>

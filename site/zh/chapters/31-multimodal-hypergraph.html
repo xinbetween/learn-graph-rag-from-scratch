@@ -1,0 +1,929 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multimodal and hypergraph RAG | Graph RAG from Scratch</title>
+<meta name="description" content="Represent n-ary facts as hyperedges stored as fact nodes, retrieve over them, and bring images, tables and document structure into the graph.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/31-multimodal-hypergraph.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="31-multimodal-hypergraph" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Multimodal and hypergraph RAG</h1>
+  <p class="lede">Real facts often tie together more than two things, and real documents are full of photos, tables and section structure. This chapter shows how to keep n-ary facts intact as hyperedges, how to store and search them in an ordinary property graph, and how to make images, tables and document structure first-class nodes.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain why binary edges lose n-ary facts, and compare edge properties, reification and hyperedges</li>
+      <li>Store a hypergraph as a bipartite graph of entity nodes and fact nodes, in NetworkX or Cypher</li>
+      <li>Extract n-ary facts with an LLM and retrieve them with embeddings plus Personalized PageRank</li>
+      <li>Model images, tables and table rows as graph nodes with cross-modal edges and provenance</li>
+      <li>Choose between captioning, shared image-text embeddings and late-interaction scoring for visual evidence</li>
+      <li>Describe what recent hypergraph, multimodal and document-structure GraphRAG systems add, and what they cost</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Facts with more than two participants</h2>
+<p>Every graph you built so far has binary edges: one source, one target, a description. That fits “Lena Park is a partner at Brightwater Capital” perfectly. Now read the first sentence of the Series B press release in the Kestrel corpus:</p>
+<blockquote><p>Kestrel Labs today announced a $40 million Series B financing led by Brightwater Capital, which also led the company's Series A in 2022. Existing investors participated alongside two new infrastructure funds.</p></blockquote>
+<p>That sentence states one fact with at least five parts: a <strong>company</strong> (Kestrel Labs), a <strong>lead investor</strong> (Brightwater Capital), <strong>other participants</strong> (existing investors, two new infrastructure funds), an <strong>amount</strong> ($40M), a <strong>date</strong> (23 September 2025) and a <strong>round</strong> (Series B). The Series A press release has the same shape: $12M, led by Brightwater, with two regional angel groups, 15 March 2022. A fact that relates n things at once is called an <strong>n-ary fact</strong>.</p>
+
+<h3>What binary extraction does to it</h3>
+<p>The extractor from <a href="08-entity-relation-extraction.html">Chapter 8</a> can only emit pairs, so it splits the fact into edges such as BRIGHTWATER CAPITAL → KESTREL LABS (“led the Series B”), INFRASTRUCTURE FUNDS → KESTREL LABS (“invested in”), and a description on some edge that mentions $40M. Three things break:</p>
+<ul>
+  <li><strong>Merging collapses the rounds.</strong> <code>build_graph</code> keys edges by their endpoint pair. Both rounds produce a Brightwater–Kestrel edge, so they land on one edge whose description list mixes “led the Series A” with “led the $40M Series B” and whose weight is the sum. Nothing structural says which amount belongs to which round.</li>
+  <li><strong>Joins become ambiguous.</strong> If you model amounts and dates as nodes, Kestrel Labs has edges to $12M, $40M, March 2022 and September 2025. Pairing “amount” with “date” by walking through Kestrel gives 2 × 2 = 4 combinations, only 2 of which are real. Add the round name and the participant and it becomes 2 × 2 × 2 × 2 = 16 combinations with 2 true ones.</li>
+  <li><strong>Participants lose their context.</strong> “Infrastructure funds invested in Kestrel Labs” is true, but the edge no longer says <em>in which round</em>, so “who joined Kestrel's cap table in 2025?” cannot be answered from structure.</li>
+</ul>
+<p>Step through the visualization. The first three steps are the binary graph; the last three replace the tangle with two <strong>fact nodes</strong>, one per round, each connected to its participants by edges labeled with a <strong>role</strong>.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Binary edges vs. a hyperedge for the Series B fact",
+  "subtitle": "Amounts and dates are drawn as nodes here so you can see the join",
+  "height": 440,
+  "nodes": [
+    {"id": "bw", "label": "Brightwater", "group": 1, "x": 50, "y": 10},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 52},
+    {"id": "fa", "label": "Fact: Series A", "group": 6, "x": 24, "y": 52},
+    {"id": "fb", "label": "Fact: Series B", "group": 6, "x": 76, "y": 52},
+    {"id": "m12", "label": "$12M", "group": 5, "x": 6, "y": 28},
+    {"id": "d22", "label": "Mar 2022", "group": 5, "x": 6, "y": 76},
+    {"id": "angels", "label": "Angel groups", "group": 2, "x": 24, "y": 88},
+    {"id": "m40", "label": "$40M", "group": 5, "x": 94, "y": 28},
+    {"id": "d25", "label": "Sep 2025", "group": 5, "x": 94, "y": 76},
+    {"id": "infra", "label": "Infra funds", "group": 2, "x": 76, "y": 88}
+  ],
+  "edges": [
+    {"source": "bw", "target": "kestrel", "label": "led rounds in"},
+    {"source": "kestrel", "target": "m12", "label": "raised"},
+    {"source": "kestrel", "target": "m40", "label": "raised"},
+    {"source": "kestrel", "target": "d22", "label": "raised on"},
+    {"source": "kestrel", "target": "d25", "label": "raised on"},
+    {"source": "angels", "target": "kestrel", "label": "invested in"},
+    {"source": "infra", "target": "kestrel", "label": "invested in"},
+    {"source": "fa", "target": "bw", "label": "lead"},
+    {"source": "fa", "target": "kestrel", "label": "company"},
+    {"source": "fa", "target": "m12", "label": "amount"},
+    {"source": "fa", "target": "d22", "label": "date"},
+    {"source": "fa", "target": "angels", "label": "participant"},
+    {"source": "fb", "target": "bw", "label": "lead"},
+    {"source": "fb", "target": "kestrel", "label": "company"},
+    {"source": "fb", "target": "m40", "label": "amount"},
+    {"source": "fb", "target": "d25", "label": "date"},
+    {"source": "fb", "target": "infra", "label": "participant"}
+  ],
+  "legend": {"1": "Company or lead investor", "2": "Other participants", "5": "Literal value", "6": "Fact node (hyperedge)"},
+  "steps": [
+    {"caption": "<strong>Binary view.</strong> Seven pairwise edges. Each one is true, and a single-round company would look fine like this.", "active": ["bw", "kestrel", "m12", "m40", "d22", "d25", "angels", "infra"], "edges": ["bw>kestrel", "kestrel>m12", "kestrel>m40", "kestrel>d22", "kestrel>d25", "angels>kestrel", "infra>kestrel"]},
+    {"caption": "<strong>Ask: when was the $40M raised?</strong> From $40M you reach Kestrel Labs, and from there both Mar 2022 and Sep 2025. The structure offers 2 dates for 1 amount; the answer depends on the LLM guessing from mixed descriptions.", "active": ["m40", "d22", "d25"], "visited": ["kestrel"], "edges": ["kestrel>m40", "kestrel>d22", "kestrel>d25"]},
+    {"caption": "<strong>One edge, two rounds.</strong> Brightwater led both rounds, so <code>build_graph</code> merges both extractions onto the single Brightwater–Kestrel edge. Infra funds and angel groups keep no link to their round.", "active": ["bw", "kestrel", "infra", "angels"], "edges": ["bw>kestrel"], "visitedEdges": ["infra>kestrel", "angels>kestrel"]},
+    {"caption": "<strong>Hyperedge view.</strong> The Series B becomes one fact node joined to its five participants. Each edge carries a role: lead, company, amount, date, participant.", "active": ["fb"], "visited": ["bw", "kestrel", "m40", "d25", "infra"], "edges": ["fb>bw", "fb>kestrel", "fb>m40", "fb>d25", "fb>infra"]},
+    {"caption": "The Series A gets its own fact node. Brightwater and Kestrel belong to both facts, but the facts stay separate, so nothing blurs.", "active": ["fa", "fb"], "visited": ["bw", "kestrel", "m12", "d22", "angels", "m40", "d25", "infra"], "edges": ["fa>bw", "fa>kestrel", "fa>m12", "fa>d22", "fa>angels"], "visitedEdges": ["fb>bw", "fb>kestrel", "fb>m40", "fb>d25", "fb>infra"]},
+    {"caption": "<strong>Ask again.</strong> $40M → Fact: Series B → date. Two edges, one answer, and the same hop also returns the lead and the new participants with their roles.", "active": ["m40", "fb", "d25"], "visited": ["bw", "infra", "kestrel"], "edges": ["fb>m40", "fb>d25"], "visitedEdges": ["fb>bw", "fb>infra", "fb>kestrel"]}
+  ]
+}
+</script>
+</div>
+
+<p>The graph from <a href="08-entity-relation-extraction.html">Chapter 8</a> already has one partial defense: extracting the event as an entity, as Exercise 8.1 did with the 2024 Halden Reef bleaching event. That is exactly the move this chapter makes systematic. A fact node is an event node you create on purpose, for every n-ary fact, with typed roles.</p>
+
+<h2>Hypergraphs and the bipartite trick</h2>
+<h3>Definitions</h3>
+<p>A <strong>hypergraph</strong> H = (V, E) has vertices V and <strong>hyperedges</strong> E, where each hyperedge is any subset of V. The Series B fact is the hyperedge e<sub>B</sub> = {Kestrel Labs, Brightwater Capital, infrastructure funds, $40M, 2025-09-23}. Its size |e<sub>B</sub>| = 5 is called its <strong>arity</strong> or cardinality. An ordinary graph is the special case where every hyperedge has size 2.</p>
+<p>The natural matrix for a hypergraph is the <strong>incidence matrix</strong> B, with one row per vertex and one column per hyperedge: B<sub>v,e</sub> = 1 if v ∈ e, else 0. For the two Kestrel rounds (columns e<sub>A</sub>, e<sub>B</sub>) and eight vertices, Brightwater's row is [1, 1], the $40M row is [0, 1], and the column sums are the arities, 5 and 5. Vertex degree d(v) is a row sum: Brightwater and Kestrel have degree 2, everything else degree 1.</p>
+
+<h3>Two ways to flatten a hypergraph into a graph</h3>
+<p>Graph databases, NetworkX and every algorithm in this course expect pairwise edges, so you must turn hyperedges into ordinary edges. There are two standard expansions, and only one of them is lossless.</p>
+<ul>
+  <li><strong>Clique expansion</strong> connects every pair of vertices inside each hyperedge. Its adjacency is A = B W B<sup>T</sup> − D<sub>v</sub>, where W is the diagonal matrix of hyperedge weights and D<sub>v</sub> the diagonal of weighted vertex degrees, subtracted to remove self-loops. A hyperedge of size k becomes k(k−1)/2 edges: 10 for the Series B. Worse, the Series A clique also contains the Brightwater–Kestrel pair, so the two cliques share an edge and you cannot tell afterwards which vertices formed which fact. Binary extraction produced the same blur.</li>
+  <li><strong>Star expansion</strong> (also called the bipartite or incidence graph) adds one new node per hyperedge and connects it to each member. A hyperedge of size k becomes 1 node and k edges: 5 for the Series B. The graph is bipartite (entity nodes on one side, fact nodes on the other), its bi-adjacency matrix is exactly B, and the original hypergraph can be read back without loss.</li>
+</ul>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="hx-title">
+      <title id="hx-title">Three ways to store the Series B fact: an edge with properties, a clique expansion, and a fact node with role edges</title>
+      <text class="d-text bold" x="10" y="22">a. Edge with properties</text>
+      <text class="d-text bold" x="240" y="22">b. Clique expansion</text>
+      <text class="d-text bold" x="470" y="22">c. Fact node (star)</text>
+      <line class="d-line faint" x1="226" y1="10" x2="226" y2="290"/>
+      <line class="d-line faint" x1="456" y1="10" x2="456" y2="290"/>
+
+      <line class="d-line hot" x1="54" y1="80" x2="170" y2="80"/>
+      <circle class="d-node" cx="40" cy="80" r="16"/>
+      <circle class="d-node" cx="184" cy="80" r="16"/>
+      <text class="d-text small" x="40" y="114" text-anchor="middle">Brightwater</text>
+      <text class="d-text small" x="184" y="114" text-anchor="middle">Kestrel Labs</text>
+      <rect class="d-box edge" x="30" y="130" width="164" height="70" rx="6"/>
+      <text class="d-text mono" x="40" y="150">round: Series B</text>
+      <text class="d-text mono" x="40" y="168">amount: 40000000</text>
+      <text class="d-text mono" x="40" y="186">date: 2025-09-23</text>
+      <text class="d-text small" x="10" y="232">Fine for two participants.</text>
+      <text class="d-text small" x="10" y="248">Infra funds have nowhere to go,</text>
+      <text class="d-text small" x="10" y="264">and the Series A needs a second</text>
+      <text class="d-text small" x="10" y="280">parallel edge (a multigraph).</text>
+
+      <line class="d-line" x1="340" y1="60" x2="400" y2="104"/>
+      <line class="d-line" x1="340" y1="60" x2="378" y2="176"/>
+      <line class="d-line" x1="340" y1="60" x2="302" y2="176"/>
+      <line class="d-line" x1="340" y1="60" x2="280" y2="104"/>
+      <line class="d-line" x1="400" y1="104" x2="378" y2="176"/>
+      <line class="d-line" x1="400" y1="104" x2="302" y2="176"/>
+      <line class="d-line" x1="400" y1="104" x2="280" y2="104"/>
+      <line class="d-line" x1="378" y1="176" x2="302" y2="176"/>
+      <line class="d-line" x1="378" y1="176" x2="280" y2="104"/>
+      <line class="d-line hot" x1="302" y1="176" x2="280" y2="104"/>
+      <circle class="d-node" cx="340" cy="60" r="12"/>
+      <circle class="d-node" cx="400" cy="104" r="12"/>
+      <circle class="d-node" cx="378" cy="176" r="12"/>
+      <circle class="d-node" cx="302" cy="176" r="12"/>
+      <circle class="d-node" cx="280" cy="104" r="12"/>
+      <text class="d-text small" x="340" y="40" text-anchor="middle">$40M</text>
+      <text class="d-text small" x="416" y="90" text-anchor="start">Sep 2025</text>
+      <text class="d-text small" x="378" y="204" text-anchor="middle">Infra</text>
+      <text class="d-text small" x="302" y="204" text-anchor="middle">Kestrel</text>
+      <text class="d-text small" x="264" y="90" text-anchor="end">BW</text>
+      <text class="d-text small" x="240" y="232">10 edges for 5 members. The</text>
+      <text class="d-text small" x="240" y="248">Series A clique adds 10 more and</text>
+      <text class="d-text small" x="240" y="264">shares the highlighted BW–Kestrel</text>
+      <text class="d-text small" x="240" y="280">edge, so the rounds blur.</text>
+
+      <line class="d-line" x1="566" y1="120" x2="566" y2="52"/>
+      <line class="d-line" x1="566" y1="120" x2="646" y2="94"/>
+      <line class="d-line" x1="566" y1="120" x2="632" y2="188"/>
+      <line class="d-line" x1="566" y1="120" x2="500" y2="188"/>
+      <line class="d-line" x1="566" y1="120" x2="486" y2="94"/>
+      <rect class="d-box comm" x="540" y="106" width="52" height="28" rx="4"/>
+      <text class="d-text small" x="566" y="124" text-anchor="middle">Series B</text>
+      <circle class="d-node" cx="566" cy="52" r="11"/>
+      <circle class="d-node" cx="646" cy="94" r="11"/>
+      <circle class="d-node" cx="632" cy="188" r="11"/>
+      <circle class="d-node" cx="500" cy="188" r="11"/>
+      <circle class="d-node" cx="486" cy="94" r="11"/>
+      <text class="d-text small" x="566" y="34" text-anchor="middle">$40M</text>
+      <text class="d-text small" x="646" y="74" text-anchor="middle">Sep 2025</text>
+      <text class="d-text small" x="632" y="214" text-anchor="middle">Infra</text>
+      <text class="d-text small" x="500" y="214" text-anchor="middle">Kestrel</text>
+      <text class="d-text small" x="486" y="74" text-anchor="middle">BW</text>
+      <text class="d-text small" x="572" y="80">amount</text>
+      <text class="d-text small" x="606" y="126">date</text>
+      <text class="d-text small" x="604" y="152">participant</text>
+      <text class="d-text small" x="470" y="160">company</text>
+      <text class="d-text small" x="500" y="124">lead</text>
+      <text class="d-text small" x="470" y="248">1 node and 5 edges. Roles live on</text>
+      <text class="d-text small" x="470" y="264">the edges and the Series A gets</text>
+      <text class="d-text small" x="470" y="280">its own node: lossless.</text>
+    </svg>
+  </div>
+  <figcaption>Star expansion is the only one of the three that keeps n-ary facts intact in a pairwise graph store. It is what “storing a hypergraph in a property graph” means in practice.</figcaption>
+</figure>
+
+<h3>Reification, events and hyperedges are the same idea</h3>
+<p>Knowledge-graph practitioners have handled this problem for decades under other names. In RDF, <strong>reification</strong> turns a statement into a resource so that you can say things about it. Wikidata attaches <strong>qualifiers</strong> (start time, point in time) to statements. Event-centric schemas model a funding round, an acquisition or an appointment as an <strong>event node</strong>. A “hyperedge stored as a fact node” is structurally identical to all of these. The differences are in emphasis:</p>
+<table>
+  <thead><tr><th>Design</th><th>How the Series B is stored</th><th>Strength</th><th>Weakness</th></tr></thead>
+  <tbody>
+    <tr><td>Binary edges only</td><td>Pairwise edges with descriptions</td><td>Simplest; what Chapters 8–14 built</td><td>Loses which values belong together once facts share endpoints</td></tr>
+    <tr><td>Edge properties</td><td>One Brightwater → Kestrel edge with round, amount, date</td><td>Precise for exactly two participants; easy Cypher</td><td>No place for a third participant; parallel edges needed per round</td></tr>
+    <tr><td>Typed event nodes (schema-first)</td><td><code>(:FundingRound)</code> node with fixed relationship types</td><td>Strong constraints, validated queries, Text2Cypher-friendly</td><td>You must design each event type up front</td></tr>
+    <tr><td>Hyperedges as fact nodes (schema-light)</td><td>Fact node with a natural-language description and role edges</td><td>Works for any fact the LLM finds; the description is embeddable</td><td>Role names drift; more nodes; duplicate facts need merging</td></tr>
+    <tr><td>Native hypergraph store</td><td>A hyperedge object in a hypergraph library or engine</td><td>Hypergraph algorithms run directly</td><td>Few production stores; you still export to a graph for most tooling</td></tr>
+  </tbody>
+</table>
+
+<h3>In a property graph database</h3>
+<p>In Cypher the star expansion is a node label for facts and one relationship type with a <code>role</code> property. Literal values like amount and date usually become properties of the fact node rather than nodes of their own; making every date a node would create hub nodes that connect unrelated facts.</p>
+<pre data-file="examples/hyperedges.cypher"><code class="language-cypher">MERGE (k:Entity {name: "KESTREL LABS"})
+MERGE (b:Entity {name: "BRIGHTWATER CAPITAL"})
+MERGE (i:Entity {name: "INFRASTRUCTURE FUNDS"})
+MERGE (f:Fact {id: "FACT:FUNDING_ROUND:KESTREL LABS:SERIES B"})
+  SET f.type = "FUNDING_ROUND", f.round = "Series B",
+      f.amount_usd = 40000000, f.date = date("2025-09-23"),
+      f.description = "Kestrel Labs raised a $40 million Series B led by Brightwater Capital ...",
+      f.source_ids = ["10_brightwater_series_b-000"]
+MERGE (f)-[:HAS_ARG {role: "company"}]-&gt;(k)
+MERGE (f)-[:HAS_ARG {role: "lead"}]-&gt;(b)
+MERGE (f)-[:HAS_ARG {role: "participant"}]-&gt;(i);
+
+// Which rounds did Brightwater lead, and who else joined each one?
+MATCH (b:Entity {name: "BRIGHTWATER CAPITAL"})&lt;-[:HAS_ARG {role: "lead"}]-(f:Fact {type: "FUNDING_ROUND"})
+OPTIONAL MATCH (f)-[:HAS_ARG {role: "participant"}]-&gt;(p)
+RETURN f.round, f.amount_usd, f.date, collect(p.name) AS participants
+ORDER BY f.date;</code></pre>
+<p>The query walks two edges and cannot mix up rounds, because the amount, the date and the participants all hang off the same fact node. The same pattern works in Postgres with a <code>facts</code> table and a <code>fact_args(fact_id, entity_id, role)</code> table, which is the incidence matrix B stored as rows.</p>
+
+<h2>Hypergraph RAG: extraction and retrieval</h2>
+<p>Once facts are nodes, a GraphRAG pipeline changes in three places: the extractor emits facts with roles, the store holds a bipartite graph, and retrieval scores fact nodes as well as entities.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Luo et al., HyperGraphRAG (2025)</span>
+  <p>HyperGraphRAG argues that graph-based RAG is constrained by binary relations and represents n-ary relational facts as hyperedges. The method has three parts: knowledge hypergraph construction, retrieval and generation. The authors report experiments in medicine, agriculture, computer science and law, where it outperforms standard RAG and earlier graph-based RAG methods on answer accuracy, retrieval efficiency and generation quality.</p>
+</div>
+
+<h3>Extracting n-ary facts</h3>
+<p>The extraction prompt asks for one self-contained sentence per fact plus a role map. The sentence matters as much as the roles: it is what you embed, and what the answer model reads. Literal values go into <code>attributes</code>, entity-valued arguments into <code>roles</code>. JSON output is the right choice here because roles are a nested map, which delimited tuples express badly (see the trade-off table in <a href="08-entity-relation-extraction.html">Chapter 8</a>).</p>
+
+<pre data-file="examples/hypergraph.py"><code class="language-python">import networkx as nx
+from minigraphrag.llm import parse_json_response
+
+FACT_PROMPT = """-Goal-
+Extract n-ary facts from the text. A fact is one event or statement that ties
+together several participants, such as a funding round, an acquisition,
+a contract or an appointment.
+
+-Output-
+Return JSON: {"facts": [{"type": ..., "text": ..., "roles": {...}, "attributes": {...}}]}
+- type: one of FUNDING_ROUND, ACQUISITION, CONTRACT, APPOINTMENT, DETECTION
+- text: one self-contained sentence stating the fact, with names in full
+- roles: role name -&gt; list of entity names (organizations, people, projects, places)
+- attributes: literal values such as amount, date (YYYY-MM-DD or YYYY-MM), round
+Use only information stated in the text. Omit roles and attributes you cannot fill.
+
+-Example-
+text: In April 2025 Marlow Dynamics acquired Deepcast.
+output: {"facts": [{"type": "ACQUISITION", "text": "Marlow Dynamics acquired Deepcast in April 2025.",
+  "roles": {"acquirer": ["Marlow Dynamics"], "target": ["Deepcast"]}, "attributes": {"date": "2025-04"}}]}
+
+-Real data-
+text: {input_text}
+output:"""
+
+
+def extract_facts(llm, unit) -&gt; list[dict]:
+    # str.replace, not str.format: the JSON example is full of braces.
+    raw = llm.complete(FACT_PROMPT.replace("{input_text}", unit.text), json=True)
+    facts = parse_json_response(raw).get("facts", [])
+    for f in facts:
+        f["source_id"] = unit.id
+        f["roles"] = {r: [n.upper() for n in (names if isinstance(names, list) else [names])]
+                      for r, names in f.get("roles", {}).items()}
+    return [f for f in facts if f.get("type") and len(sum(f["roles"].values(), [])) &gt;= 1]
+
+
+def add_hyperedge(G: nx.Graph, fact_id: str, fact: dict) -&gt; None:
+    """Store one n-ary fact as a fact node plus one role-labelled edge per participant."""
+    if fact_id not in G:
+        G.add_node(fact_id, kind="fact", type=fact["type"], description=fact["text"],
+                   attributes={}, source_ids=[])
+    d = G.nodes[fact_id]
+    d["attributes"].update(fact.get("attributes", {}))
+    if fact.get("source_id") and fact["source_id"] not in d["source_ids"]:
+        d["source_ids"].append(fact["source_id"])
+    for role, names in fact["roles"].items():
+        for name in names:
+            if name not in G:
+                G.add_node(name, kind="entity", type="", description="", source_ids=[])
+            G.add_edge(fact_id, name, role=role)
+
+
+def participants(G: nx.Graph, fact_id: str) -&gt; list[tuple[str, str]]:
+    return sorted((G.edges[fact_id, n]["role"], n) for n in G.neighbors(fact_id))
+
+
+def facts_of(G: nx.Graph, entity: str, fact_type: str | None = None) -&gt; list[str]:
+    return [f for f in G.neighbors(entity)
+            if G.nodes[f].get("kind") == "fact" and fact_type in (None, G.nodes[f]["type"])]</code></pre>
+
+<p>Two choices in this code are deliberate. Entity names are uppercased to match the node names <code>build_graph</code> produces, so fact nodes can be added to the same <code>nx.Graph</code> as your existing entity graph, and entity resolution from <a href="09-entity-resolution.html">Chapter 9</a> can run over role arguments too. And <code>kind</code> distinguishes the two sides of the bipartite graph, which every downstream step needs.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Mixing fact nodes into the entity graph changes other algorithms</span>
+  <p>If you run Leiden or degree-based ranking on a graph that contains fact nodes, a busy entity's degree now counts facts rather than neighbors, and communities may form around fact nodes. Either run community detection on the entity-only projection (connect two entities if they share a fact) or keep facts in a separate layer that points into the entity graph.</p>
+</div>
+
+<h3>Retrieving over hyperedges</h3>
+<p>A query can match a fact in two ways: its wording resembles the fact's sentence (“How much was the Series B?”), or it names participants (“Brightwater”). So retrieval seeds from both sides, then spreads relevance through the bipartite structure with Personalized PageRank (PPR) from <a href="17-ppr-hipporag.html">Chapter 17</a>:</p>
+<p style="text-align:center"><em>r</em> = (1 − α) <em>s</em> + α P<sup>T</sup> <em>r</em></p>
+<p>Here <em>s</em> is the normalized seed vector and P is the random-walk transition matrix of the bipartite graph (from any node, move to a uniformly random neighbor). A walk alternates sides: entity → fact → entity. Two bipartite steps equal one hypergraph step, whose transition matrix is P<sub>H</sub> = D<sub>v</sub><sup>−1</sup> B W D<sub>e</sub><sup>−1</sup> B<sup>T</sup>: pick one of your hyperedges, then a uniform member of it. A fact node that is similar to the query <em>and</em> connected to query entities collects mass from both.</p>
+
+<pre data-file="examples/hypergraph_search.py"><code class="language-python">from minigraphrag.embeddings import HashingEmbedder, cosine_top_k
+from minigraphrag.search.ppr import personalized_pagerank   # power iteration, alpha = follow-edge probability
+from hypergraph import participants
+
+
+def hyper_search(G, query: str, embedder, k: int = 3, alpha: float = 0.85, top: int = 3) -&gt; list[dict]:
+    facts = [n for n, d in G.nodes(data=True) if d["kind"] == "fact"]
+    ents = [n for n, d in G.nodes(data=True) if d["kind"] == "entity"]
+    q = embedder.embed([query])[0]
+    fact_vecs = embedder.embed([G.nodes[f]["description"] for f in facts])
+    ent_vecs = embedder.embed([f"{n} {G.nodes[n]['description']}" for n in ents])
+
+    seeds: dict[str, float] = {}
+    for ids, vecs in ((facts, fact_vecs), (ents, ent_vecs)):      # dual seeding
+        for i, score in cosine_top_k(q, vecs, k):
+            if score &gt; 0:
+                seeds[ids[i]] = seeds.get(ids[i], 0.0) + score
+    if not seeds:
+        return []
+
+    rank = personalized_pagerank(G, seeds, alpha)
+    best = sorted(facts, key=lambda f: -rank[f])[:top]
+    return [{"fact": f, "score": round(rank[f], 3), "text": G.nodes[f]["description"],
+             "attributes": G.nodes[f]["attributes"], "roles": participants(G, f),
+             "sources": G.nodes[f]["source_ids"]} for f in best]
+
+
+# hits = hyper_search(G, "How much did Kestrel raise in its Series B, and who took part?", HashingEmbedder())</code></pre>
+
+<p>On a graph holding just the two funding facts, with <code>HashingEmbedder</code>, this ranks the Series B fact first with a PPR score of about 0.265 and the Series A second at about 0.245. (These scores use one-sentence fact descriptions like the ones in Exercise 31.3; different wording moves them slightly.) The margin is small because both facts share two participants and the hashing embedder only sees word overlap. That is acceptable: each hit carries its full role map and attributes, so the answer model reads “amount_usd: 40000000, round: Series B” as a unit and has no structural path to pairing one round's date with the other round's amount. Here a correct structure matters more than a wide ranking margin.</p>
+
+<p>For context construction (<a href="22-context-construction.html">Chapter 22</a>), render each fact as one row: the sentence, the roles, the attributes and the source ids. A fact table is typically shorter than the equivalent relationship table because one row replaces several edges.</p>
+
+<h3>What recent work adds</h3>
+<p>Three 2026 papers push this design in different directions; the table lists them with the original HyperGraphRAG for comparison. The descriptions stay within what the abstracts state.</p>
+<table>
+  <thead><tr><th>Paper</th><th>Problem it targets</th><th>Mechanism</th></tr></thead>
+  <tbody>
+    <tr><td>Khrouf et al., hypergraph RAG fact extraction and chunk retrieval</td><td>HyperGraphRAG relies on error-prone LLM extraction and standard chunk retrieval</td><td>Self-consistency prompting to improve extraction; Personalized PageRank over the hypergraph to improve chunk retrieval</td></tr>
+    <tr><td>An et al., HyCE-RAG</td><td>Pairwise edges miss higher-order associations in multi-hop QA; answers should be explainable</td><td>Builds a query-aware evidence hypergraph, propagates confidence over entity–hyperedge incidence, then assembles and ranks evidence chains using semantic relevance, connectivity, coverage, relation reliability, extraction confidence and propagated confidence</td></tr>
+    <tr><td>Lin et al., EvoGraph-R1</td><td>Graphs built offline and queried once cannot absorb new evidence or fix errors; retrieval is text-centric</td><td>Treats a multimodal knowledge hypergraph as an environment; retrieval is a Markov decision process whose actions are GraphRetrieve, WebSearch, GraphEdit and Answer, so the hypergraph evolves during reasoning</td></tr>
+    <tr><td>Luo et al., HyperGraphRAG</td><td>Binary relations cannot express n-ary facts</td><td>Hyperedges for n-ary facts, with hypergraph construction, retrieval and generation</td></tr>
+  </tbody>
+</table>
+<p>Two lessons carry over to your own system. First, extraction quality limits everything downstream: an n-ary fact has more slots to get wrong than a pair, which is why self-consistency (sample several extractions, keep what agrees) fits well. Second, the incidence structure is itself a ranking signal, which both the PPR code above and HyCE-RAG's confidence propagation exploit.</p>
+
+<h2>Images, tables and figures as nodes</h2>
+<p>Kestrel's documents are text files, but the organizations behind them produce far more than text. Tidewater Institute's research note RN-2024-07 says the temperature, optical and acoustic data for the bleaching event are published as dataset HR-2024-08. A real version of that note would carry photos of the reef crest; a real Project Tern blog would carry a spec table. For this section, <strong>imagine two hypothetical additions to the corpus</strong>:</p>
+<ul>
+  <li><strong>Figure 1 of RN-2024-07</strong>: a Sentinel drone photo of pale branching coral on the northern reef-crest transect, captioned “Onset of bleaching, August 2024”.</li>
+  <li><strong>Table 1 of the Project Tern blog post</strong>: a two-row comparison of sonar modules. The Deepcast module: made by Deepcast, no longer available to Kestrel. The Tern module: built by Kestrel Labs, sea trials on two Sentinel drones in Q1 2026, phased fleet replacement Q2 to Q4 2026, designed to fit the existing hull. Every cell comes from sentences already in the blog post; only the table layout is invented.</li>
+</ul>
+<p>A text-only pipeline sees neither. The photo has no words at all, and a table flattened into a chunk loses the header that tells you what each cell means.</p>
+
+<h3>A multimodal graph schema</h3>
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 270" role="img" aria-labelledby="mm-title">
+      <title id="mm-title">Document, section, text unit, figure and table nodes, with cross-modal edges from text units, figures and table rows to entities</title>
+      <defs>
+        <marker id="mm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/>
+        </marker>
+      </defs>
+      <rect class="d-box" x="10" y="104" width="130" height="62" rx="6"/>
+      <text class="d-text bold" x="22" y="128">Document</text>
+      <text class="d-text small" x="22" y="148">RN-2024-07, date</text>
+      <rect class="d-box" x="176" y="104" width="130" height="62" rx="6"/>
+      <text class="d-text bold" x="188" y="128">Section</text>
+      <text class="d-text small" x="188" y="148">“Detection”, order</text>
+      <line class="d-line" x1="140" y1="135" x2="174" y2="135" marker-end="url(#mm-arrow)"/>
+
+      <rect class="d-box node" x="352" y="12" width="160" height="62" rx="6"/>
+      <text class="d-text bold" x="364" y="36">Text unit</text>
+      <text class="d-text small" x="364" y="56">text, char offsets</text>
+      <rect class="d-box edge" x="352" y="104" width="160" height="62" rx="6"/>
+      <text class="d-text bold" x="364" y="128">Figure (image)</text>
+      <text class="d-text small" x="364" y="148">pixels, caption, VLM text</text>
+      <rect class="d-box comm" x="352" y="196" width="160" height="62" rx="6"/>
+      <text class="d-text bold" x="364" y="220">Table + row nodes</text>
+      <text class="d-text small" x="364" y="240">header, cells, caption</text>
+      <line class="d-line" x1="306" y1="120" x2="350" y2="50" marker-end="url(#mm-arrow)"/>
+      <line class="d-line" x1="306" y1="135" x2="350" y2="135" marker-end="url(#mm-arrow)"/>
+      <line class="d-line" x1="306" y1="150" x2="350" y2="222" marker-end="url(#mm-arrow)"/>
+      <text class="d-text small" x="250" y="96">contains</text>
+
+      <rect class="d-box good" x="570" y="96" width="100" height="78" rx="6"/>
+      <text class="d-text bold" x="582" y="122">Entity</text>
+      <text class="d-text small" x="582" y="142">Halden Reef,</text>
+      <text class="d-text small" x="582" y="158">Project Tern</text>
+      <line class="d-line dash" x1="512" y1="43" x2="568" y2="110" marker-end="url(#mm-arrow)"/>
+      <line class="d-line dash" x1="512" y1="135" x2="568" y2="135" marker-end="url(#mm-arrow)"/>
+      <line class="d-line dash" x1="512" y1="227" x2="568" y2="160" marker-end="url(#mm-arrow)"/>
+      <text class="d-text small" x="548" y="56">mentions</text>
+      <text class="d-text small" x="520" y="128">depicts</text>
+      <text class="d-text small" x="540" y="236">about</text>
+      <line class="d-line faint" x1="432" y1="74" x2="432" y2="102"/>
+      <text class="d-text small" x="438" y="93">refers to</text>
+    </svg>
+  </div>
+  <figcaption>Solid arrows are the document structure (from parsing). Dashed arrows are cross-modal edges into the entity graph (from extraction). Every figure, table and row keeps the id of its document and section, just like text units do.</figcaption>
+</figure>
+
+<p>The schema adds three node kinds and a handful of edge types:</p>
+<ul>
+  <li><strong>Figure nodes</strong> store a reference to the image bytes, the caption, the page or bounding box it came from, a generated text description, and one or more embeddings.</li>
+  <li><strong>Table nodes</strong> store the caption and header. <strong>Row nodes</strong> store the cells <em>together with the header</em>, so “Q1 2026” is always read as “sea trials: Q1 2026”. Rows are the right retrieval grain for most questions; whole tables are too big and single cells too small.</li>
+  <li><strong>Cross-modal edges</strong>: <code>DEPICTS</code> (figure → entity), <code>ABOUT</code> (row → entity), <code>MENTIONS</code> (text unit → entity), and <code>REFERS_TO</code> (text unit → figure, when the prose says “see Figure 1”). Structural edges <code>CONTAINS</code> and <code>NEXT</code> link documents, sections and their children.</li>
+</ul>
+<p>A table row is itself a small n-ary fact: “the Tern module, made by Kestrel Labs, sea trials Q1 2026, fleet replacement Q2–Q4 2026”. You can store rows with exactly the fact-node machinery from the previous section, with column names as roles or attributes.</p>
+
+<h3>Building it</h3>
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "Multimodal ingestion pipeline",
+  "perRow": 3,
+  "stages": [
+    {"label": "Parse layout", "detail": "Split each document into sections, paragraphs, figures and tables with page and bounding-box coordinates. PDFs need a layout parser; HTML and Markdown give you structure for free."},
+    {"label": "Crop and normalize", "detail": "Save each figure as an image file and each table as a header plus rows. Keep the caption and the paragraph that references it."},
+    {"label": "Describe in context", "detail": "Ask a vision-language model to describe the figure, giving it the caption, the referencing paragraph and a short document summary. Mark the description as generated."},
+    {"label": "Embed", "detail": "Embed the description as text, and optionally the image itself with a shared image-text model or a multi-vector late-interaction model."},
+    {"label": "Link to entities", "detail": "Run entity extraction on captions, descriptions and rows. Add DEPICTS and ABOUT edges to the existing entity graph."},
+    {"label": "Store with provenance", "detail": "Write figure, table and row nodes with document id, section, page, bounding box and model versions, so every answer can point at the exact region."}
+  ]
+}
+</script>
+</div>
+
+<p>The “describe in context” step does more for quality than any other. A vision-language model shown only the photo might write “underwater scene with white coral”. Shown the caption and the Detection section of RN-2024-07, it can write “Sentinel drone photo of paling branching coral on the Halden Reef northern crest transect at bleaching onset, August 2024”, which names three linkable entities: Project Sentinel, Halden Reef and the 2024 bleaching event.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Wu et al., Multi-granularity context-enhanced RAG over multimodal knowledge graphs (2026)</span>
+  <p>This work observes that multimodal KG pipelines usually process modalities independently before fusing them, so text context is underused when extracting knowledge from images. Its context-enhanced multimodal KG enriches each image with local context (sentences semantically related to the image, including surrounding text at several granularities) and global context (a summary of the whole passage). The authors report gains on a vision-centric dataset and across different multimodal-KG RAG methods.</p>
+</div>
+
+<h3>Three ways to embed visual evidence</h3>
+<p>Once figures are nodes, you need a way to decide which figures match a query. There are three families, in increasing fidelity and cost.</p>
+<ol>
+  <li><strong>Textualize.</strong> Embed the caption plus generated description with your normal text embedder. Cheap, works with any vector store, and everything downstream stays text. It is only as good as the description: anything the vision model did not mention is invisible.</li>
+  <li><strong>Shared image-text embedding.</strong> Models trained contrastively on image-caption pairs (CLIP is the classic example) map an image and a text query to one vector each in a shared space. Retrieval is a single cosine, as in <a href="02-vector-rag.html">Chapter 2</a>. One vector must summarize the whole image, so small details get averaged away.</li>
+  <li><strong>Late interaction (multi-vector).</strong> Keep one vector per query token and one per image patch. ColBERT introduced this for text and ColPali applied it to page images. The score is <strong>MaxSim</strong>: for each query token, take its best-matching patch, then sum.</li>
+</ol>
+<p style="text-align:center">score(q, d) = Σ<sub>i ∈ query tokens</sub> max<sub>j ∈ patches</sub> q<sub>i</sub> · d<sub>j</sub></p>
+<p>The visualization below uses tiny 4-dimensional vectors (axes: pale, coral, crest structure, open water) for three candidate photos. Switch between scoring modes and watch the ranking change. With a single mean-pooled vector, the healthy deep-reef photo wins because its every patch is “coral”. With MaxSim, the bleaching photo wins: one patch strongly matches “bleached” and another matches “crest”, and the two water patches cost it nothing.</p>
+
+<div class="viz" data-viz="ch31-maxsim">
+<script type="application/json">
+{
+  "title": "Single vector vs. late interaction",
+  "subtitle": "Query: bleached coral on the crest",
+  "tokens": [
+    {"label": "bleached", "v": [1, 0.1, 0, 0]},
+    {"label": "coral", "v": [0.1, 1, 0.1, 0]},
+    {"label": "crest", "v": [0, 0.2, 1, 0]}
+  ],
+  "images": [
+    {"label": "A. Northern crest photo", "note": "the hypothetical Figure 1", "patches": [
+      {"label": "pale coral", "v": [0.8, 0.6, 0.1, 0]},
+      {"label": "water", "v": [0, 0, 0.1, 1]},
+      {"label": "water", "v": [0, 0.05, 0, 1]},
+      {"label": "crest rock", "v": [0.1, 0.2, 0.95, 0.1]}]},
+    {"label": "B. Healthy deep reef", "note": "lots of coral, no bleaching", "patches": [
+      {"label": "coral", "v": [0, 1, 0.2, 0]},
+      {"label": "coral", "v": [0.1, 0.95, 0.3, 0]},
+      {"label": "ridge", "v": [0, 0.5, 0.8, 0.1]},
+      {"label": "coral", "v": [0, 0.9, 0.4, 0.1]}]},
+    {"label": "C. Drone on the dock", "note": "mostly water and hull", "patches": [
+      {"label": "hull", "v": [0.2, 0, 0.1, 0.9]},
+      {"label": "water", "v": [0, 0, 0.2, 0.9]},
+      {"label": "float", "v": [0.3, 0.1, 0, 0.8]},
+      {"label": "water", "v": [0.1, 0.1, 0.1, 0.9]}]}
+  ]
+}
+</script>
+</div>
+
+<p>The cost is storage and compute. With illustrative sizes of 1,000 patch vectors of 128 dimensions in float32, one page image needs 1,000 × 128 × 4 bytes = 512 KB, against 3 KB for a single 768-dimensional vector: about 170 times more. Multi-vector indexes are usually compressed or pooled to cut that cost, and a common pattern uses cheap single-vector search to shortlist candidates and late interaction only to rerank them.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Kim, ColGraphRAG (2026)</span>
+  <p>ColGraphRAG isolates exactly this choice inside a multimodal GraphRAG pipeline. It replaces only the ranking operator for graph-linked image nodes with MaxSim-style multi-vector scoring, keeping graph construction, text and table retrieval, extraction and reasoning unchanged. On MultimodalQA it reports better retrieval-stage estimates for image candidates and downstream QA gains, with larger movement where visual evidence matters most and mixed trends on text-dominant questions. The author frames this as mechanism-level evidence that calls for broader validation.</p>
+</div>
+
+<h3>Retrieval across modalities on the Kestrel graph</h3>
+<p>With figure and row nodes linked into the entity graph, the local search from <a href="14-local-search.html">Chapter 14</a> works unchanged: seed entities, expand, collect evidence. The difference is that some evidence items are images or rows. Step through two questions.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Local search that reaches a photo and a table row",
+  "subtitle": "Figure 1 and Table 1 are hypothetical additions to the corpus",
+  "height": 420,
+  "nodes": [
+    {"id": "photo", "label": "Photo: reef crest", "group": 7, "x": 12, "y": 16},
+    {"id": "rn", "label": "RN-2024-07 text", "group": 6, "x": 12, "y": 80},
+    {"id": "bleach", "label": "2024 bleaching", "group": 5, "x": 36, "y": 48},
+    {"id": "reef", "label": "Halden Reef", "group": 4, "x": 38, "y": 88},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 50, "y": 20},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 66, "y": 52},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 62, "y": 88},
+    {"id": "blog", "label": "Tern blog text", "group": 6, "x": 76, "y": 10},
+    {"id": "table", "label": "Sonar table", "group": 8, "x": 92, "y": 34},
+    {"id": "rowt", "label": "Row: Tern", "group": 8, "x": 78, "y": 64},
+    {"id": "rowd", "label": "Row: Deepcast", "group": 8, "x": 91, "y": 88}
+  ],
+  "edges": [
+    {"source": "photo", "target": "bleach", "label": "depicts"},
+    {"source": "photo", "target": "reef", "label": "depicts"},
+    {"source": "photo", "target": "sentinel", "label": "captured by"},
+    {"source": "photo", "target": "rn", "label": "figure in"},
+    {"source": "rn", "target": "bleach", "label": "mentions"},
+    {"source": "bleach", "target": "reef", "label": "occurred at"},
+    {"source": "sentinel", "target": "bleach", "label": "detected"},
+    {"source": "tern", "target": "sentinel", "label": "replaces sonar in"},
+    {"source": "tern", "target": "deepcast", "label": "replaces"},
+    {"source": "blog", "target": "tern", "label": "mentions"},
+    {"source": "blog", "target": "table", "label": "contains"},
+    {"source": "table", "target": "rowt", "label": "row"},
+    {"source": "table", "target": "rowd", "label": "row"},
+    {"source": "rowt", "target": "tern", "label": "about"},
+    {"source": "rowd", "target": "deepcast", "label": "about"}
+  ],
+  "legend": {"7": "Figure", "8": "Table and rows", "6": "Text unit", "3": "Project", "5": "Event", "4": "Location", "1": "Organization"},
+  "steps": [
+    {"caption": "One graph, several modalities: text units, a figure, a table with row nodes, and the entities they all point at.", "showAllLabels": true},
+    {"caption": "<strong>Q1: What did the Sentinel drones see when the 2024 bleaching began?</strong> Entity matching seeds <span class=\"viz-chip node\">2024 bleaching</span> and <span class=\"viz-chip node\">Project Sentinel</span>.", "active": ["bleach", "sentinel"]},
+    {"caption": "Expand one hop. The photo is reached twice (DEPICTS from the event, CAPTURED_BY from Sentinel), so it ranks above nodes reached once. The research note text is reached through MENTIONS.", "active": ["photo", "rn"], "visited": ["bleach", "sentinel", "reef"], "edges": ["photo>bleach", "photo>sentinel", "rn>bleach"], "visitedEdges": ["sentinel>bleach"]},
+    {"caption": "Context: the text unit as cited prose, and the photo either as an image input to a multimodal model or as its caption and generated description. Its provenance (RN-2024-07, Figure 1) goes into the citation.", "active": ["photo", "rn"], "visited": ["bleach", "sentinel"], "edges": ["photo>rn"], "visitedEdges": ["photo>bleach", "rn>bleach"]},
+    {"caption": "<strong>Q2: Which sonar module will Sentinel drones run by the end of 2026?</strong> Seed <span class=\"viz-chip node\">Project Sentinel</span>, expand to <span class=\"viz-chip node\">Project Tern</span>, then ABOUT reaches <span class=\"viz-chip comm\">Row: Tern</span>.", "active": ["rowt"], "visited": ["sentinel", "tern"], "edges": ["tern>sentinel", "rowt>tern"]},
+    {"caption": "Return the row with the table's header and caption, not the whole table: “Tern module, made by Kestrel Labs, sea trials Q1 2026, fleet replacement Q2–Q4 2026”. The Deepcast row is one hop further and can be added for contrast.", "active": ["rowt", "table"], "visited": ["tern", "rowd", "blog"], "edges": ["table>rowt"], "visitedEdges": ["table>rowd", "blog>table"]}
+  ]
+}
+</script>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">He et al., HVM-GraphRAG (2026)</span>
+  <p>HVM-GraphRAG targets two weaknesses of multimodal GraphRAG on complex documents: unreliable cross-modal evidence indexing and expensive traversal. It uses a holistic view of the document to guide graph construction, which reduces noisy and conflicting graph updates, and builds indices from concept-level nodes to supporting multimodal chunks. At query time it searches a compact concept-level graph and jumps to evidence through that index instead of traversing a dense entity graph, then regroups retrieved chunks by modality before answering.</p>
+</div>
+
+<p>HVM-GraphRAG's index closely resembles the <code>source_ids</code> list on every node in <code>minigraphrag</code>: a small graph of concepts, each pointing at the chunks that support it. The multimodal version lets those chunks be images and tables. EvoGraph-R1, described earlier, works over a multimodal hypergraph, so it combines both halves of this chapter.</p>
+
+<h2>Document structure as a graph</h2>
+<p>Documents have a skeleton before you extract a single entity: titles, sections, paragraphs, figures, tables, footnotes and cross-references. The research note RN-2024-07 has sections Summary, Detection, Extent, Discussion, Recommendations and Data availability. A <strong>document-structure graph</strong> (sometimes called a lexical graph, see <a href="06-graph-shapes.html">Chapter 6</a>) makes that skeleton explicit: <code>CONTAINS</code> edges from document to section to paragraph, <code>NEXT</code> edges between consecutive paragraphs, and <code>REFERS_TO</code> edges for “see Table 1” or “as described in the Detection section”.</p>
+<p>You already have an entity graph, but many questions are about <em>where</em> something is said rather than <em>who</em> is related to whom. “What did Tidewater recommend after the bleaching?” is answered by one section, Recommendations. Its three recommendations name only entities that appear all over the corpus (the Sentinel fleet, Halden Reef, Port Avalon), and nothing in the entity graph marks them as recommendations. Entity-anchored retrieval from “Tidewater” pulls in every Tidewater fact first; navigating document → section → paragraphs goes straight to the answer.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Xie et al., DocNavRAG (2026)</span>
+  <p>DocNavRAG argues that fixed GraphRAG traversal is too rigid and that agentic RAG over weakly structured interfaces keeps searching from scratch. It organizes document hierarchies and cross-region relations into a navigable graph, exposes graph operations for locating, navigating, expanding and fetching, and keeps an evolving evidence state that guides retrieval until enough evidence is collected. Across four long- and multi-document QA benchmarks it reports average improvements of 7.8% in answer quality and 17.7% in context sufficiency over the strongest baseline.</p>
+</div>
+
+<p>Financial filings are the domain where this structure is most regular. HC-RAG, covered in <a href="32-domain-graphrag.html">Chapter 32</a>, builds a typed evidence graph of documents, sections, text units, table units and metadata, and routes queries along document–section–unit paths. Structure graphs and entity graphs are complementary: link them with <code>MENTIONS</code> edges and a query can enter through either.</p>
+
+<h3>Choosing a design</h3>
+<table>
+  <thead><tr><th>Your corpus and questions</th><th>Reasonable design</th><th>Main cost</th></tr></thead>
+  <tbody>
+    <tr><td>Mostly pairwise facts (who works where, who owns what)</td><td>Binary entity graph</td><td>Lowest; what earlier chapters built</td></tr>
+    <tr><td>Many events with several participants, amounts and dates (deals, trials, contracts)</td><td>Fact nodes (star-expanded hyperedges) alongside entities</td><td>More complex extraction; fact deduplication</td></tr>
+    <tr><td>A few event types you know in advance</td><td>Typed event nodes with a fixed schema</td><td>Schema design and maintenance</td></tr>
+    <tr><td>Figures carry evidence, questions are text-heavy</td><td>Figure nodes with contextual text descriptions</td><td>One vision-model call per figure at index time</td></tr>
+    <tr><td>Visual detail decides answers (inspection photos, charts, scanned pages)</td><td>Add multi-vector late interaction for image candidates</td><td>Index size; reranking compute</td></tr>
+    <tr><td>Long structured documents, section-level questions</td><td>Document-structure graph linked to the entity graph</td><td>A layout parser; more node types</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">Generated descriptions are extracted claims, not ground truth</span>
+  <p>A vision model's description of a photo can be wrong in the same ways an entity extractor can: it may call healthy coral pale, or invent a location. Store it with a <code>generated_by</code> field and the model version, cite the image itself rather than the description, and include figures in your extraction spot checks (<a href="25-evaluation.html">Chapter 25</a>).</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 31.1 <span class="level">Warm-up</span></h4>
+  <p>Treat the two Kestrel funding rounds as hyperedges, with amounts and dates as vertices as in the first visualization: e<sub>A</sub> = {Kestrel, Brightwater, angel groups, $12M, Mar 2022} and e<sub>B</sub> = {Kestrel, Brightwater, infra funds, $40M, Sep 2025}. (a) How many nodes and edges does the star expansion have? (b) How many distinct edges does the clique expansion have? (c) Given only the clique expansion, can you recover e<sub>A</sub> and e<sub>B</sub>?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Vertices: Kestrel, Brightwater, angel groups, $12M, Mar 2022, infra funds, $40M, Sep 2025 = 8 entity nodes, plus 2 fact nodes = <strong>10 nodes</strong>. Edges: one per membership, 5 + 5 = <strong>10 edges</strong>.</p>
+    <p>(b) Each 5-member clique has 5 × 4 / 2 = 10 edges, so 20 in total, but the pair Kestrel–Brightwater appears in both, so there are <strong>19 distinct edges</strong> (one of them with weight 2 if you count multiplicity).</p>
+    <p>(c) <strong>Not reliably.</strong> The clique expansion is two 5-cliques sharing an edge. You might guess the maximal cliques, but a different hypergraph produces the same graph: for example, ten separate binary facts covering the same pairs, or three-member hyperedges that happen to cover them. Maximal cliques are also not always the original hyperedges when hyperedges overlap in more than one pair. The star expansion is unambiguous because each fact node lists exactly its members.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 31.2 <span class="level">Core</span></h4>
+  <p>Use the hypergraph random walk P<sub>H</sub> from the retrieval section on the hypergraph from Exercise 31.1: from a vertex, choose one of its hyperedges uniformly, then a uniform member of that hyperedge (which may be the vertex itself). Start with all probability on <em>infra funds</em>. Compute the distribution after one step and after two steps. Which vertex other than the start is most likely after two steps, and why does that matter for retrieval?</p>
+  <details class="hint"><summary>Hint</summary><p>Infra funds belongs to one hyperedge. Kestrel and Brightwater belong to two, so from them the walk splits 50/50 between e<sub>A</sub> and e<sub>B</sub>.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Step 1.</strong> Infra funds is only in e<sub>B</sub>, so the walk moves to e<sub>B</sub> and picks each of its 5 members with probability 0.2: Kestrel 0.2, Brightwater 0.2, infra funds 0.2, $40M 0.2, Sep 2025 0.2.</p>
+    <p><strong>Step 2.</strong> Propagate each 0.2:</p>
+    <ul>
+      <li>From infra funds, $40M and Sep 2025 (each in e<sub>B</sub> only): 3 × 0.2 = 0.6 goes to e<sub>B</sub>, spread 0.12 to each member.</li>
+      <li>From Kestrel: 0.1 to e<sub>A</sub> and 0.1 to e<sub>B</sub>, spread 0.02 to each member of each.</li>
+      <li>From Brightwater: the same, 0.02 to each member of e<sub>A</sub> and of e<sub>B</sub>.</li>
+    </ul>
+    <p>So e<sub>B</sub> receives 0.6 + 0.1 + 0.1 = 0.8, giving each e<sub>B</sub> member 0.16; e<sub>A</sub> receives 0.2, giving each e<sub>A</sub> member 0.04. Kestrel and Brightwater are in both: 0.16 + 0.04 = <strong>0.20</strong> each. Infra funds, $40M and Sep 2025: <strong>0.16</strong> each. Angel groups, $12M and Mar 2022: <strong>0.04</strong> each. Check: 2 × 0.20 + 3 × 0.16 + 3 × 0.04 = 0.40 + 0.48 + 0.12 = 1.00.</p>
+    <p>Kestrel and Brightwater are most likely (0.20) because they sit in both hyperedges and collect mass from both. That is the familiar hub effect from PPR: shared participants rise. But the Series B's literal values ($40M, Sep 2025 at 0.16) stay four times more likely than the Series A's (0.04), so a walk seeded on the Series B side stays mostly inside its own fact. In a clique expansion, where Kestrel–Brightwater is a single shared edge, that separation would be weaker.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 31.3 <span class="level">Core</span></h4>
+  <p>The Series B press release also mentions the Series A: “Brightwater Capital, which also led the company's Series A in 2022”. An extractor will produce a partial Series A fact from that chunk (lead, company, round, date “2022”, no amount) in addition to the full one from the Series A press release. Write <code>fact_key(fact)</code> and <code>merge_fact(G, fact)</code> so that both extractions become one fact node with the most specific date, both source ids, the fuller sentence, and a <code>conflicts</code> list when two values genuinely disagree.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import networkx as nx
+from hypergraph import add_hyperedge, participants
+
+def fact_key(fact: dict) -&gt; str | None:
+    """Identity of a fact, independent of which document mentioned it."""
+    roles, attrs = fact["roles"], fact.get("attributes", {})
+    if fact["type"] == "FUNDING_ROUND" and roles.get("company") and attrs.get("round"):
+        return f"FACT:FUNDING_ROUND:{roles['company'][0]}:{attrs['round'].upper()}"
+    return None
+
+def merge_fact(G: nx.Graph, fact: dict) -&gt; str:
+    fact_id = fact_key(fact) or f"FACT:{fact['source_id']}:{G.number_of_nodes()}"
+    if fact_id in G:
+        d = G.nodes[fact_id]
+        for k, new in fact.get("attributes", {}).items():
+            old = d["attributes"].get(k)
+            if old is None or str(new).startswith(str(old)):
+                d["attributes"][k] = new                      # new value is missing or more specific
+            elif not str(old).startswith(str(new)):
+                d.setdefault("conflicts", []).append((k, old, new, fact["source_id"]))
+        fact = {**fact, "attributes": {}}                    # attributes already merged above
+        if len(fact.get("text", "")) &lt;= len(d["description"]):
+            fact["text"] = d["description"]                  # keep the most complete sentence
+        d["description"] = fact["text"]
+    add_hyperedge(G, fact_id, fact)
+    return fact_id
+
+G = nx.Graph()
+partial_a = {"type": "FUNDING_ROUND", "source_id": "10_brightwater_series_b-000",
+             "text": "Brightwater Capital led the Kestrel Labs Series A in 2022.",
+             "roles": {"company": ["KESTREL LABS"], "lead": ["BRIGHTWATER CAPITAL"]},
+             "attributes": {"round": "Series A", "date": "2022"}}
+full_a = {"type": "FUNDING_ROUND", "source_id": "02_brightwater_series_a-000",
+          "text": "Kestrel Labs raised a $12 million Series A led by Brightwater Capital on 15 March 2022.",
+          "roles": {"company": ["KESTREL LABS"], "lead": ["BRIGHTWATER CAPITAL"],
+                    "participant": ["REGIONAL ANGEL GROUPS"]},
+          "attributes": {"round": "Series A", "amount_usd": 12_000_000, "date": "2022-03-15"}}
+for f in (partial_a, full_a):
+    merge_fact(G, f)
+
+d = G.nodes["FACT:FUNDING_ROUND:KESTREL LABS:SERIES A"]
+print(d["attributes"])   # {'round': 'Series A', 'date': '2022-03-15', 'amount_usd': 12000000}
+print(d["source_ids"])   # ['10_brightwater_series_b-000', '02_brightwater_series_a-000']
+print(d.get("conflicts"))  # None</code></pre>
+    <p>Design notes. The key uses the company and round, not the lead investor, because a later chunk might omit or misname the lead. Date strings compare by prefix, so “2022” and “2022-03-15” are compatible and the more specific one wins, while “2021-11” vs “2022-03-15” would be logged as a conflict rather than silently overwritten. Facts without a usable key fall back to a per-source id: better an unmerged duplicate than a wrong merge. Real systems add more keys per fact type (acquirer + target for ACQUISITION) and run entity resolution on role arguments first so “Kestrel” and “Kestrel Labs” key identically.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 31.4 <span class="level">Core</span></h4>
+  <p>Here are the dot products between normalized query-token vectors and image-patch vectors for two photos from the late-interaction visualization. Compute the MaxSim score of each photo and say which one ranks higher.</p>
+  <table>
+    <thead><tr><th>Photo A</th><th>pale coral</th><th>water</th><th>water</th><th>crest rock</th></tr></thead>
+    <tbody>
+      <tr><td>bleached</td><td>0.85</td><td>0.00</td><td>0.00</td><td>0.12</td></tr>
+      <tr><td>coral</td><td>0.68</td><td>0.01</td><td>0.05</td><td>0.31</td></tr>
+      <tr><td>crest</td><td>0.21</td><td>0.10</td><td>0.01</td><td>0.99</td></tr>
+    </tbody>
+  </table>
+  <table>
+    <thead><tr><th>Photo B</th><th>coral</th><th>coral</th><th>ridge</th><th>coral</th></tr></thead>
+    <tbody>
+      <tr><td>bleached</td><td>0.10</td><td>0.19</td><td>0.05</td><td>0.09</td></tr>
+      <tr><td>coral</td><td>0.99</td><td>0.98</td><td>0.61</td><td>0.94</td></tr>
+      <tr><td>crest</td><td>0.38</td><td>0.48</td><td>0.93</td><td>0.57</td></tr>
+    </tbody>
+  </table>
+  <p>Then explain in two sentences why mean-pooling the patches (single-vector scoring) ranks them the other way.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Take the row maxima and sum them.</p>
+    <p>Photo A: bleached 0.85 (pale coral), coral 0.68 (pale coral), crest 0.99 (crest rock). Score = 0.85 + 0.68 + 0.99 = <strong>2.52</strong>.</p>
+    <p>Photo B: bleached 0.19, coral 0.99, crest 0.93. Score = 0.19 + 0.99 + 0.93 = <strong>2.11</strong>.</p>
+    <p>Photo A ranks higher by 0.41, almost entirely because of the “bleached” token (0.85 vs 0.19).</p>
+    <p>Mean pooling averages A's two water patches into its single vector, which drags it away from the query, while B's four coral-and-ridge patches all point roughly in the query's “coral” and “crest” directions, so B's pooled vector is closer to the pooled query (0.83 vs 0.62 cosine with these vectors). MaxSim lets each query token pick its own best patch, so irrelevant patches cost nothing and one strong local match counts in full.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 31.5 <span class="level">Stretch</span></h4>
+  <p>Design the multimodal extension for the Kestrel index, assuming Tidewater starts publishing research notes as PDFs with photos and data tables. Specify: node and edge types with their stored fields, what gets embedded and how, how a figure's generated description is validated, what a citation to a figure looks like in an answer, and two evaluation questions (with expected evidence) that would fail on the text-only index.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Nodes.</strong> <code>Document</code> (id, title, date, publisher), <code>Section</code> (doc_id, heading, order), <code>TextUnit</code> (existing fields plus section_id), <code>Figure</code> (id, doc_id, section_id, page, bbox, image_path, caption, description, description_model, description_prompt_version, image_sha256), <code>Table</code> (id, doc_id, section_id, page, caption, header), <code>Row</code> (table_id, row_index, cells as a header-to-value map, rendered_text). Facts from rows use the fact-node design, with column names as attributes.</p>
+    <p><strong>Edges.</strong> CONTAINS (document → section → text unit, figure, table; table → row), NEXT (between consecutive text units), REFERS_TO (text unit → figure or table, from “Figure 2” patterns plus caption numbering), DEPICTS (figure → entity), ABOUT (row → entity), MENTIONS (text unit → entity, already present via <code>source_ids</code>).</p>
+    <p><strong>Embeddings.</strong> Every figure: caption + contextual description through the same text embedder as entities, so one query vector searches both. Rows: <code>rendered_text</code> such as “Transect: northern crest; bleached colonies: 38%” through the text embedder. Optionally, figure images through a multi-vector model used only to rerank the top 20 figure candidates.</p>
+    <p><strong>Validating descriptions.</strong> Generate the description with caption and referencing paragraph as context; run entity extraction on it and keep DEPICTS edges only for entities that also appear in the caption, the referencing paragraph, or the section. Sample 5% of figures per release for human review, and store a <code>verified</code> flag. Never quote the description as a source; quote the caption and link the image.</p>
+    <p><strong>Citation format.</strong> “[RN-2024-07, Figure 1, p. 2]” with a link to the cropped image and the bounding box, next to the usual text-unit citations.</p>
+    <p><strong>Evaluation questions.</strong> (1) “What fraction of reef-crest colonies were bleached by the end of August 2024?” Expected evidence: the Extent section row or sentence giving about 38%; this passes text-only today but should also retrieve the corresponding data-table row if the number moves into a table. (2) “Which transect showed pale coral first?” Expected evidence: the northern-transect photo (the hypothetical Figure 1) and the Detection section, which mentions northern and eastern transects. A text-only index can only answer “northern or eastern”; the figure node narrows it. Score context recall of the figure id as well as answer text.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why does storing both Kestrel funding rounds as binary edges in <code>minigraphrag</code> lose information?</p>
+  <ol>
+    <li>NetworkX cannot store numbers on edges</li>
+    <li>The extractor refuses to extract amounts</li>
+    <li data-correct>Both rounds produce a Brightwater–Kestrel edge, which <code>build_graph</code> merges into one, so amounts, dates and participants are no longer tied to a specific round</li>
+    <li>Community detection deletes duplicate edges</li>
+  </ol>
+  <div class="explain">Edges are keyed by endpoint pair. Descriptions from both rounds land on the same edge and the weight is summed; structure no longer says which values belong together.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A hyperedge with 6 members is stored by clique expansion and by star expansion. How many edges does each create?</p>
+  <ol>
+    <li>6 and 15</li>
+    <li data-correct>15 and 6</li>
+    <li>30 and 7</li>
+    <li>36 and 6</li>
+  </ol>
+  <div class="explain">Clique expansion: 6 × 5 / 2 = 15 pairwise edges. Star expansion: one fact node plus one edge per member, 6 edges.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In a property graph, where should the amount and date of a funding round usually live?</p>
+  <ol>
+    <li data-correct>As properties of the fact node, with entity-valued participants connected by role edges</li>
+    <li>As separate nodes connected to the company</li>
+    <li>In the description of the lead investor node</li>
+    <li>On the edge between the company and the city it is located in</li>
+  </ol>
+  <div class="explain">Literal values belong to the fact. Making every date a node creates hubs that link unrelated facts and add noise to traversal and PPR.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">With late interaction (MaxSim), what happens to an image patch that matches no query token well?</p>
+  <ol>
+    <li>It lowers the score in proportion to its size</li>
+    <li>It is averaged into the image vector</li>
+    <li>It causes the image to be filtered out</li>
+    <li data-correct>It contributes nothing, because each query token only takes its best-matching patch</li>
+  </ol>
+  <div class="explain">The score sums per-token maxima. Irrelevant patches never become a maximum, so they neither help nor hurt. Mean pooling, by contrast, dilutes the image vector with them.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You add figure nodes whose descriptions are generated by a vision-language model. Which practice is most important?</p>
+  <ol>
+    <li>Use the longest possible description</li>
+    <li data-correct>Give the model the caption and referencing text, store the description as generated with its model version, and cite the image rather than the description</li>
+    <li>Skip captions, since the model sees the pixels</li>
+    <li>Merge figure nodes into the entity they depict</li>
+  </ol>
+  <div class="explain">Context makes descriptions specific and linkable. Marking them as generated keeps provenance honest, since the description is an extracted claim that can be wrong.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">“What did Tidewater recommend after the bleaching?” is poorly served by entity-anchored local search. What helps most?</p>
+  <ol>
+    <li>More gleaning rounds during extraction</li>
+    <li>A larger community hierarchy</li>
+    <li data-correct>A document-structure graph that lets retrieval navigate to the Recommendations section of RN-2024-07</li>
+    <li>Converting the question to Cypher over funding facts</li>
+  </ol>
+  <div class="explain">The answer lives in one section, and the entities it names appear throughout the corpus, so entity matching does not single it out. Navigating document → section → paragraphs finds it directly, which is the idea DocNavRAG builds on.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Is a hypergraph really different from adding event nodes to my knowledge graph?</summary>
+  <div><p>Structurally, no. A hypergraph stored by star expansion is a bipartite graph of entities and event-like fact nodes. What the hypergraph framing adds is discipline and algorithms: you extract every multi-participant statement as a fact, you treat entity–fact incidence as the core structure, and you can use hypergraph walks, incidence-based propagation or hypergraph neural networks on it. If your schema already has well-designed event nodes, you have most of the benefit.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should role names be free text or a fixed list?</summary>
+  <div><p>Start with a small fixed list per fact type (company, lead, participant for funding rounds; acquirer, target for acquisitions) and let the extractor add an <code>other</code> role with a description. Free-text roles drift quickly (“lead investor”, “led by”, “primary backer”) and break Cypher queries. Normalize roles after parsing exactly as you normalize entity types in <a href="08-entity-relation-extraction.html">Chapter 8</a>.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Do I still need binary relationships if I have fact nodes?</summary>
+  <div><p>Usually yes. Many facts really are pairwise (“Lena Park is a partner at Brightwater Capital”), and binary edges make neighborhood expansion, community detection and path retrieval simple. A practical hybrid: keep the binary entity graph as is, add fact nodes for statements with three or more arguments or with dates and amounts, and derive the entity-only projection when an algorithm needs a plain graph.</p></div>
+</details>
+
+<details class="qa">
+  <summary>When should I pass the image itself to the answer model instead of its description?</summary>
+  <div><p>When the question depends on visual detail the description might have missed (extent of paling, reading a chart value) and your answer model is multimodal. Images cost many more input tokens than a sentence, so a common pattern is to retrieve with descriptions and embeddings, then include only the top one or two images as pixels alongside their captions, with the rest as text.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I index tables that span many rows?</summary>
+  <div><p>Make one node per row, rendered with its header (“Module: Tern; Maker: Kestrel Labs; Sea trials: Q1 2026”), plus a table node holding the caption and a short summary. Retrieve rows, then include the header once and the matching rows in the context. For numeric questions over whole columns (sums, trends), route to a structured query over the table instead of asking the LLM to add numbers from text.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: facts and figures for Kestrel</h3>
+  <p>Extend your Kestrel index with an n-ary fact layer and a small multimodal layer, then show on specific questions what each one buys.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>extract_facts</code> run over the corpus, writing <code>facts.json</code> with type, sentence, roles, attributes and <code>source_id</code>, merged with <code>merge_fact</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>At least the two funding rounds, the Deepcast acquisition, the City Council contract and the 2026 CTO appointment stored as fact nodes, with the entity-only projection used for community detection</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span><code>hyper_search</code> wired into your query CLI, with a context format that renders one row per fact</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Two hypothetical figures and one table added as clearly labeled synthetic files, with figure, table and row nodes, DEPICTS and ABOUT edges, and provenance fields</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An evaluation of six questions (three about amounts, dates or participants of specific events, three needing a figure or row) comparing the binary-only index with the extended one on context recall and answer correctness</span></li>
+  </ul>
+  <p><strong>Done when</strong> “When was the $40M round, and which new investors joined it?” is answered correctly from a single retrieved fact node, and your evaluation table shows where the extra layers helped and where they did not.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>N-ary facts such as funding rounds lose their grouping when split into binary edges, especially once facts share endpoints.</li>
+    <li>A hyperedge stored as a fact node with role edges (star expansion) is lossless and fits any property graph or relational store; clique expansion is not.</li>
+    <li>Hypergraph retrieval seeds on fact sentences and on entities, then spreads relevance through entity–fact incidence, for example with Personalized PageRank.</li>
+    <li>Images, tables and table rows become nodes with cross-modal edges and full provenance; contextual descriptions make them linkable and searchable.</li>
+    <li>Textual descriptions, shared image-text vectors and late-interaction MaxSim trade cost for visual fidelity; rerank with the expensive one.</li>
+    <li>Document-structure graphs complement entity graphs for questions about where something is said.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Luo et al. <a href="https://arxiv.org/abs/2503.21322">HyperGraphRAG: Retrieval-Augmented Generation via Hypergraph-Structured Knowledge Representation</a>. <span class="venue">arXiv 2503.21322, 2025</span></li>
+  <li>Khrouf, Fillastre and Correia. <a href="https://arxiv.org/abs/2607.20506">Optimizing Hypergraph-Based RAG: Toward Better Fact Extraction and Chunk Retrieval</a>. <span class="venue">arXiv 2607.20506, 2026</span></li>
+  <li>An et al. <a href="https://arxiv.org/abs/2607.22597">HyCE-RAG: Hypergraph Chain-of-Evidence Retrieval-Augmented Generation for Explainable Multi-hop Question Answering</a>. <span class="venue">arXiv 2607.22597, 2026</span></li>
+  <li>Lin et al. <a href="https://arxiv.org/abs/2607.12764">EvoGraph-R1: Self-Evolving Multimodal Knowledge Hypergraphs for Agentic Retrieval</a>. <span class="venue">arXiv 2607.12764, 2026</span></li>
+  <li>Kim. <a href="https://arxiv.org/abs/2607.16208">ColGraphRAG: Late-Interaction Evidence Retrieval for Multimodal GraphRAG</a>. <span class="venue">arXiv 2607.16208, 2026</span></li>
+  <li>He et al. <a href="https://arxiv.org/abs/2607.24861">HVM-GraphRAG: Holistic-View Multimodal Graph Retrieval-Augmented Generation on Complex Document</a>. <span class="venue">arXiv 2607.24861, 2026</span></li>
+  <li>Wu et al. <a href="https://arxiv.org/abs/2608.25986">Multi-Granularity Context-Enhanced RAG over Multimodal Knowledge Graphs</a>. <span class="venue">arXiv 2608.25986, 2026</span></li>
+  <li>Xie et al. <a href="https://arxiv.org/abs/2608.01565">DocNavRAG: Document-Structured Graph RAG with Stateful Evidence Construction for Complex Document Question Answering</a>. <span class="venue">arXiv 2608.01565, 2026</span></li>
+  <li>Chen et al. <a href="https://arxiv.org/abs/2608.12335">HC-RAG: Evidence-Centric Retrieval-Augmented Generation over Heterogeneous Financial Filings</a>. <span class="venue">arXiv 2608.12335, 2026</span></li>
+  <li>Sun et al. <a href="https://arxiv.org/abs/2406.02962">Docs2KG: Unified Knowledge Graph Construction from Heterogeneous Documents Assisted by Large Language Models</a>. <span class="venue">arXiv 2406.02962, 2024</span></li>
+  <li>Khattab and Zaharia. <a href="https://arxiv.org/abs/2004.12832">ColBERT: Efficient and Effective Passage Search via Contextualized Late Interaction over BERT</a>. <span class="venue">arXiv 2004.12832, 2020</span></li>
+  <li>Faysse et al. <a href="https://arxiv.org/abs/2407.01449">ColPali: Efficient Document Retrieval with Vision Language Models</a>. <span class="venue">arXiv 2407.01449, 2024</span></li>
+  <li>Radford et al. <a href="https://arxiv.org/abs/2103.00020">Learning Transferable Visual Models From Natural Language Supervision</a> (CLIP). <span class="venue">arXiv 2103.00020, 2021</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch31-maxsim", function (el, cfg, api) {
+  const { stage } = api.frame(el, cfg);
+  const norm = (v) => { const l = Math.hypot.apply(null, v) || 1; return v.map((x) => x / l); };
+  const dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+  const mean = (vs) => norm(vs[0].map((_, i) => vs.reduce((s, v) => s + v[i], 0) / vs.length));
+  const toks = cfg.tokens.map((t) => ({ label: t.label, v: norm(t.v) }));
+  const qMean = mean(toks.map((t) => t.v));
+  const imgs = cfg.images.map((im) => {
+    const patches = im.patches.map((p) => ({ label: p.label, v: norm(p.v) }));
+    const sims = toks.map((t) => patches.map((p) => dot(t.v, p.v)));
+    const maxsim = sims.reduce((s, row) => s + Math.max.apply(null, row), 0);
+    const pooled = dot(qMean, mean(patches.map((p) => p.v)));
+    return { label: im.label, note: im.note, patches, sims, maxsim, pooled };
+  });
+  const bar = api.controls(el);
+  const bPool = api.button(bar, "Single vector (mean pooled)");
+  const bMax = api.button(bar, "Late interaction (MaxSim)");
+  const wrap = api.h("div", {}, stage);
+  wrap.style.cssText = "display:flex;flex-wrap:wrap;gap:12px;padding:12px;font-family:var(--font-ui, sans-serif);font-size:.82rem;color:var(--ink)";
+  const rank = api.h("div", {}, stage);
+  rank.style.cssText = "padding:0 12px 12px;font-family:var(--font-ui, sans-serif);font-size:.85rem;color:var(--ink)";
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  function render(mode) {
+    bPool.className = mode === "pooled" ? "primary" : "";
+    bMax.className = mode === "maxsim" ? "primary" : "";
+    wrap.innerHTML = "";
+    imgs.forEach((im) => {
+      const card = api.h("div", {}, wrap);
+      card.style.cssText = "flex:1 1 200px;min-width:0;border:1px solid var(--rule);border-radius:8px;padding:8px;background:var(--panel)";
+      const t = api.h("div", {}, card, im.label); t.style.fontWeight = "650";
+      const n = api.h("div", {}, card, im.note); n.style.color = "var(--muted)"; n.style.marginBottom = "6px";
+      const tbl = api.h("table", {}, card);
+      tbl.style.cssText = "display:table;width:100%;margin:0;font-size:.74rem;border-collapse:collapse;table-layout:fixed";
+      const hr = api.h("tr", {}, tbl);
+      api.h("th", {}, hr, "").style.width = "5.2em";
+      im.patches.forEach((p) => { const th = api.h("th", {}, hr, p.label); th.style.cssText = "padding:2px 1px;font-weight:500;font-size:.66rem;line-height:1.1;color:var(--muted);overflow-wrap:anywhere;vertical-align:bottom"; });
+      im.sims.forEach((row, i) => {
+        const tr = api.h("tr", {}, tbl);
+        const th = api.h("th", {}, tr, toks[i].label); th.style.cssText = "padding:2px;text-align:left;font-weight:500;overflow:hidden";
+        const mx = Math.max.apply(null, row);
+        row.forEach((s) => {
+          const td = api.h("td", {}, tr, api.fmt(s, 2));
+          const hot = mode === "maxsim" && s === mx;
+          const pct = Math.round(Math.max(0, s) * (hot ? 70 : 35));
+          td.style.cssText = "padding:3px 2px;text-align:center;border:1px solid var(--rule);background:color-mix(in srgb, " + (hot ? "var(--edge)" : "var(--node)") + " " + pct + "%, var(--panel));" + (hot ? "font-weight:700" : "");
+        });
+      });
+      const sc = api.h("div", {}, card, mode === "maxsim" ? "MaxSim = " + im.sims.map((r) => api.fmt(Math.max.apply(null, r), 2)).join(" + ") + " = " + api.fmt(im.maxsim, 2) : "cosine(mean query, mean patches) = " + api.fmt(im.pooled, 3));
+      sc.style.marginTop = "6px";
+    });
+    const key = mode === "maxsim" ? "maxsim" : "pooled";
+    const sorted = imgs.slice().sort((a, b) => b[key] - a[key]);
+    const top = sorted[0][key];
+    rank.innerHTML = "";
+    sorted.forEach((im, i) => {
+      const row = api.h("div", {}, rank);
+      row.style.cssText = "display:flex;align-items:center;gap:8px;margin:3px 0";
+      const lab = api.h("span", {}, row, (i + 1) + ". " + im.label); lab.style.cssText = "flex:0 1 13em;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis";
+      const track = api.h("span", {}, row); track.style.cssText = "flex:1 1 auto;min-width:40px";
+      const b = api.h("span", {}, track); b.style.cssText = "display:block;height:10px;border-radius:5px;background:" + (i === 0 ? "var(--edge)" : "var(--node)") + ";width:" + Math.max(4, (im[key] / top) * 100) + "%";
+      const val = api.h("span", {}, row, api.fmt(im[key], key === "maxsim" ? 2 : 3)); val.style.cssText = "flex:0 0 3em;text-align:right";
+    });
+    cap.innerHTML = mode === "maxsim"
+      ? "<strong>Late interaction.</strong> Each query token keeps only its best patch (highlighted). Photo A wins: “bleached” matches its pale coral patch and “crest” its rock patch, and the two water patches cost nothing."
+      : "<strong>Single vector.</strong> Query tokens and patches are each averaged into one vector. Photo B wins because all its patches are coral-like, while Photo A's water patches dilute its average.";
+  }
+  bPool.addEventListener("click", () => render("pooled"));
+  bMax.addEventListener("click", () => render("maxsim"));
+  render("pooled");
+});
+</script>
+</body>
+</html>

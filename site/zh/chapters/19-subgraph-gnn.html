@@ -1,0 +1,834 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Subgraph retrieval and GNN retrievers | Graph RAG from Scratch</title>
+<meta name="description" content="Retrieve connected, query-specific subgraphs with G-Retriever's prize-collecting Steiner tree, learn just enough GNN to read GRAG, GNN-RAG and GFM-RAG, and decide when a trained retriever is worth it.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html">
+<link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/19-subgraph-gnn.html">
+<link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html">
+<link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="19-subgraph-gnn" data-root="../.." data-fallback="en">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Subgraph retrieval and GNN retrievers</h1>
+  <p class="lede">Some questions need more than one path: several constraints that meet at shared entities. This chapter retrieves a small connected subgraph that covers them, using G-Retriever's prize-collecting Steiner tree, then learns just enough about graph neural networks to understand the retrievers that are trained rather than prompted: GRAG, GNN-RAG and GFM-RAG.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>State the prize-collecting Steiner tree objective and compute it for candidate subgraphs by hand</li>
+      <li>Implement and trace a greedy PCST approximation, and explain where it falls short of an exact solver</li>
+      <li>Describe G-Retriever's pipeline end to end, including the GNN soft prompt</li>
+      <li>Write the message-passing equation, run two layers by hand, and implement a layer in NumPy</li>
+      <li>Explain how GRAG, GNN-RAG and GFM-RAG use trained graph models for retrieval</li>
+      <li>Decide when a trained retriever is worth its data and maintenance cost over training-free methods</li>
+    </ul>
+  </div>
+</header>
+
+<h2>From paths to subgraphs</h2>
+<p>In <a href="18-paths-and-agents.html">Chapter 18</a> the evidence for canonical question 2 was a chain. Look at the question again, though: <em>“Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?”</em> It names a <em>set</em> of constraints: an event, drones, a company, a board member, an investor. The complete evidence is the smallest piece of the graph that satisfies all of them at once:</p>
+<pre><code>2024 bleaching -- detected by --&gt; Project Sentinel -- run by --&gt; Kestrel Labs
+Kestrel Labs -- board member --&gt; Lena Park -- partner at --&gt; Brightwater Capital
+Kestrel Labs -- invested in by --&gt; Brightwater Capital</code></pre>
+<p>That is a small tree, not a path, and it includes Kestrel Labs, a node that no word in the question mentions. A retriever that returns the <em>k</em> nodes most similar to the question would likely return the bleaching event, Halden Reef, Brightwater Capital and Lena Park, and miss the company that connects them. A retriever that returns 2-hop neighborhoods would return half the graph. What you want is a principled trade-off: include nodes that are relevant, include connector nodes when they tie relevant nodes together, and pay a price for every edge so the result stays small. That trade-off has a classic name in combinatorial optimization.</p>
+
+<h2>G-Retriever and the prize-collecting Steiner tree</h2>
+<p>G-Retriever (He et al., 2024) targets question answering over <strong>textual graphs</strong>: graphs whose nodes and edges carry text attributes, such as knowledge graphs, scene graphs and commonsense graphs. The Kestrel entity graph with descriptions is one. Its retrieval step is a four-stage pipeline.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="gr-title">
+      <title id="gr-title">G-Retriever pipeline: indexing, retrieval with prizes, PCST subgraph construction, and generation with a GNN soft prompt plus textualized graph</title>
+      <defs><marker id="g19a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box" x="10" y="20" width="150" height="86" rx="6"/>
+      <text class="d-text bold" x="22" y="44">1. Indexing</text>
+      <text class="d-text small" x="22" y="64">embed every node's and</text>
+      <text class="d-text small" x="22" y="80">edge's text with a</text>
+      <text class="d-text small" x="22" y="96">frozen language model</text>
+      <rect class="d-box node" x="180" y="20" width="150" height="86" rx="6"/>
+      <text class="d-text bold" x="192" y="44">2. Retrieval</text>
+      <text class="d-text small" x="192" y="64">top-k nodes and edges</text>
+      <text class="d-text small" x="192" y="80">by cosine; prizes k, k−1,</text>
+      <text class="d-text small" x="192" y="96">…, 1; others get 0</text>
+      <rect class="d-box node" x="350" y="20" width="150" height="86" rx="6"/>
+      <text class="d-text bold" x="362" y="44">3. Subgraph (PCST)</text>
+      <text class="d-text small" x="362" y="64">connected subgraph that</text>
+      <text class="d-text small" x="362" y="80">maximizes prizes minus</text>
+      <text class="d-text small" x="362" y="96">edge costs</text>
+      <rect class="d-box edge" x="520" y="20" width="150" height="86" rx="6"/>
+      <text class="d-text bold" x="532" y="44">4. Generation</text>
+      <text class="d-text small" x="532" y="64">graph tokens + text of</text>
+      <text class="d-text small" x="532" y="80">the subgraph + question</text>
+      <text class="d-text small" x="532" y="96">into a frozen LLM</text>
+      <line class="d-line" x1="160" y1="63" x2="178" y2="63" marker-end="url(#g19a)"/>
+      <line class="d-line" x1="330" y1="63" x2="348" y2="63" marker-end="url(#g19a)"/>
+      <line class="d-line" x1="500" y1="63" x2="518" y2="63" marker-end="url(#g19a)"/>
+      <rect class="d-box ghost" x="180" y="150" width="490" height="130" rx="8"/>
+      <text class="d-text bold" x="196" y="174">Inside step 4</text>
+      <rect class="d-box node" x="196" y="190" width="120" height="70" rx="6"/>
+      <text class="d-text bold" x="206" y="214">GNN encoder</text>
+      <text class="d-text small" x="206" y="234">graph transformer,</text>
+      <text class="d-text small" x="206" y="250">mean pooling</text>
+      <rect class="d-box node" x="336" y="190" width="100" height="70" rx="6"/>
+      <text class="d-text bold" x="346" y="214">Projection</text>
+      <text class="d-text small" x="346" y="234">MLP to LLM</text>
+      <text class="d-text small" x="346" y="250">embedding size</text>
+      <rect class="d-box edge" x="456" y="190" width="200" height="70" rx="6"/>
+      <text class="d-text bold" x="466" y="214">Frozen LLM input</text>
+      <text class="d-text small" x="466" y="234">[graph token] + embedded</text>
+      <text class="d-text small" x="466" y="250">text of subgraph and query</text>
+      <line class="d-line" x1="316" y1="225" x2="334" y2="225" marker-end="url(#g19a)"/>
+      <line class="d-line" x1="436" y1="225" x2="454" y2="225" marker-end="url(#g19a)"/>
+      <line class="d-line dash" x1="595" y1="106" x2="595" y2="148" marker-end="url(#g19a)"/>
+      <text class="d-text small" x="10" y="140">Trained: GNN encoder and</text>
+      <text class="d-text small" x="10" y="156">projection (optionally LoRA</text>
+      <text class="d-text small" x="10" y="172">on the LLM). Retrieval and</text>
+      <text class="d-text small" x="10" y="188">PCST need no training.</text>
+    </svg>
+  </div>
+  <figcaption>G-Retriever. Steps 1–3 are training-free and are what this chapter implements. Step 4 trains a graph encoder whose output becomes a soft prompt, so the LLM receives the subgraph both as text and as a learned embedding.</figcaption>
+</figure>
+
+<h3>Prizes from similarity</h3>
+<p>Embed the question with the same model used at indexing, and rank nodes and edges by cosine similarity. G-Retriever does not use the raw similarities as prizes. It assigns <strong>rank-based prizes</strong>: the top <em>k</em> nodes get prizes <em>k, k − 1, …, 1</em> and every other node gets 0, and edges are treated the same way. Rank-based prizes avoid depending on the embedding model's similarity scale (one model's “very similar” is 0.9, another's is 0.5), and the zero prize for everything else means non-relevant nodes are only ever included as connectors.</p>
+<p>For question 2 with <em>k</em> = 5, a plausible node ranking is: 2024 bleaching event (5), Halden Reef (4), Brightwater Capital (3, “investor”), Lena Park (2, “board member”), Project Sentinel (1, “drones”). Kestrel Labs gets 0: the question describes it (“the company”) without naming anything similar.</p>
+
+<h3>The PCST objective</h3>
+<p>Given node prizes <em>prize(n) ≥ 0</em> and edge costs <em>C<sub>e</sub> &gt; 0</em>, the <strong>prize-collecting Steiner tree</strong> (PCST) problem asks for a connected subgraph <em>S</em> with node set <em>V<sub>S</sub></em> and edge set <em>E<sub>S</sub></em> that maximizes</p>
+<p style="text-align:center"><em>∑<sub>n ∈ V<sub>S</sub></sub> prize(n) + ∑<sub>e ∈ E<sub>S</sub></sub> prize(e) − cost(S)</em>, &nbsp;&nbsp; with &nbsp; <em>cost(S) = ∑<sub>e ∈ E<sub>S</sub></sub> C<sub>e</sub></em></p>
+<p>Because every edge costs something, the optimal subgraph is always a tree: any cycle has an edge you can drop without disconnecting anything. In G-Retriever, <em>C<sub>e</sub></em> is a single constant chosen per dataset, and it is the knob that sets subgraph size. A cheap edge means “include more connectors”; an expensive edge means “only the densest cluster of prizes survives”.</p>
+<p>Edge prizes need one trick, because standard PCST solvers handle only node prizes and non-negative edge costs. If an edge's prize is at most its cost, fold it in as a reduced cost <em>C<sub>e</sub> − prize(e)</em>. If the prize exceeds the cost, the reduced cost would be negative, so G-Retriever replaces the edge with a <strong>virtual node</strong> in the middle, gives that node prize <em>prize(e) − C<sub>e</sub></em>, and connects it to both endpoints with zero-cost edges. Including the virtual node is then equivalent to including the edge. Exercise 19.4 implements this.</p>
+
+<h3>Explore the trade-off</h3>
+<p>The explorer below uses node prizes only and a uniform edge cost. Drag the cost slider and compare the greedy tree with the exact optimum (found by brute force, which is possible only because the graph has 12 nodes). Click nodes to build your own subgraph and see its objective.</p>
+
+<div class="viz" data-viz="ch19-pcst">
+<script type="application/json">
+{
+  "title": "Prize-collecting Steiner tree on the Kestrel graph",
+  "subtitle": "Question 2 with rank-based prizes (k = 5). Click nodes to build your own subgraph",
+  "height": 380,
+  "cost": 1.0,
+  "nodes": [
+    {"id": "ruiz", "label": "Ana Ruiz", "group": 2, "x": 8, "y": 12, "prize": 0},
+    {"id": "twi", "label": "Tidewater", "group": 1, "x": 30, "y": 14, "prize": 0},
+    {"id": "okafor", "label": "Mira Okafor", "group": 2, "x": 54, "y": 10, "prize": 0},
+    {"id": "bleach", "label": "2024 bleaching", "group": 5, "x": 6, "y": 52, "prize": 5},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 30, "y": 50, "prize": 1},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 20, "y": 86, "prize": 4},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 56, "y": 46, "prize": 0},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 80, "y": 12, "prize": 2},
+    {"id": "bright", "label": "Brightwater", "group": 1, "x": 93, "y": 38, "prize": 3},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 56, "y": 86, "prize": 0},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 80, "y": 86, "prize": 0},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 92, "y": 64, "prize": 0}
+  ],
+  "edges": [
+    {"source": "okafor", "target": "kestrel"}, {"source": "okafor", "target": "twi"},
+    {"source": "ruiz", "target": "twi"}, {"source": "ruiz", "target": "halden"},
+    {"source": "kestrel", "target": "sentinel"}, {"source": "twi", "target": "sentinel"},
+    {"source": "sentinel", "target": "halden"}, {"source": "sentinel", "target": "bleach"},
+    {"source": "bleach", "target": "halden"}, {"source": "bright", "target": "kestrel"},
+    {"source": "lena", "target": "bright"}, {"source": "lena", "target": "kestrel"},
+    {"source": "deepcast", "target": "kestrel"}, {"source": "marlow", "target": "deepcast"},
+    {"source": "marlow", "target": "kestrel"}, {"source": "kestrel", "target": "tern"},
+    {"source": "tern", "target": "deepcast"}
+  ]
+}
+</script>
+</div>
+
+<p>What to notice:</p>
+<ul>
+  <li>At cost 1.0 both methods pick the same six nodes: the bleaching event, Halden Reef, Project Sentinel, <strong>Kestrel Labs (prize 0)</strong>, Lena Park and Brightwater. Prizes 15, five edges, objective 10. Kestrel Labs is in only because it connects prizes.</li>
+  <li>At cost 1.4 the greedy tree collapses to the bleaching event and Halden Reef (objective 9 − 1.4 = 7.6), while the optimum still keeps all six nodes (15 − 5 × 1.4 = 8.0). Greedy looks at one attachment at a time, and no single attachment through the zero-prize hub pays for itself. Together they do.</li>
+  <li>At cost 2.0 both agree on the bleaching event and Halden Reef (objective 7); at 5.0 only the top node survives (objective 5).</li>
+</ul>
+
+<h3>Solving PCST: exact, fast and greedy</h3>
+<p>PCST is NP-hard, so no known algorithm solves every instance exactly in polynomial time. There are three practical routes:</p>
+<ul>
+  <li><strong>Exact solvers</strong> (integer programming, branch and cut) are fine for hundreds of nodes but unpredictable in running time.</li>
+  <li><strong>Primal-dual approximation</strong> in the Goemans–Williamson family has provable approximation guarantees. G-Retriever uses the near-linear-time variant of Hegde, Indyk and Schmidt (2015), which handles graphs with many thousands of edges in milliseconds. If you use G-Retriever's approach in production, use that kind of solver.</li>
+  <li><strong>Greedy heuristics</strong> are easy to write and to reason about, with no guarantee. That is what <code>minigraphrag</code> ships, for teaching.</li>
+</ul>
+
+<p>The greedy algorithm grows a tree from the highest-prize node. At each step it computes the shortest path from the current tree to every prized node not yet in it, scores each path by <em>(new prizes along it) − C · (edges in it)</em>, and attaches the best path if its gain is positive. When nothing positive remains, it prunes leaves whose prize is below the cost of the edge that holds them.</p>
+
+<pre data-file="minigraphrag/search/subgraph.py"><code class="language-python">import networkx as nx
+from ..context import format_table
+from ..llm import LLM
+from .common import DEFAULT_RESPONSE_TYPE, SearchResult, doc_ids_for_units, generate_answer
+
+def similarity_prizes(index, query: str, top_k: int = 10) -&gt; dict[str, float]:
+    """Rank-based prizes like G-Retriever: the i-th most similar entity gets prize top_k - i."""
+    hits = index.entity_store.search(index.embedder.embed([query])[0], k=top_k)
+    return {name: float(top_k - i) for i, (name, _, _) in enumerate(hits)}
+
+def pcst_subgraph(G: nx.Graph, prizes: dict[str, float], edge_cost: float = 1.0, max_nodes: int = 20) -&gt; nx.Graph:
+    """Greedy prize-collecting Steiner tree approximation. Returns the selected subgraph (a copy)."""
+    candidates = {n: p for n, p in prizes.items() if n in G and p &gt; 0}
+    if not candidates:
+        return nx.Graph()
+    tree = {max(candidates, key=lambda n: (candidates[n], n))}
+    tree_edges: set[tuple[str, str]] = set()
+
+    while len(tree) &lt; max_nodes:
+        paths = nx.multi_source_dijkstra_path(G, tree)  # shortest path from the tree to every node
+        best, best_gain = None, 0.0
+        for node, prize in candidates.items():
+            if node in tree or node not in paths:
+                continue
+            path = paths[node]
+            new_nodes = [n for n in path if n not in tree]
+            gain = sum(prizes.get(n, 0.0) for n in new_nodes) - edge_cost * (len(path) - 1)
+            if gain &gt; best_gain and len(tree) + len(new_nodes) &lt;= max_nodes:
+                best, best_gain = path, gain
+        if best is None:
+            break
+        tree.update(best)
+        tree_edges.update(tuple(sorted(e)) for e in zip(best, best[1:]))
+
+    # Strong pruning: a leaf that costs more to keep than it earns is removed.
+    changed = True
+    while changed and len(tree) &gt; 1:
+        changed = False
+        degree = {n: 0 for n in tree}
+        for u, v in tree_edges:
+            degree[u] += 1
+            degree[v] += 1
+        for n in list(tree):
+            if degree[n] == 1 and prizes.get(n, 0.0) &lt; edge_cost:
+                tree.discard(n)
+                tree_edges = {e for e in tree_edges if n not in e}
+                changed = True
+
+    sub = nx.Graph()
+    sub.add_nodes_from((n, G.nodes[n]) for n in tree)
+    sub.add_edges_from((u, v, G.edges[u, v]) for u, v in tree_edges)
+    return sub
+
+def subgraph_search(index, query: str, llm: LLM, top_k: int = 10, edge_cost: float = 1.0,
+                    response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; SearchResult:
+    """Retrieve a PCST subgraph and answer from its markdown tables."""
+    sub = pcst_subgraph(index.graph, similarity_prizes(index, query, top_k), edge_cost)
+    context = "\n\n".join([
+        format_table("Entities", ["id", "entity", "description"],
+                     [[d.get("human_id"), n, d.get("description", "")] for n, d in sub.nodes(data=True)]),
+        format_table("Relationships", ["id", "source", "target", "description"],
+                     [[d.get("human_id"), u, v, d.get("description", "")] for u, v, d in sub.edges(data=True)]),
+    ])
+    units = [u for n in sub.nodes for u in sub.nodes[n].get("source_ids", [])]
+    answer = generate_answer(llm, query, context, response_type)
+    return SearchResult(answer, "subgraph", context, {"nodes": list(sub.nodes), "edges": list(sub.edges)},
+                        doc_ids_for_units(index, units), llm_calls=1)</code></pre>
+
+<p>Trace it on question 2 at cost 1.0. The tree starts at the bleaching event (prize 5).</p>
+<ol>
+  <li>Candidate paths from the tree: Halden Reef, 1 edge, gain 4 − 1 = 3. Brightwater via Sentinel and Kestrel, 3 edges, gain 1 + 0 + 3 − 3 = 1. Lena Park via the same route, gain 1 + 0 + 2 − 3 = 0. Sentinel, gain 1 − 1 = 0. Attach Halden Reef.</li>
+  <li>Brightwater still gains 1; Lena Park 0; Sentinel 0. Attach the path through Sentinel and Kestrel Labs to Brightwater. The tree now has five nodes.</li>
+  <li>Lena Park is now one edge from Kestrel Labs: gain 2 − 1 = 1. Attach.</li>
+  <li>No prized node remains. Pruning: the leaves Halden Reef (4), Brightwater (3) and Lena Park (2) all have prize ≥ 1, so nothing is removed.</li>
+</ol>
+<p>Result: six nodes, five edges, objective 15 − 5 = 10, identical to the optimum. The subgraph's entity and relationship tables go to the LLM as context, exactly as in local search, but the tables now hold a connected explanation instead of a neighborhood.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Two details to check when you adapt this code</span>
+  <p>First, the tree is returned with <em>tree edges only</em>. For question 2 the tree connects Lena Park and Brightwater both through Kestrel Labs and omits the direct “partner at” edge between them, which is exactly the fact the answer needs. Adding every edge of the induced subgraph among the selected nodes (<code>G.subgraph(sub.nodes)</code>) is a cheap and usually worthwhile change. Second, <code>nx.multi_source_dijkstra_path</code> uses the edge attribute <code>weight</code> as a distance by default. In <code>minigraphrag</code> graphs, <code>weight</code> is summed relationship strength, where higher means stronger, so connecting paths are chosen to minimize strength. Pass <code>weight=None</code> for hop counts, or a function that converts strength into a cost, such as <code>lambda u, v, d: 1 / d["weight"]</code>.</p>
+</div>
+
+<h3>From subgraph to generation: the soft prompt</h3>
+<p>G-Retriever does not stop at a textual context. It encodes the retrieved subgraph with a <strong>graph neural network</strong> (a graph transformer in the paper), mean-pools the node representations into one vector, and passes it through a small MLP that projects it into the LLM's token-embedding space. That vector is prepended to the embedded input as a <strong>graph token</strong>, a soft prompt, while the textualized subgraph and the question follow as ordinary tokens. The LLM stays frozen; only the GNN and projection are trained (optionally with LoRA adapters on the LLM as well), on question-answer pairs over graphs.</p>
+<p>The two views carry different things. Text carries the attributes precisely (names, dates, descriptions). The graph token carries structure the LLM would otherwise have to reconstruct from a flat list of triples. Training teaches the encoder to summarize the subgraph in whatever way helps the frozen model answer. You need the rest of this chapter's GNN material to read that step, and Chapter 24 returns to soft prompts and graph tokens in depth.</p>
+
+<div class="callout paper">
+  <span class="callout-title">He et al., G-Retriever (2024)</span>
+  <p>The paper introduces the GraphQA benchmark, which unifies three textual-graph datasets (ExplaGraphs for commonsense reasoning, SceneGraphs for scene understanding and WebQSP for knowledge-graph QA), and shows that retrieval makes QA feasible on graphs too large for the context window. It reports gains over prompt tuning baselines, scaling to larger graphs, and 54% fewer hallucinated nodes and edges in answers than its baseline, because the answer is grounded in a retrieved subgraph rather than in a learned embedding alone.</p>
+</div>
+
+<h2>Graph neural networks, just enough</h2>
+<p>A <strong>graph neural network</strong> (GNN) computes a vector for every node by repeatedly mixing each node's vector with its neighbors'. If you have followed PPR in <a href="17-ppr-hipporag.html">Chapter 17</a>, you already know the core move: one iteration of power iteration pulls mass from neighbors. A GNN layer does the same with vectors instead of scalars, and with learned weights instead of fixed transition probabilities.</p>
+
+<h3>Message passing</h3>
+<p>Almost every GNN fits the <strong>message passing</strong> template. Let <em>h<sub>v</sub><sup>(l)</sup></em> be node <em>v</em>'s vector after layer <em>l</em>, with <em>h<sub>v</sub><sup>(0)</sup></em> its input features (for textual graphs, the embedding of its text). One layer computes:</p>
+<p style="text-align:center"><em>m<sub>v</sub><sup>(l)</sup> = AGG<sub>u ∈ N(v)</sub> MSG(h<sub>u</sub><sup>(l)</sup>, h<sub>v</sub><sup>(l)</sup>, e<sub>uv</sub>)</em></p>
+<p style="text-align:center"><em>h<sub>v</sub><sup>(l+1)</sup> = UPDATE(h<sub>v</sub><sup>(l)</sup>, m<sub>v</sub><sup>(l)</sup>)</em></p>
+<ul>
+  <li><strong>MSG</strong> computes what neighbor <em>u</em> tells <em>v</em>, possibly using edge features <em>e<sub>uv</sub></em> such as the relation text.</li>
+  <li><strong>AGG</strong> combines messages with an order-independent function: sum, mean, max or attention-weighted sum. It must not depend on neighbor order, because graphs have none.</li>
+  <li><strong>UPDATE</strong> mixes the aggregate with the node's own state, usually a learned linear map and a nonlinearity.</li>
+</ul>
+<p>After <em>L</em> layers, <em>h<sub>v</sub><sup>(L)</sup></em> depends on everything within <em>L</em> hops of <em>v</em>: its <strong>receptive field</strong>. Two layers see two hops. That is why GNN retrievers for multi-hop QA use as many layers as the hops they need to reason over, and why very deep GNNs struggle: after many rounds of averaging, all node vectors converge toward each other (<strong>over-smoothing</strong>).</p>
+
+<h3>GCN and GAT in one paragraph each</h3>
+<p>The <strong>graph convolutional network</strong> (GCN, Kipf and Welling) is the simplest instance. Add self-loops to the adjacency matrix, <em>Â = A + I</em>, normalize symmetrically by degree <em>D̂</em>, and apply a shared weight matrix:</p>
+<p style="text-align:center"><em>H<sup>(l+1)</sup> = σ( D̂<sup>−1/2</sup> Â D̂<sup>−1/2</sup> H<sup>(l)</sup> W<sup>(l)</sup> )</em></p>
+<p>Each neighbor's contribution is scaled by <em>1 / √(deg(u) · deg(v))</em>, so hubs contribute and receive less per edge, the same intuition as PageRank's division by degree. The <strong>graph attention network</strong> (GAT, Veličković et al.) replaces fixed degree weights with learned attention: for each edge it computes a score from the two nodes' vectors, normalizes scores over each node's neighbors with a softmax, and takes the weighted sum. In a knowledge graph that lets “board member of” matter more than “located in” for a node, depending on its features. Relational GNNs used on knowledge graphs go one step further and condition messages on relation types or relation embeddings.</p>
+
+<h3>Two layers by hand</h3>
+<p>To see the receptive field grow, run a stripped-down GNN with no learned weights: scalar features, mean aggregation over the node and its neighbors, <em>h<sub>v</sub><sup>(l+1)</sup> = (h<sub>v</sub><sup>(l)</sup> + ∑<sub>u ∈ N(v)</sub> h<sub>u</sub><sup>(l)</sup>) / (1 + deg(v))</em>. Start with a “question signal” of 1 on Project Tern, the entity named in <em>“Why did Kestrel Labs start Project Tern?”</em>, and 0 elsewhere.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Two rounds of message passing from Project Tern",
+  "subtitle": "Mean aggregation with self-loops, scalar features",
+  "height": 380,
+  "scoreDigits": 3,
+  "nodes": [
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 16, "y": 30},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 6, "y": 72},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 38, "y": 12},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 58, "y": 42},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 86, "y": 14},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 88, "y": 58},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 72, "y": 86},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 40, "y": 76},
+    {"id": "vehl", "label": "Jonas Vehl", "group": 2, "x": 16, "y": 92}
+  ],
+  "edges": [
+    {"source": "deepcast", "target": "tern"}, {"source": "vehl", "target": "tern"},
+    {"source": "kestrel", "target": "deepcast"}, {"source": "kestrel", "target": "vehl"},
+    {"source": "kestrel", "target": "lena"}, {"source": "kestrel", "target": "marlow"},
+    {"source": "kestrel", "target": "priya"}, {"source": "kestrel", "target": "sentinel"},
+    {"source": "kestrel", "target": "tern"}, {"source": "marlow", "target": "deepcast"},
+    {"source": "priya", "target": "marlow"}, {"source": "priya", "target": "sentinel"},
+    {"source": "priya", "target": "tern"}, {"source": "sentinel", "target": "halden"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project", "4": "Location"},
+  "steps": [
+    {"caption": "Layer 0: input features. Project Tern has signal 1, every other node 0. In a real GNN each value would be a vector, such as the embedding of the node's description.", "active": ["tern"], "scores": {"tern": 1, "kestrel": 0, "priya": 0, "vehl": 0, "deepcast": 0, "marlow": 0, "sentinel": 0, "lena": 0, "halden": 0}},
+    {"caption": "Layer 1: every node averages itself and its neighbors. Tern's 4 neighbors each receive part of its signal: Jonas Vehl (degree 2) gets 1/3, Deepcast (degree 3) 1/4, Priya Nair (degree 4) 1/5, Kestrel Labs (degree 7) only 1/8. Tern keeps 1/5 of its own value.", "active": ["tern"], "visited": ["vehl", "deepcast", "priya", "kestrel"], "edges": ["tern>vehl", "tern>deepcast", "tern>priya", "tern>kestrel"], "scores": {"tern": 0.2, "kestrel": 0.125, "priya": 0.2, "vehl": 0.333, "deepcast": 0.25, "marlow": 0, "sentinel": 0, "lena": 0, "halden": 0}},
+    {"caption": "Layer 2: the signal reaches 2 hops. Marlow Dynamics (0.144) now hears about Tern through Deepcast, Priya and Kestrel. Project Sentinel gets 0.081 and Lena Park 0.062. Halden Reef, 3 hops away, is still 0: two layers cannot see it.", "active": ["marlow", "sentinel", "lena"], "visited": ["tern", "vehl", "deepcast", "priya", "kestrel"], "edges": ["deepcast>marlow", "priya>marlow", "kestrel>marlow", "kestrel>sentinel", "priya>sentinel", "kestrel>lena"], "scores": {"tern": 0.222, "kestrel": 0.139, "priya": 0.105, "vehl": 0.219, "deepcast": 0.144, "marlow": 0.144, "sentinel": 0.081, "lena": 0.062, "halden": 0}},
+    {"caption": "The pattern a trained GNN retriever exploits: after L layers, a node's vector summarizes its L-hop neighborhood as seen from the question. Learned weights decide <em>which</em> neighbors matter; for “why” questions about Tern, training can learn to push Marlow Dynamics up and Lena Park down.", "active": ["marlow", "deepcast"], "visited": ["tern"], "scores": {"tern": 0.222, "kestrel": 0.139, "priya": 0.105, "vehl": 0.219, "deepcast": 0.144, "marlow": 0.144, "sentinel": 0.081, "lena": 0.062, "halden": 0}}
+  ]
+}
+</script>
+</div>
+
+<h3>A message-passing layer in NumPy</h3>
+<pre data-file="examples/message_passing.py"><code class="language-python">import numpy as np
+
+def gcn_normalize(A: np.ndarray) -&gt; np.ndarray:
+    """Â = D^-1/2 (A + I) D^-1/2, the symmetric normalization from Kipf and Welling."""
+    A_hat = A + np.eye(len(A))
+    d = A_hat.sum(axis=1)
+    D_inv_sqrt = np.diag(1.0 / np.sqrt(d))
+    return D_inv_sqrt @ A_hat @ D_inv_sqrt
+
+def mean_aggregate(A: np.ndarray) -&gt; np.ndarray:
+    """Row-normalized (A + I): each node averages itself and its neighbors."""
+    A_hat = A + np.eye(len(A))
+    return A_hat / A_hat.sum(axis=1, keepdims=True)
+
+def message_passing_layer(H: np.ndarray, A_norm: np.ndarray, W: np.ndarray, b: np.ndarray | None = None,
+                          activation=lambda x: np.maximum(x, 0.0)) -&gt; np.ndarray:
+    """One layer: aggregate neighbor features with A_norm, transform with W, apply a nonlinearity.
+
+    H: (n_nodes, d_in) node features. W: (d_out, d_in). Returns (n_nodes, d_out).
+    """
+    out = A_norm @ H @ W.T
+    if b is not None:
+        out = out + b
+    return activation(out)
+
+if __name__ == "__main__":
+    import networkx as nx
+    G = nx.Graph([("M", "D"), ("M", "K"), ("M", "P"), ("D", "K"), ("K", "T"), ("P", "T")])
+    nodes = list(G)
+    A = nx.to_numpy_array(G, nodelist=nodes)
+    H = np.array([[1.0 if n == "T" else 0.0] for n in nodes])   # question signal on Project Tern
+    W = np.eye(1)                                                # identity weights: pure propagation
+    for layer in (1, 2):
+        H = message_passing_layer(H, gcn_normalize(A), W)
+        print(layer, {n: round(float(v), 3) for n, v in zip(nodes, H[:, 0])})</code></pre>
+<p>With learned <code>W</code> and multi-dimensional features, this is a real GCN layer. Training (with PyTorch Geometric or DGL in practice) adjusts <code>W</code> by backpropagating a loss such as “score the answer node highest”. Sparse matrices replace the dense <code>A_norm</code> for real graphs; the arithmetic is identical.</p>
+
+<h2>GRAG: retrieving ego-graphs and pruning them softly</h2>
+<p>PCST selects nodes one at a time from similarity ranks. GRAG (Hu et al., 2024) retrieves whole neighborhoods instead, treating subgraph retrieval as divide and conquer.</p>
+<ol>
+  <li><strong>Indexing ego-graphs.</strong> For every node, take its <strong>K-hop ego-graph</strong> (the node, everything within K hops, and the edges among them). Embed the text of its nodes and edges with a pretrained language model and mean-pool into one vector per ego-graph. The experiments use K = 1 and K = 2.</li>
+  <li><strong>Ranking.</strong> Embed the question the same way and take the top-N ego-graphs by cosine similarity.</li>
+  <li><strong>Soft pruning.</strong> Inside the retrieved ego-graphs, many nodes are irrelevant. Instead of deleting them with a hard threshold, GRAG learns small MLPs that map the distance between each node's or edge's embedding and the question's embedding to a scaling factor. Irrelevant elements get factors near zero, so they barely influence the GNN encoder, but nothing is hard-deleted.</li>
+  <li><strong>Merging.</strong> The selected ego-graphs are merged into one subgraph.</li>
+  <li><strong>Dual-view generation.</strong> A <em>text view</em>: a hierarchical description of each ego-graph built by BFS, using indentation to preserve topology. A <em>graph view</em>: a GNN over the softly pruned subgraph, projected into the LLM's embedding space as a soft prompt, as in G-Retriever.</li>
+</ol>
+<p>On Kestrel, the 1-hop ego-graph of Kestrel Labs is most of the company's story (founders, projects, investor, board member, supplier), and a question about oversight would rank it highly. Soft pruning then dims the founders and supplier and keeps the board member and investor bright. Compared with PCST, ego-graphs retrieve more context around each anchor; compared with local search, the pruning is learned from QA data rather than set by rank and token budget.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Hu et al., GRAG (2024)</span>
+  <p>GRAG reports significant gains over RAG baselines on multi-hop reasoning over textual graphs, and finds that a frozen LLM given GRAG's retrieved subgraphs through both views outperforms a fine-tuned LLM without retrieval on all its tasks. In its experiments, 2-hop ego-graphs consistently beat 1-hop ego-graphs, which fits the receptive-field argument below: a question that needs two hops of context needs two hops of graph.</p>
+</div>
+
+<h2>GNN-RAG: let a GNN find the answers, let the LLM explain them</h2>
+<p>GNN-RAG (Mavromatis and Karypis, 2024) splits multi-hop KGQA into what each model is good at. GNNs are good at structured reasoning over a large graph neighborhood: they can score thousands of candidate nodes in one forward pass. LLMs are good at language and at explaining a short chain of facts. So:</p>
+<ol>
+  <li><strong>Subgraph.</strong> Take a dense subgraph of the knowledge graph around the question's entities (the standard KGQA setup on WebQSP and CWQ).</li>
+  <li><strong>GNN reasoning.</strong> A GNN trained for KGQA treats answering as <strong>node classification</strong>: it outputs, for every node in the subgraph, the probability that it is an answer. The paper uses ReaRev, a GNN whose message passing is conditioned on the question text. Nodes are taken as answer candidates in order of probability until their cumulative probability passes a threshold.</li>
+  <li><strong>Path extraction.</strong> For each candidate, extract the <strong>shortest paths</strong> in the KG from the question entities to the candidate.</li>
+  <li><strong>Verbalization and RAG.</strong> The paths are written as text, “bleaching event → detected by → Project Sentinel → run by → Kestrel Labs → board member → Lena Park”, and passed to an LLM (the paper fine-tunes a 7B model for this) that reasons over them and answers.</li>
+</ol>
+<p>A <strong>retrieval augmentation</strong> variant unions the GNN's paths with paths retrieved by an LLM-based retriever (the relation-path planner of Reasoning on Graphs). The two find different things: the GNN is strong on multi-hop, multi-entity questions, and the LLM retriever is strong on questions where relation semantics are subtle.</p>
+<p>Compare with Chapter 18. Think-on-Graph spends an LLM call on every pruning decision. GNN-RAG spends one GNN forward pass for the whole search, then one LLM call to read the paths. The cost moves from query time to training time: you need a labeled KGQA dataset over your graph's schema to train the GNN.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Mavromatis and Karypis, GNN-RAG (2024)</span>
+  <p>On the WebQSP and CWQ benchmarks, GNN-RAG reports the best results among the methods compared, and its retrieval-augmented variant matches or outperforms GPT-4 with a tuned 7B LLM as the reader. Its largest gains are on multi-hop and multi-entity questions, 8.9 to 15.5 points over the KG-RAG methods it compares against, which is where GNN reasoning over the whole subgraph helps most compared with LLM-guided step-by-step retrieval.</p>
+</div>
+
+<h2>GFM-RAG: a graph foundation model as the retriever</h2>
+<p>The trained retrievers above have a practical problem: they are trained per dataset, on one graph and one schema. If your corpus is Kestrel Labs today and a medical corpus tomorrow, you retrain. GFM-RAG (Luo et al., 2025) asks whether a single graph model can be pretrained once and used as a retriever on graphs it has never seen, the way a text embedding model is used on unseen documents.</p>
+<ul>
+  <li><strong>KG-index.</strong> Like HippoRAG, it extracts triples from documents with an LLM and adds equivalence edges from entity resolution. An entity-to-document inverted index records which documents mention each entity.</li>
+  <li><strong>Query-dependent GNN.</strong> The question is embedded with a sentence encoder. Entities mentioned in the question are initialized with the question embedding; all other entities start at zero. Message passing over the KG, with relation embeddings shaping the messages, spreads the question through the graph for several layers. The final layer scores every entity's relevance to <em>this question</em>. It is PPR's spreading activation with learned, relation-aware, query-conditioned transitions.</li>
+  <li><strong>Document ranking.</strong> Entity scores are mapped to documents through the inverted index, with an IDF-style weight that damps entities mentioned everywhere (HippoRAG's node specificity again), so documents mentioning highly scored, specific entities rank first. Like HippoRAG, one retrieval step covers multiple hops.</li>
+  <li><strong>Training.</strong> Two stages: self-supervised pretraining on knowledge graph completion (predict masked entities in triples), then supervised fine-tuning on document retrieval with multi-hop QA data. Training uses 60 knowledge graphs with over 14 million triples and about 700,000 documents, and the model has only about 8 million parameters.</li>
+</ul>
+<p>Because messages depend on the query and relation embeddings rather than on memorized node identities, the model transfers: nothing in it is tied to a particular entity vocabulary.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Luo et al., GFM-RAG (2025)</span>
+  <p>GFM-RAG reports the strongest retrieval and QA results among its baselines on three multi-hop QA datasets, and applies to seven domain-specific RAG datasets (including biomedical and customer service) without additional fine-tuning. The authors also report that performance follows a neural scaling pattern with more training data and model size, which is the main argument for calling it a graph foundation model. It appeared at NeurIPS 2025.</p>
+</div>
+
+<h2>Trained retrievers or training-free?</h2>
+<p>Every method in Chapters 14–18 is training-free: embeddings, graph algorithms and prompted LLMs. This chapter's GNN methods learn part of the retrieval. The choice is an engineering one.</p>
+<table>
+  <thead><tr><th>Concern</th><th>Training-free (local search, PPR, PathRAG, PCST, ToG)</th><th>Trained (G-Retriever, GRAG, GNN-RAG, GFM-RAG)</th></tr></thead>
+  <tbody>
+    <tr><td>Data needed</td><td>None beyond the corpus</td><td>QA pairs with answers (and often answer nodes) over your graph, or a pretrained model that transfers</td></tr>
+    <tr><td>Query-time cost</td><td>Cheap (PPR, PCST) to expensive (ToG: many LLM calls)</td><td>One GNN forward pass plus one LLM call; GPU helps but models are small</td></tr>
+    <tr><td>Handling schema and graph changes</td><td>Immediate: new nodes are searchable at once</td><td>Transductive models may need retraining; query-conditioned models like GFM-RAG adapt better</td></tr>
+    <tr><td>Relation semantics</td><td>Ignored (PPR, PCST) or delegated to the LLM (ToG)</td><td>Learned from data, if the training questions cover them</td></tr>
+    <tr><td>Soft prompts</td><td>Not applicable; any LLM, including hosted APIs</td><td>Graph tokens need access to the LLM's embedding layer, so open-weight models only</td></tr>
+    <tr><td>Debuggability</td><td>High: scores and paths are inspectable</td><td>Lower: explain with attention weights or extracted paths</td></tr>
+    <tr><td>Best fit</td><td>New corpora, small teams, changing data, hosted LLMs</td><td>Stable, large KGs with many repeated question types and labeled data (KGQA, enterprise catalogs)</td></tr>
+  </tbody>
+</table>
+<p>For the Kestrel corpus and most document-derived graphs, start training-free: PCST or PPR retrieval with good linking, evaluated as in Chapter 25. Consider a trained retriever when you have at least thousands of labeled questions over a stable graph, when LLM-walker costs dominate your bill, or when a pretrained graph retriever such as GFM-RAG's checkpoint already transfers to your domain and wins on your evaluation set.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 19.1 <span class="level">Warm-up</span></h4>
+  <p>With the prizes from the explorer (bleaching event 5, Halden Reef 4, Brightwater 3, Lena Park 2, Project Sentinel 1, everything else 0) and a uniform edge cost of 1, compute the PCST objective of each node set, or say why it is infeasible: (a) {bleaching, Sentinel, Kestrel Labs, Lena Park}; (b) {bleaching, Halden Reef}; (c) {bleaching, Lena Park}; (d) {bleaching, Halden Reef, Sentinel, Kestrel Labs, Lena Park, Brightwater}; (e) the set in (d) plus Deepcast.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>The objective for a connected set is total prize minus cost of a spanning tree; with uniform cost that is prizes − (nodes − 1).</p>
+    <ul>
+      <li>(a) Connected by bleaching–Sentinel–Kestrel–Lena. Prizes 5 + 1 + 0 + 2 = 8, 3 edges: <strong>5</strong>.</li>
+      <li>(b) Connected by one edge. Prizes 9: <strong>8</strong>.</li>
+      <li>(c) <strong>Infeasible</strong>: the bleaching event and Lena Park are not adjacent, and a PCST solution must be connected.</li>
+      <li>(d) Connected (a tree of 5 edges; the induced subgraph also contains Sentinel–Halden and Lena–Brightwater, but a spanning tree needs only 5). Prizes 15: <strong>10</strong>.</li>
+      <li>(e) Deepcast adds prize 0 and one edge: <strong>9</strong>. A zero-prize leaf always lowers the objective, which is why strong pruning removes such leaves.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 19.2 <span class="level">Core</span></h4>
+  <p>Trace <code>pcst_subgraph</code> by hand on the explorer's graph at edge cost 1.4. Then find the optimal subgraph and its objective, and explain in one sentence why greedy misses it. Finally, propose a modification to the greedy algorithm that would find it here.</p>
+  <details class="hint"><summary>Hint</summary><p>Compute the gain of attaching Brightwater and Lena Park separately, then the gain of attaching both together through Sentinel and Kestrel Labs.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Start: tree = {bleaching} (prize 5).</p>
+    <ul>
+      <li>Halden Reef: 4 − 1.4 = <strong>2.6</strong>.</li>
+      <li>Sentinel: 1 − 1.4 = −0.4.</li>
+      <li>Brightwater via Sentinel, Kestrel: 1 + 0 + 3 − 3 × 1.4 = −0.2.</li>
+      <li>Lena Park via Sentinel, Kestrel: 1 + 0 + 2 − 4.2 = −1.2.</li>
+    </ul>
+    <p>Attach Halden Reef. From {bleaching, Halden Reef} every remaining path is the same length (Sentinel is adjacent to both), so the gains are unchanged and all negative. Greedy stops: {bleaching, Halden Reef}, objective 9 − 1.4 = <strong>7.6</strong>.</p>
+    <p>Optimum: {bleaching, Halden Reef, Sentinel, Kestrel Labs, Brightwater, Lena Park}, prizes 15, five edges: 15 − 7 = <strong>8.0</strong>. Attaching Sentinel, Kestrel, Brightwater and Lena Park together earns 6 for 4 edges (5.6), a gain of +0.4, but greedy only evaluates one prized target at a time, and the shared connector cost makes each target look unprofitable alone.</p>
+    <p>A fix that works here: when evaluating a path to one target, also count prized nodes adjacent to the path's new nodes as “attachable for one more edge each” if their prize exceeds the edge cost (a one-step lookahead). Brightwater's path then scores −0.2 + (2 − 1.4) = +0.4 through Lena Park. More principled options are the Goemans–Williamson primal-dual algorithm, which grows clusters around all prized nodes simultaneously, or an exact solver on small retrieved candidate sets.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 19.3 <span class="level">Core</span></h4>
+  <p>On the five-node graph from Chapter 17 (edges M–D, M–K, M–P, D–K, K–T, P–T), run two GCN layers by hand with the symmetric normalization <em>D̂<sup>−1/2</sup>(A + I)D̂<sup>−1/2</sup></em>, scalar features (1 on T, 0 elsewhere), identity weights and ReLU. Give every node's value after layers 1 and 2, then compare with mean aggregation. Which normalization gives the hub-adjacent node K more signal, and why?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Degrees with self-loops: M 4, D 3, K 4, P 3, T 3. The weight of edge (u, v) is 1/√(deĝ(u) deĝ(v)).</p>
+    <p><strong>Layer 1</strong> (only T has signal): T keeps 1/3 = 0.333 (self-loop, 1/√(3·3)); K gets 1/√(4·3) = 0.289; P gets 1/√(3·3) = 0.333; M and D get 0.</p>
+    <p><strong>Layer 2</strong>:</p>
+    <ul>
+      <li>M = K/√16 + P/√12 = 0.289/4 + 0.333/3.464 = 0.072 + 0.096 = <strong>0.168</strong></li>
+      <li>D = K/√12 = 0.289/3.464 = <strong>0.083</strong></li>
+      <li>K = K/4 + T/√12 = 0.072 + 0.096 = <strong>0.168</strong></li>
+      <li>P = P/3 + T/3 = 0.111 + 0.111 = <strong>0.222</strong></li>
+      <li>T = K/√12 + P/3 + T/3 = 0.083 + 0.111 + 0.111 = <strong>0.306</strong></li>
+    </ul>
+    <p>Mean aggregation (row-normalized): layer 1 gives K 0.25, P 0.333, T 0.333; layer 2 gives M 0.146, D 0.083, K 0.146, P 0.222, T 0.306. GCN gives K more at layer 1 (0.289 versus 0.25) because symmetric normalization scales by the square root of both degrees: K divides by √4 rather than by 4, and T's small degree boosts what it sends. Mean aggregation divides only by the receiver's degree. Running <code>examples/message_passing.py</code> reproduces the GCN numbers.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 19.4 <span class="level">Core</span></h4>
+  <p>Implement G-Retriever's edge-prize reduction: <code>with_edge_prizes(G, node_prizes, edge_prizes, edge_cost)</code> returns a graph whose edges carry a <code>cost</code> attribute and a new prize dict, using reduced costs when an edge's prize is at most its cost and virtual nodes otherwise. Write a brute-force <code>exact_pcst(H, prizes)</code> for small graphs, and use both on the question 2 subgraph (bleaching, Sentinel, Halden Reef, Kestrel Labs, Lena Park, Brightwater, Deepcast) at cost 1.4, first with no edge prizes and then with prize 3 on the Lena Park–Brightwater edge (“partner at” is similar to “investor's board member”).</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import itertools
+import networkx as nx
+
+def with_edge_prizes(G, node_prizes, edge_prizes, edge_cost=1.0):
+    H = nx.Graph()
+    H.add_nodes_from(G.nodes())
+    prizes = dict(node_prizes)
+    for u, v in G.edges():
+        p = edge_prizes.get((u, v), edge_prizes.get((v, u), 0.0))
+        if p &lt;= edge_cost:
+            H.add_edge(u, v, cost=edge_cost - p)           # prize folded into a cheaper edge
+        else:
+            ve = f"e:{u}|{v}"                               # virtual node stands in for the edge
+            H.add_edge(u, ve, cost=0.0)
+            H.add_edge(ve, v, cost=0.0)
+            prizes[ve] = p - edge_cost
+    return H, prizes
+
+def exact_pcst(H, prizes):
+    best, best_nodes = 0.0, set()
+    nodes = list(H.nodes())
+    for k in range(1, len(nodes) + 1):
+        for S in itertools.combinations(nodes, k):
+            sub = H.subgraph(S)
+            if not nx.is_connected(sub):
+                continue
+            cost = sum(d["cost"] for _, _, d in nx.minimum_spanning_edges(sub, weight="cost", data=True))
+            value = sum(prizes.get(n, 0.0) for n in S) - cost
+            if value &gt; best:
+                best, best_nodes = value, set(S)
+    return best, best_nodes
+
+G = nx.Graph([("BLEACHING", "SENTINEL"), ("BLEACHING", "HALDEN REEF"), ("SENTINEL", "HALDEN REEF"),
+              ("SENTINEL", "KESTREL LABS"), ("KESTREL LABS", "LENA PARK"), ("KESTREL LABS", "BRIGHTWATER"),
+              ("LENA PARK", "BRIGHTWATER"), ("KESTREL LABS", "DEEPCAST")])
+nodes = {"BLEACHING": 5, "HALDEN REEF": 4, "BRIGHTWATER": 3, "LENA PARK": 2, "SENTINEL": 1}
+for edges in ({}, {("LENA PARK", "BRIGHTWATER"): 3.0}):
+    H, prizes = with_edge_prizes(G, nodes, edges, edge_cost=1.4)
+    print(exact_pcst(H, prizes))</code></pre>
+    <p>Without edge prizes the optimum is the six-node tree with objective <strong>8.0</strong> (15 − 5 × 1.4), as in Exercise 19.2. With prize 3 on Lena Park–Brightwater, that edge becomes a virtual node with prize 3 − 1.4 = 1.6 joined by two free edges. The optimum keeps the same six real nodes plus the virtual node, objective <strong>11.0</strong>: prizes 15 + 1.6 = 16.6, minus four real edges at 1.4 = 5.6. In the original graph that is the tree bleaching–Halden, bleaching–Sentinel, Sentinel–Kestrel, Kestrel–Lena and Lena–Brightwater: prizes 15 + 3 = 18 minus 5 × 1.4 = 7, also 11.0. The reduction preserves the objective, and the “partner at” edge the answer needs is now in the tree instead of Kestrel–Brightwater.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 19.5 <span class="level">Stretch</span></h4>
+  <p>Build a GNN-RAG style pipeline on the <code>minigraphrag</code> index without training anything: use Personalized PageRank from the question's linked entities as a stand-in for the GNN's answer probabilities, take nodes as candidates until their cumulative normalized score passes 0.95 (excluding seeds, capped at 5), extract shortest paths from seeds to each candidate, verbalize them with <code>paths_to_text</code>, and answer with one LLM call. Compare the context size in tokens with <code>subgraph_search</code> on question 2. What would a trained GNN add?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import networkx as nx
+from minigraphrag.search.ppr import link_query_to_nodes, personalized_pagerank
+from minigraphrag.search.paths import paths_to_text
+from minigraphrag.search.common import generate_answer
+from minigraphrag.search.subgraph import subgraph_search
+from minigraphrag.tokens import count_tokens
+
+def gnn_rag_style(index, query, llm, mass=0.95, max_candidates=5, alpha=0.5):
+    G = index.graph
+    seeds = link_query_to_nodes(index, query, llm)
+    scores = personalized_pagerank(G, seeds, alpha=alpha)
+    ranked = [(n, s) for n, s in sorted(scores.items(), key=lambda x: -x[1]) if n not in seeds]
+    total = sum(s for _, s in ranked) or 1.0
+    candidates, cum = [], 0.0
+    for n, s in ranked:
+        if cum &gt;= mass or len(candidates) == max_candidates:
+            break
+        candidates.append(n)
+        cum += s / total
+    paths = []
+    for seed in seeds:
+        for cand in candidates:
+            try:
+                paths.append(nx.shortest_path(G, seed, cand))   # hop-count shortest path
+            except nx.NetworkXNoPath:
+                pass
+    context = paths_to_text(G, paths)
+    return generate_answer(llm, query, context), context
+
+q = "Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?"
+answer, context = gnn_rag_style(index, q, llm)
+print(count_tokens(context), "tokens of paths")
+print(count_tokens(subgraph_search(index, q, llm).context_text), "tokens of PCST tables")</code></pre>
+    <p>Path contexts are typically several times smaller than entity and relationship tables for the same question, because they carry only the chains to the candidates. The cap of five candidates matters: PPR mass is spread thinly on a dense graph, so the 0.95 cumulative threshold alone would admit almost every node (a trained GNN's probabilities are much peakier, which is why the paper can use the threshold directly). What training adds: PPR scores every node by proximity regardless of the question's meaning, so hubs and nearby but irrelevant entities become candidates. A GNN like ReaRev conditions its messages on the question and learns from labeled answers which relations lead to answers for which question types, so its candidates are Lena Park and Brightwater Capital rather than Kestrel Labs and Tidewater Institute. The pipeline around it (candidates, shortest paths, verbalization, one LLM call) stays exactly the same.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In the PCST objective, what does raising the uniform edge cost do to the retrieved subgraph?</p>
+  <ol>
+    <li>It adds more zero-prize connector nodes</li>
+    <li data-correct>It shrinks the subgraph toward the densest cluster of high-prize nodes</li>
+    <li>It changes the node prizes</li>
+    <li>It has no effect on connectivity, only on the objective value</li>
+  </ol>
+  <div class="explain">Each edge must pay for itself with prizes it connects. Higher costs mean fewer edges are worth it, so distant prizes and connectors drop out. At cost 5 on the question 2 example only the top node survives.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does G-Retriever assign rank-based prizes (k, k−1, …, 1) instead of using raw cosine similarities?</p>
+  <ol>
+    <li>Cosine similarity cannot be computed for edges</li>
+    <li>PCST solvers require integer prizes</li>
+    <li data-correct>Ranks are independent of the embedding model's similarity scale, and everything outside the top k gets exactly zero</li>
+    <li>It makes the LLM's answer shorter</li>
+  </ol>
+  <div class="explain">Similarity values vary by model and query, so a fixed edge cost would mean different things. Ranks give a stable scale, and zero prizes ensure non-relevant nodes appear only as connectors.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">An edge has prize 3 and cost 1. How does G-Retriever feed it to a standard PCST solver?</p>
+  <ol>
+    <li>It sets the edge cost to −2</li>
+    <li>It drops the edge prize</li>
+    <li>It doubles both endpoints' prizes</li>
+    <li data-correct>It replaces the edge with a virtual node of prize 2 connected to both endpoints by zero-cost edges</li>
+  </ol>
+  <div class="explain">Standard solvers do not accept negative costs. The virtual node makes “include the edge” equivalent to “include the node”, with the net prize 3 − 1 = 2.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A GNN retriever has 2 layers. The answer node is 3 hops from the question entity. What happens?</p>
+  <ol>
+    <li data-correct>The answer node's final representation cannot depend on the question entity's input signal, so the model cannot identify it through that path</li>
+    <li>The GNN automatically adds a third layer</li>
+    <li>Attention lets the signal skip a hop</li>
+    <li>Nothing: the receptive field of a GNN is the whole graph</li>
+  </ol>
+  <div class="explain">After L layers of message passing a node sees only its L-hop neighborhood. In the two-layer walkthrough, Halden Reef, 3 hops from Tern, stayed at 0.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the division of labor in GNN-RAG?</p>
+  <ol>
+    <li>The LLM retrieves subgraphs and the GNN writes the answer</li>
+    <li data-correct>The GNN scores nodes as answer candidates over the KG subgraph; shortest paths to them are verbalized for the LLM to reason over</li>
+    <li>The GNN embeds documents and the LLM runs PCST</li>
+    <li>The GNN replaces the LLM entirely</li>
+  </ol>
+  <div class="explain">GNN-RAG uses a trained GNN (ReaRev) for node classification, extracts shortest paths from question entities to the candidates, and gives those paths to an LLM as retrieval-augmented context.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What property lets GFM-RAG work on graphs it was not trained on?</p>
+  <ol>
+    <li>It memorizes entity embeddings for every possible entity</li>
+    <li>It fine-tunes on each new dataset automatically at query time</li>
+    <li data-correct>Its GNN is query-dependent: node states start from the question embedding and messages use relation embeddings, not learned per-entity identities</li>
+    <li>It converts every graph to a fixed schema before retrieval</li>
+  </ol>
+  <div class="explain">Nothing in the model is tied to a specific entity vocabulary, so it transfers across graphs. It is pretrained on 60 KGs and reports zero-shot use on seven domain datasets.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Is PCST retrieval better than local search?</summary>
+  <div><p>It answers a different question. Local search asks “what is around these entities?” and fills a token budget by rank. PCST asks “what is the smallest connected structure that covers the relevant entities?” and can pull in a zero-similarity connector such as Kestrel Labs that local search would include only if it ranked highly. For multi-constraint questions PCST usually gives tighter, more explanatory context; for “tell me about X” questions local search is simpler and just as good.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I choose k and the edge cost?</summary>
+  <div><p>Tune them together on an evaluation set, measuring answer quality and context tokens. A practical start: k between 5 and 15 and a cost that keeps typical subgraphs between 5 and 30 nodes. Because prizes are ranks, a cost around 1 means “an edge must connect roughly a rank-1 node to be worth it”. Log subgraph sizes per query: if many queries return a single node, lower the cost; if subgraphs routinely hit <code>max_nodes</code>, raise it.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Do I need PyTorch Geometric to use any of this?</summary>
+  <div><p>Not for retrieval. Prizes, PCST, ego-graphs and path extraction are graph algorithms that run with NetworkX. You need a deep learning stack only for the trained parts: the GNN soft prompt in G-Retriever and GRAG, the GNN in GNN-RAG, and running GFM-RAG's pretrained model. All of those papers released code built on PyTorch and PyTorch Geometric.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I use a graph soft prompt with a hosted API like Claude or GPT?</summary>
+  <div><p>No. A soft prompt is a vector inserted into the model's input embedding sequence, which requires access to the model's weights. With hosted APIs you get the text view only: serialize the retrieved subgraph as triples, tables or paths (Chapter 22). The retrieval half of G-Retriever and GRAG works with any LLM.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How is a GNN retriever different from just running PPR?</summary>
+  <div><p>Both spread a question's signal through the graph for a few hops. PPR's transitions are fixed by topology and weights, and identical for every question. A GNN's transitions are learned and can depend on the question, the node features and the relation type, so it can learn that for “who oversees” questions, “board member of” edges carry signal and “located in” edges do not. The price is training data and a model to maintain. GFM-RAG can be read as a learned, relation-aware generalization of HippoRAG's PPR step.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a subgraph retriever you can tune</h3>
+  <p>Add subgraph retrieval to your Kestrel system and make its trade-offs visible.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>subgraph</code> command that prints prizes, the selected nodes and edges, the objective value, and the context size in tokens for a question</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An option to add induced edges among selected nodes, and an option for hop-count versus strength-aware connecting paths</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An exact PCST checker for candidate sets up to 15 nodes, and a report of how often greedy matches it across the canonical questions and a sweep of edge costs</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Edge prizes from relationship embeddings via the virtual node reduction</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A comparison table of subgraph, local and PPR search on questions 1–3: supporting-document recall and context tokens</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can show, for question 2, a subgraph that contains Kestrel Labs, Lena Park and Brightwater Capital with the “partner at” edge, and state the edge cost range for which it survives.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Multi-constraint questions need a connected subgraph, including connector nodes the question never names.</li>
+    <li>G-Retriever turns similarity ranks into prizes and solves a prize-collecting Steiner tree: maximize prizes minus edge costs, subject to connectivity; the edge cost sets subgraph size.</li>
+    <li>PCST is NP-hard. G-Retriever uses a fast near-linear primal-dual solver; greedy attachment is easy to teach and can miss optima that need several connectors at once.</li>
+    <li>GNNs compute node vectors by message passing; L layers see L hops; GCN normalizes by degree and GAT learns attention over neighbors.</li>
+    <li>GRAG retrieves ego-graphs and prunes softly; GNN-RAG lets a GNN pick answer candidates and an LLM read the shortest paths; GFM-RAG pretrains a query-dependent GNN retriever that transfers across graphs.</li>
+    <li>Start training-free; adopt trained retrievers when you have labeled questions over a stable graph or a pretrained model that wins on your evaluation.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>He, Tian, Sun, Chawla, Laurent, LeCun, Bresson, Hooi. <a href="https://arxiv.org/abs/2402.07630">G-Retriever: Retrieval-Augmented Generation for Textual Graph Understanding and Question Answering</a>. <span class="venue">arXiv 2402.07630, 2024</span></li>
+  <li>Hu, Lei, Zhang, Pan, Ling, Zhao. <a href="https://arxiv.org/abs/2405.16506">GRAG: Graph Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2405.16506, 2024</span></li>
+  <li>Mavromatis, Karypis. <a href="https://arxiv.org/abs/2405.20139">GNN-RAG: Graph Neural Retrieval for Large Language Model Reasoning</a>. <span class="venue">arXiv 2405.20139, 2024</span></li>
+  <li>Luo, Zhao, Haffari, Phung, Gong, Pan. <a href="https://arxiv.org/abs/2502.01113">GFM-RAG: Graph Foundation Model for Retrieval Augmented Generation</a>. <span class="venue">NeurIPS 2025, arXiv 2502.01113</span></li>
+  <li>Hegde, Indyk, Schmidt. <a href="https://proceedings.mlr.press/v37/hegde15.html">A Nearly-Linear Time Framework for Graph-Structured Sparsity</a>. <span class="venue">ICML 2015</span></li>
+  <li>Kipf, Welling. <a href="https://arxiv.org/abs/1609.02907">Semi-Supervised Classification with Graph Convolutional Networks</a>. <span class="venue">ICLR 2017, arXiv 1609.02907</span></li>
+  <li>Veličković, Cangea, Casanova, Romero, Liò, Bengio. <a href="https://arxiv.org/abs/1710.10903">Graph Attention Networks</a>. <span class="venue">ICLR 2018, arXiv 1710.10903</span></li>
+  <li>Luo, Li, Haffari, Pan. <a href="https://arxiv.org/abs/2310.01061">Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning</a>. <span class="venue">ICLR 2024, arXiv 2310.01061</span></li>
+  <li>PyG team. <a href="https://github.com/pyg-team/pytorch_geometric">PyTorch Geometric</a>. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/site.js?v=fe74656c"></script>
+<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script>
+GRFSViz.register("ch19-pcst", function (el, cfg, api) {
+  var W = 720, H = cfg.height || 380;
+  var fr = api.frame(el, cfg);
+  var svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "PCST explorer" }, fr.stage);
+  var pick = new Set();
+  var mode = "greedy";
+  var G = api.drawGraph(svg, {
+    nodes: cfg.nodes, edges: cfg.edges, focusable: true,
+    onNodeClick: function (n) { mode = "pick"; pick.has(n.id) ? pick.delete(n.id) : pick.add(n.id); render(); }
+  }, W, H);
+  var cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  var bar = api.controls(el);
+  var cL = api.h("label", {}, bar, "Edge cost ");
+  var cost = api.h("input", { type: "range", min: 0.2, max: 5, step: 0.1, value: cfg.cost || 1 }, cL);
+  var cV = api.h("b", {}, cL);
+  var bGreedy = api.button(bar, "Greedy", "primary");
+  var bExact = api.button(bar, "Exact optimum");
+  var bClear = api.button(bar, "Clear my pick");
+  api.h("span", { class: "grow" }, bar);
+  api.h("span", { class: "stepno" }, bar, "Click nodes to pick");
+
+  var ids = cfg.nodes.map(function (n) { return n.id; });
+  var prize = {}; cfg.nodes.forEach(function (n) { prize[n.id] = n.prize || 0; });
+  var label = {}; cfg.nodes.forEach(function (n) { label[n.id] = n.label || n.id; });
+  var adj = {}; ids.forEach(function (id) { adj[id] = []; });
+  cfg.edges.forEach(function (e) { adj[e.source].push(e.target); adj[e.target].push(e.source); });
+
+  function spanningTree(set) {
+    // BFS spanning tree of the induced subgraph; returns edges or null if disconnected (uniform cost: any spanning tree is minimal)
+    var nodes = Array.from(set); if (!nodes.length) return [];
+    var seen = new Set([nodes[0]]), queue = [nodes[0]], edges = [];
+    while (queue.length) {
+      var u = queue.shift();
+      adj[u].forEach(function (v) { if (set.has(v) && !seen.has(v)) { seen.add(v); queue.push(v); edges.push([u, v]); } });
+    }
+    return seen.size === set.size ? edges : null;
+  }
+  function objective(set, C) {
+    var t = spanningTree(set); if (t === null) return null;
+    var p = 0; set.forEach(function (n) { p += prize[n]; });
+    return { prizes: p, edges: t, value: p - C * t.length };
+  }
+  function greedy(C) {
+    var cands = ids.filter(function (n) { return prize[n] > 0; });
+    if (!cands.length) return { nodes: new Set(), edges: [] };
+    var start = cands.slice().sort(function (a, b) { return prize[b] - prize[a] || (a < b ? 1 : -1); })[0];
+    var tree = new Set([start]), tEdges = [];
+    while (true) {
+      // multi-source BFS from the tree (hop-count shortest paths)
+      var prev = {}, dist = {}, q = [];
+      tree.forEach(function (n) { dist[n] = 0; q.push(n); });
+      while (q.length) { var u = q.shift(); adj[u].forEach(function (v) { if (!(v in dist)) { dist[v] = dist[u] + 1; prev[v] = u; q.push(v); } }); }
+      var best = null, bestGain = 0;
+      cands.forEach(function (n) {
+        if (tree.has(n) || !(n in dist)) return;
+        var path = [n]; while (!tree.has(path[0])) path.unshift(prev[path[0]]);
+        var gain = 0; path.forEach(function (x) { if (!tree.has(x)) gain += prize[x]; });
+        gain -= C * (path.length - 1);
+        if (gain > bestGain + 1e-9) { best = path; bestGain = gain; }
+      });
+      if (!best) break;
+      for (var i = 0; i < best.length; i++) { tree.add(best[i]); if (i) tEdges.push([best[i - 1], best[i]]); }
+    }
+    var changed = true;
+    while (changed && tree.size > 1) {
+      changed = false;
+      var deg = {}; tree.forEach(function (n) { deg[n] = 0; });
+      tEdges.forEach(function (e) { deg[e[0]]++; deg[e[1]]++; });
+      Array.from(tree).forEach(function (n) {
+        if (!changed && deg[n] === 1 && prize[n] < C) { tree.delete(n); tEdges = tEdges.filter(function (e) { return e[0] !== n && e[1] !== n; }); changed = true; }
+      });
+    }
+    return { nodes: tree, edges: tEdges };
+  }
+  var exactCache = {};
+  function exact(C) {
+    var key = C.toFixed(2); if (exactCache[key]) return exactCache[key];
+    var best = { value: 0, nodes: new Set(), edges: [] }, n = ids.length;
+    for (var mask = 1; mask < (1 << n); mask++) {
+      var set = new Set(); for (var i = 0; i < n; i++) if (mask & (1 << i)) set.add(ids[i]);
+      var o = objective(set, C);
+      if (o && (o.value > best.value + 1e-9 || (Math.abs(o.value - best.value) < 1e-9 && set.size < best.nodes.size))) best = { value: o.value, nodes: set, edges: o.edges };
+    }
+    exactCache[key] = best; return best;
+  }
+  function names(set) { return Array.from(set).map(function (x) { return label[x]; }).join(", ") || "nothing"; }
+  function render() {
+    var C = +cost.value; cV.textContent = C.toFixed(1);
+    var g = greedy(C), gO = objective(g.nodes, C);
+    var ex = exact(C);
+    var sel, selEdges, head;
+    if (mode === "exact") { sel = ex.nodes; selEdges = ex.edges; }
+    else if (mode === "pick") { sel = pick; var po = objective(pick, C); selEdges = po ? po.edges : []; }
+    else { sel = g.nodes; selEdges = g.edges; }
+    [bGreedy, bExact].forEach(function (b) { b.className = ""; });
+    if (mode === "greedy") bGreedy.className = "primary"; if (mode === "exact") bExact.className = "primary";
+    var hot = new Set(selEdges.map(function (e) { return e[0] + ">" + e[1]; }));
+    G.nodes.forEach(function (n) {
+      var on = sel.has(n.id);
+      n._g.classList.toggle("active", on);
+      n._c.style.fill = "color-mix(in srgb, " + n._col + " " + (on ? 70 : 18) + "%, var(--panel))";
+      n._c.style.stroke = on ? "var(--edge)" : n._col;
+      n._c.style.strokeWidth = on ? "3" : "1.5";
+      n._g.style.opacity = on || !sel.size ? 1 : 0.55;
+      n._s.textContent = prize[n.id] > 0 ? "prize " + prize[n.id] : "0";
+      n._s.setAttribute("dy", -G.radius(n) - 6);
+    });
+    G.edges.forEach(function (e) {
+      var on = hot.has(e.source + ">" + e.target) || hot.has(e.target + ">" + e.source);
+      e._el.classList.toggle("active", on);
+      e._el.style.opacity = on ? 1 : 0.45;
+    });
+    var line = function (title, set, o) {
+      if (!o) return "<strong>" + title + ":</strong> " + names(set) + ". <span style=\"color:var(--bad)\">Not connected, so not a valid PCST solution.</span>";
+      return "<strong>" + title + ":</strong> " + names(set) + ". Prizes " + o.prizes + " − " + o.edges.length + " edges × " + C.toFixed(1) + " = <strong>" + api.fmt(o.value, 1) + "</strong>";
+    };
+    var html = line("Greedy", g.nodes, gO) + "<br>" + line("Exact optimum", ex.nodes, objective(ex.nodes, C));
+    if (mode === "pick") html += "<br>" + line("Your pick", pick, pick.size ? objective(pick, C) : { prizes: 0, edges: [], value: 0 });
+    if (gO && gO.value + 1e-9 < ex.value) html += "<br>Greedy falls short of the optimum by " + api.fmt(ex.value - gO.value, 1) + ".";
+    cap.innerHTML = html;
+  }
+  cost.addEventListener("input", render);
+  bGreedy.addEventListener("click", function () { mode = "greedy"; render(); });
+  bExact.addEventListener("click", function () { mode = "exact"; render(); });
+  bClear.addEventListener("click", function () { pick.clear(); mode = "pick"; render(); });
+  render();
+});
+</script>
+</body>
+</html>
