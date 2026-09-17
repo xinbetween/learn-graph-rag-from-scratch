@@ -21,7 +21,7 @@ async def check(ctx, path, width):
       let clicks = 0;
       for (const v of document.querySelectorAll('.viz')) {
         for (let i = 0; i < 12; i++) {
-          const b = [...v.querySelectorAll('.viz-controls button')].find(x => x.textContent === 'Next' && !x.disabled);
+          const b = [...v.querySelectorAll('.viz-controls button')].find(x => (x.textContent === 'Next' || x.textContent === '下一步') && !x.disabled);
           if (!b) break; b.click(); clicks++;
         }
         for (const r of v.querySelectorAll('input[type=range]')) { r.value = r.min; r.dispatchEvent(new Event('input')); r.value = r.max; r.dispatchEvent(new Event('input')); }

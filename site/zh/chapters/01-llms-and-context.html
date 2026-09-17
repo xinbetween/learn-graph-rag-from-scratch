@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Why LLMs need retrieval | Graph RAG from Scratch</title>
-<meta name="description" content="What a language model knows, what it cannot know, why context windows cost money and attention, and how retrieve-then-generate grounds answers in your documents.">
+<title>LLM 为什么需要检索 | 从零构建 Graph RAG</title>
+<meta name="description" content="语言模型知道什么、无法知道什么，上下文窗口为什么既耗钱又分散注意力，以及“先检索、后生成”如何让答案以你的文档为依据。">
 <meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
@@ -15,151 +15,151 @@
 <link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
 <script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head>
-<body data-slug="01-llms-and-context" data-root="../.." data-fallback="en">
+<body data-slug="01-llms-and-context" data-root="../.." data-translated="true">
 <main class="chapter" id="main">
 
 <header class="chapter-head">
-  <h1>Why LLMs need retrieval</h1>
-  <p class="lede">A language model answers from what it absorbed during training, and it will answer confidently even when that is not enough. This chapter explains what a model can and cannot know, what it costs to paste your documents into its context, and why “retrieve, then generate” became the default way to ground answers in your own data.</p>
+  <h1>LLM 为什么需要检索</h1>
+  <p class="lede">语言模型依据训练时吸收的知识作答，即使这些知识不够用，它也照样答得信心十足。本章讲清楚模型能知道什么、不能知道什么，把文档直接贴进上下文要付出什么代价，以及为什么“先检索、后生成”成了让答案以你自己的数据为依据的默认做法。</p>
   <div class="objectives">
-    <h2>You will be able to</h2>
+    <h2>你将学会</h2>
     <ul>
-      <li>Explain next-token prediction and why it produces fluent answers whether or not the model knows the facts</li>
-      <li>Distinguish parametric knowledge (in the weights) from non-parametric knowledge (in documents you supply)</li>
-      <li>Estimate the token count, cost and fit of a prompt, and decide when “stuff the whole corpus” stops working</li>
-      <li>Describe the lost-in-the-middle effect and what it implies for how you order context</li>
-      <li>Call an LLM through the <code>minigraphrag</code> interface and build a stuffed-context baseline with citations</li>
-      <li>Argue the trade-off between long-context prompting and retrieval-augmented generation for a given workload</li>
+      <li>解释下一个 token 预测的原理，以及为什么无论模型是否掌握事实，它产出的回答都一样流畅</li>
+      <li>区分参数化知识（存在权重中）和非参数化知识（存在你提供的文档中）</li>
+      <li>估算一个提示词的 token 数、成本以及能否放进窗口，并判断“把整个语料塞进去”何时不再可行</li>
+      <li>描述“中间迷失”（lost in the middle）效应，以及它对上下文排序的启示</li>
+      <li>通过 <code>minigraphrag</code> 的接口调用 LLM，并构建一个带引用的全量塞入上下文的基线</li>
+      <li>针对给定的工作负载，论证长上下文提示与检索增强生成之间的取舍</li>
     </ul>
   </div>
 </header>
 
-<h2>What a language model does</h2>
-<p>Every chat model you will use in this course is, at its core, a function that takes a sequence of <strong>tokens</strong> and returns a probability distribution over the next token. A token is a chunk of text from a fixed vocabulary: often a whole common word, sometimes a word piece, a space plus a word, or punctuation. Generation is a loop: pick a token from the distribution, append it, run the function again.</p>
+<h2>语言模型在做什么</h2>
+<p>本课程中你会用到的每个对话模型，本质上都是一个函数：输入一串 <strong>token</strong>，输出下一个 token 的概率分布。token 是取自固定词表的一小段文本：常常是一个完整的常用词，有时是词的一部分、带前导空格的词，或者标点符号。生成过程就是一个循环：从分布中选出一个 token，把它追加到序列末尾，再运行一次这个函数。</p>
 
-<p>Formally, a model with parameters θ defines</p>
+<p>形式化地说，参数为 θ 的模型定义了</p>
 <p style="text-align:center"><em>P</em>(<em>x</em><sub>t</sub> | <em>x</em><sub>1</sub>, …, <em>x</em><sub>t−1</sub>; θ)</p>
-<p>and the probability of a whole answer is the product of those per-step probabilities. Training adjusts θ so that real text from the training corpus gets high probability. Nothing in that objective says “only emit true statements”. It says “emit what text like this usually continues with”. Instruction tuning and preference training make the model more helpful and more willing to say “I don't know”, but they sit on top of the same next-token machinery.</p>
+<p>整个回答的概率就是每一步概率的乘积。训练过程不断调整 θ，让训练语料中的真实文本获得高概率。这个目标里没有任何一处在说“只输出真实的陈述”，它说的是“输出这类文本通常会接上的内容”。指令微调和偏好训练能让模型更有用，也更愿意说“我不知道”，但它们都建立在同一套下一个 token 预测机制之上。</p>
 
 <div class="viz" data-viz="ch01-next-token">
 <script type="application/json">
 {
-  "title": "Next-token prediction, one step at a time",
-  "subtitle": "Illustrative probabilities, not measured from a real model",
+  "title": "逐步演示下一个 token 预测",
+  "subtitle": "概率仅作示意，并非从真实模型测得",
   "prompt": "Q: Who is the CTO of Kestrel Labs? A:",
   "steps": [
     {"candidates": [[" The", 0.31], [" Kestrel", 0.22], [" Jonas", 0.14], [" I", 0.11], [" Dr", 0.09]], "chosen": " The",
-     "caption": "The model has never seen Kestrel Labs (it is fictional), yet the distribution is confident about <em>how</em> an answer starts. Fluency comes first."},
+     "caption": "模型从没见过 Kestrel Labs（它是虚构的），但对于回答<em>该怎么开头</em>，分布却相当笃定。流畅性优先。"},
     {"candidates": [[" CTO", 0.48], [" current", 0.19], [" chief", 0.13], [" company", 0.08], [" founder", 0.05]], "chosen": " CTO",
-     "caption": "Each token is conditioned on everything before it, including the tokens the model itself just produced."},
+     "caption": "每个 token 都以它之前的全部内容为条件，其中也包括模型自己刚刚生成的 token。"},
     {"candidates": [[" of", 0.62], [" is", 0.21], [" at", 0.07], [",", 0.04], [" was", 0.03]], "chosen": " of",
-     "caption": "Grammar is easy to predict. The hard part is coming: a name."},
+     "caption": "语法很容易预测。难点马上就来：一个人名。"},
     {"candidates": [[" Kestrel", 0.83], [" the", 0.07], [" this", 0.04], [" Kest", 0.02], [" that", 0.01]], "chosen": " Kestrel",
-     "caption": "Copying from the prompt is a strong pattern, so the company name comes back with high probability."},
+     "caption": "从提示词中照抄是一种很强的模式，所以公司名以很高的概率再次出现。"},
     {"candidates": [[" Labs", 0.91], [" Lab", 0.04], [" Labs,", 0.02], [" Technologies", 0.01], [" Inc", 0.01]], "chosen": " Labs",
-     "caption": "Still copying. Nothing so far required knowing a fact."},
+     "caption": "仍然在照抄。到目前为止，还没有哪一步需要知道任何事实。"},
     {"candidates": [[" is", 0.88], [" was", 0.06], [" has", 0.02], [" remains", 0.01], [",", 0.01]], "chosen": " is",
-     "caption": "Now the model must name a person. Without the documents, there is no correct fact in its weights to draw on."},
+     "caption": "现在模型必须说出一个人名。没有文档，它的权重里就没有正确的事实可用。"},
     {"candidates": [[" John", 0.12], [" Michael", 0.10], [" David", 0.09], [" not", 0.08], [" Sarah", 0.07]], "chosen": " John",
-     "caption": "A flat distribution over plausible names. Sampling still picks one, and the sentence continues fluently. This is what a hallucination looks like from the inside: low confidence at one step, hidden inside a confident-sounding sentence."}
+     "caption": "分布在一堆看似合理的人名上几乎摊平。采样照样会选出一个，句子也照样流畅地往下写。从内部看，幻觉就是这个样子：某一步置信度很低，却藏在一个听起来很有把握的句子里。"}
   ]
 }
 </script>
 </div>
 
-<p>The walk-through above is illustrative, but the shape is real: the tokens that carry facts are often the ones with the flattest distributions, and the output text does not show you that. The correct answer, from the corpus, is Priya Nair (since March 2026), with Jonas Vehl before her. No amount of sampling tricks can recover a fact the model never saw.</p>
+<p>上面的演示只是示意，但其形态是真实的：承载事实的 token，往往恰恰是分布最平坦的那些，而输出文本不会把这一点告诉你。根据语料，正确答案是 Priya Nair（自 2026 年 3 月起），在她之前是 Jonas Vehl。模型从未见过的事实，任何采样技巧都无法凭空找回。</p>
 
-<h3>Parametric and non-parametric knowledge</h3>
-<p>Researchers call what a model absorbed during training its <strong>parametric knowledge</strong>: facts stored implicitly in the weights. Petroni et al. showed in 2019 that pretrained language models can answer many fill-in-the-blank factual queries without any retrieval, which is why chat models seem to “know” things. The same line of work also showed the limits: recall is uneven, rare facts are unreliable, and you cannot tell which facts the model has from the outside.</p>
-<p><strong>Non-parametric knowledge</strong> is knowledge you supply at inference time: documents, database rows, graph facts, pasted into the prompt. It can be updated by editing a file, it can be private, and it can be cited.</p>
+<h3>参数化知识与非参数化知识</h3>
+<p>研究者把模型在训练中吸收的内容称为<strong>参数化知识</strong>（parametric knowledge）：隐式存储在权重中的事实。Petroni 等人在 2019 年证明，预训练语言模型无需任何检索，就能回答许多填空式的事实查询，这也是对话模型看起来“知道”很多事情的原因。同一方向的研究也揭示了其局限：记忆并不均衡，罕见事实不可靠，而且从外部无法判断模型掌握了哪些事实。</p>
+<p><strong>非参数化知识</strong>（non-parametric knowledge）是你在推理时提供的知识：文档、数据库记录、图中的事实，贴进提示词里。修改文件就能更新它，它可以是私有的，也可以被引用。</p>
 
 <figure>
   <div class="diagram">
     <svg viewBox="0 0 680 270" role="img" aria-labelledby="pnp-title">
-      <title id="pnp-title">Parametric knowledge lives in model weights; non-parametric knowledge is supplied in the prompt; both meet at generation time</title>
+      <title id="pnp-title">参数化知识存在于模型权重中；非参数化知识通过提示词提供；两者在生成时汇合</title>
       <defs><marker id="pnp-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
       <rect class="d-box comm" x="10" y="14" width="290" height="104" rx="8"/>
-      <text class="d-text bold" x="26" y="40">Parametric (in the weights)</text>
-      <text class="d-text small" x="26" y="62">Learned once, during training</text>
-      <text class="d-text small" x="26" y="80">Frozen at a knowledge cutoff</text>
-      <text class="d-text small" x="26" y="98">Cannot cite where a fact came from</text>
+      <text class="d-text bold" x="26" y="40">参数化（在权重中）</text>
+      <text class="d-text small" x="26" y="62">在训练时一次性学到</text>
+      <text class="d-text small" x="26" y="80">冻结在知识截止日期</text>
+      <text class="d-text small" x="26" y="98">无法指出事实从何而来</text>
       <rect class="d-box node" x="10" y="148" width="290" height="104" rx="8"/>
-      <text class="d-text bold" x="26" y="174">Non-parametric (in the prompt)</text>
-      <text class="d-text small" x="26" y="196">Retrieved per question from your data</text>
-      <text class="d-text small" x="26" y="214">Updated by editing documents</text>
-      <text class="d-text small" x="26" y="232">Each fact has a source id to cite</text>
+      <text class="d-text bold" x="26" y="174">非参数化（在提示词中）</text>
+      <text class="d-text small" x="26" y="196">针对每个问题从你的数据中检索</text>
+      <text class="d-text small" x="26" y="214">修改文档即可更新</text>
+      <text class="d-text small" x="26" y="232">每条事实都有可引用的来源 id</text>
       <line class="d-line" x1="300" y1="66" x2="386" y2="118" marker-end="url(#pnp-arr)"/>
       <line class="d-line hot" x1="300" y1="200" x2="386" y2="150" marker-end="url(#pnp-arr)"/>
       <rect class="d-box edge" x="392" y="104" width="120" height="60" rx="8"/>
       <text class="d-text bold" x="452" y="130" text-anchor="middle">LLM</text>
-      <text class="d-text small" x="452" y="150" text-anchor="middle">next-token loop</text>
+      <text class="d-text small" x="452" y="150" text-anchor="middle">逐 token 生成</text>
       <line class="d-line" x1="512" y1="134" x2="560" y2="134" marker-end="url(#pnp-arr)"/>
       <rect class="d-box good" x="566" y="104" width="104" height="60" rx="8"/>
-      <text class="d-text bold" x="618" y="130" text-anchor="middle">Answer</text>
-      <text class="d-text small" x="618" y="150" text-anchor="middle">with citations</text>
+      <text class="d-text bold" x="618" y="130" text-anchor="middle">答案</text>
+      <text class="d-text small" x="618" y="150" text-anchor="middle">附带引用</text>
     </svg>
   </div>
-  <figcaption>Two sources of knowledge meet in the prompt. Retrieval-augmented generation deliberately leans on the lower path for facts, and uses the upper path for language, reasoning and general background.</figcaption>
+  <figcaption>两种知识来源在提示词中汇合。检索增强生成有意依靠下面这条路径获取事实，而用上面这条路径提供语言能力、推理能力和一般背景知识。</figcaption>
 </figure>
 
-<h3>Three things the weights cannot give you</h3>
+<h3>权重给不了你的三样东西</h3>
 <ul>
-  <li><strong>Anything after the knowledge cutoff.</strong> Training data stops at some date. The Kestrel leadership change happened in March 2026; a model trained before that would, at best, name Jonas Vehl.</li>
-  <li><strong>Private data.</strong> Kestrel's confidential board memo about the sonar supply disruption was never on the public web. No model has it in its weights, however large.</li>
-  <li><strong>Provenance.</strong> Even when the weights hold a fact, the model cannot point to the document it came from. In most business settings an answer without a source is not usable.</li>
+  <li><strong>知识截止日期之后的任何信息。</strong>训练数据截止于某个日期。Kestrel 的领导层变动发生在 2026 年 3 月，在此之前训练的模型，最好的情况也只能说出 Jonas Vehl。</li>
+  <li><strong>私有数据。</strong>Kestrel 关于声呐供应中断的机密董事会备忘录从未出现在公开网络上。无论模型多大，它的权重里都不会有这份备忘录。</li>
+  <li><strong>来源（provenance）。</strong>即便权重中确实存有某个事实，模型也无法指出它来自哪份文档。在大多数业务场景中，没有来源的答案是没法用的。</li>
 </ul>
 
 <div class="callout example">
-  <span class="callout-title">The Kestrel test</span>
-  <p>The running example is fictional so that parametric knowledge cannot help. When a model answers a Kestrel question correctly in this course, it is because your retrieval put the evidence in front of it. When it answers incorrectly, you can trace the failure to what was or was not retrieved.</p>
+  <span class="callout-title">Kestrel 测试</span>
+  <p>贯穿示例之所以是虚构的，就是为了让参数化知识帮不上忙。在本课程中，模型答对一个 Kestrel 问题，是因为你的检索把证据摆到了它面前；答错时，你可以沿着“检索到了什么、没检索到什么”去追查原因。</p>
 </div>
 
-<h2>Hallucination and grounding</h2>
-<p>A <strong>hallucination</strong> is generated content that is fluent but not supported by the source or by reality. The survey by Ji et al. distinguishes <em>intrinsic</em> hallucinations, which contradict the provided source, from <em>extrinsic</em> ones, which add claims the source cannot verify. Both matter for RAG:</p>
+<h2>幻觉与事实依据</h2>
+<p><strong>幻觉</strong>（hallucination）是指生成的内容读起来流畅，却得不到来源或现实的支持。Ji 等人的综述区分了两类幻觉：<em>内在</em>幻觉与给定来源相矛盾，<em>外在</em>幻觉则添加了来源无法验证的说法。两者对 RAG 都很重要：</p>
 <ul>
-  <li><strong>Extrinsic</strong>: the context mentions that Kestrel lost its sonar supplier, and the model adds “because Deepcast went bankrupt”. Nothing in the context says that. The real reason, Marlow Dynamics' acquisition of Deepcast, is in a different document.</li>
-  <li><strong>Intrinsic</strong>: the context says Brightwater Capital led a $12 million Series A, and the answer says $40 million, mixing it up with the Series B figure from another sentence.</li>
+  <li><strong>外在幻觉</strong>：上下文提到 Kestrel 失去了声呐供应商，模型却补上一句“因为 Deepcast 破产了”。上下文里根本没有这个说法。真正的原因是 Marlow Dynamics 收购了 Deepcast，而这写在另一篇文档里。</li>
+  <li><strong>内在幻觉</strong>：上下文说 Brightwater Capital 领投了 1200 万美元的 A 轮，答案却说是 4000 万美元，把另一句话中的 B 轮金额张冠李戴了。</li>
 </ul>
-<p><strong>Grounding</strong> means constraining the answer to evidence that is present in the prompt and making that link checkable. In practice it has three parts, and you will build all three:</p>
+<p><strong>事实依据</strong>（grounding）指把答案限定在提示词中已有的证据上，并让这种对应关系可以核查。实践中它包含三个部分，你会逐一实现：</p>
 <ol>
-  <li>Put the relevant evidence in the context (retrieval; most of this course).</li>
-  <li>Instruct the model to answer only from that evidence and to say when it does not know.</li>
-  <li>Require citations to evidence ids, so a person or a program can check each claim.</li>
+  <li>把相关证据放进上下文（检索；本课程的大部分内容）。</li>
+  <li>指示模型只依据这些证据作答，不知道时要明说。</li>
+  <li>要求引用证据的 id，让人或程序可以逐条核查每个说法。</li>
 </ol>
-<p>Grounding reduces hallucination; it does not eliminate it. Models still misread context, merge two facts into one, or cite the wrong id. That is why evaluation (<a href="25-evaluation.html">Chapter 25</a>) checks faithfulness as well as correctness.</p>
+<p>事实依据能减少幻觉，但无法消除幻觉。模型仍然会误读上下文、把两条事实混成一条，或者引用错误的 id。因此评估（<a href="25-evaluation.html">第 25 章</a>）既要检查正确性，也要检查忠实度。</p>
 
 <div class="callout warn">
-  <span class="callout-title">Missing evidence is the most common cause</span>
-  <p>When a RAG answer is wrong, the first question to ask is “was the evidence in the context?” If it was not, no prompt wording will fix it. Most of the failures in <a href="03-where-rag-breaks.html">Chapter 3</a> are of this kind, and they are what graph-based retrieval is designed to address.</p>
+  <span class="callout-title">最常见的原因是缺少证据</span>
+  <p>RAG 的答案出错时，首先要问的是：“证据在上下文里吗？”如果不在，提示词怎么改都没用。<a href="03-where-rag-breaks.html">第 3 章</a>中的大多数失败都属于这一类，而基于图的检索正是为解决这类问题而设计的。</p>
 </div>
 
-<h2>Context windows, tokens and cost</h2>
-<p>If the model needs evidence in its prompt, the obvious move is to paste in everything. Whether that works depends on three budgets: the <strong>context window</strong> (the maximum number of tokens a model can take as input plus output), <strong>money</strong> (providers bill per input and output token), and <strong>latency</strong> (the model must process every input token before producing the first output token).</p>
+<h2>上下文窗口、token 与成本</h2>
+<p>既然模型需要提示词里有证据，最直接的做法就是把所有内容都贴进去。这行不行得通取决于三项预算：<strong>上下文窗口</strong>（context window，模型能处理的输入加输出 token 的上限）、<strong>费用</strong>（服务商按输入和输出 token 计费），以及<strong>延迟</strong>（模型必须先处理完所有输入 token，才能产出第一个输出 token）。</p>
 
-<h3>Token math you can do in your head</h3>
-<p>For English prose with common tokenizers, a useful rule of thumb is that one token is about four characters, or about three quarters of a word. <code>minigraphrag</code> uses the same idea when <code>tiktoken</code> is not installed: it estimates 4 tokens for every 3 words.</p>
+<h3>可以心算的 token 估算</h3>
+<p>对于用常见分词器处理的英文文本，一个实用的经验法则是：一个 token 约等于四个字符，或者约四分之三个单词。<code>minigraphrag</code> 在没有安装 <code>tiktoken</code> 时也采用同样的思路：每 3 个单词估算为 4 个 token。</p>
 <table>
-  <thead><tr><th>Item</th><th>Words</th><th>Approximate tokens</th></tr></thead>
+  <thead><tr><th>内容</th><th>单词数</th><th>估算 token 数</th></tr></thead>
   <tbody>
-    <tr><td>A canonical question (“Who supplied Kestrel's sonar in 2024?”)</td><td>6</td><td>8</td></tr>
-    <tr><td>One Kestrel document (the Series B press release)</td><td>453</td><td>≈ 600</td></tr>
-    <tr><td>The whole Kestrel corpus (12 documents)</td><td>5,427</td><td>≈ 7,200</td></tr>
-    <tr><td>A 50,000-document company wiki at 600 tokens per page</td><td>≈ 22.5 million</td><td>≈ 30 million</td></tr>
+    <tr><td>一个典型问题（“Who supplied Kestrel's sonar in 2024?”）</td><td>6</td><td>8</td></tr>
+    <tr><td>一篇 Kestrel 文档（B 轮融资新闻稿）</td><td>453</td><td>≈ 600</td></tr>
+    <tr><td>整个 Kestrel 语料（12 篇文档）</td><td>5,427</td><td>≈ 7,200</td></tr>
+    <tr><td>一个 50,000 篇文档的公司 wiki，每页 600 token</td><td>≈ 2,250 万</td><td>≈ 3,000 万</td></tr>
   </tbody>
 </table>
-<p>The Kestrel corpus fits comfortably in any modern context window. A company wiki does not fit in any of them: current long-context models accept inputs on the order of hundreds of thousands to about a million tokens, which is still 30 times too small for 30 million tokens.</p>
+<p>Kestrel 语料可以轻松放进任何现代模型的上下文窗口，而公司 wiki 放不进任何一个：当前的长上下文模型能接受的输入在几十万到约一百万 token 的量级，面对 3,000 万 token 仍然小了 30 倍。</p>
 
-<h3>What a prompt costs</h3>
-<p>Cost per question is roughly</p>
+<h3>一个提示词要花多少钱</h3>
+<p>每个问题的成本大致为</p>
 <p style="text-align:center">cost = <em>T</em><sub>in</sub> × <em>p</em><sub>in</sub> + <em>T</em><sub>out</sub> × <em>p</em><sub>out</sub></p>
-<p>where <em>T</em> are token counts and <em>p</em> are per-token prices. Output tokens are usually priced several times higher than input tokens, but in RAG the input dominates because the context is long and the answer is short. Prices change constantly, so this course uses an illustrative input price of $3 per million tokens. Plug in your provider's current numbers.</p>
-<p>Stuffing the Kestrel corpus: 7,236 corpus tokens plus about 150 tokens of instructions and question gives about 7,390 input tokens per question. At 1,000 questions a day that is 7.39 million input tokens, about $22 a day. Retrieving five chunks of about 400 tokens each instead gives about 2,150 input tokens per question and about $6.45 a day. For a 12-document corpus both numbers are small. The gap is what grows: the stuffed prompt scales with the corpus, the retrieved prompt scales with <em>k</em>.</p>
+<p>其中 <em>T</em> 是 token 数，<em>p</em> 是每个 token 的单价。输出 token 的单价通常是输入 token 的数倍，但在 RAG 中输入占大头，因为上下文长而答案短。价格变化频繁，所以本课程统一采用每百万 token $3 的示意性输入价格，请代入你所用服务商的当前价格。</p>
+<p>把 Kestrel 语料全部塞进去：7,236 个语料 token，加上约 150 个用于指令和问题的 token，每个问题约 7,390 个输入 token。每天 1,000 个问题就是 739 万输入 token，每天约 $22。如果改为检索五个各约 400 token 的分块，每个问题约 2,150 个输入 token，每天约 $6.45。对只有 12 篇文档的语料来说，这两个数字都不大。真正会增长的是两者的差距：塞入全部语料的提示词随语料规模增长，检索得到的提示词只随 <em>k</em> 增长。</p>
 
 <div class="viz" data-viz="ch01-cost">
 <script type="application/json">
 {
-  "title": "Stuff everything or retrieve?",
-  "subtitle": "Drag the sliders; prices are illustrative",
+  "title": "全部塞入，还是检索？",
+  "subtitle": "拖动滑块试试；价格仅作示意",
   "window": 1000000,
   "retrieved": 2000,
   "overhead": 150
@@ -167,105 +167,105 @@
 </script>
 </div>
 
-<p>Two more costs do not show up on the invoice. <strong>Latency</strong>: the model processes the whole prompt before the first answer token, so time-to-first-token grows with prompt length. In a standard transformer, self-attention compares every token with every other token, so that prefill compute grows faster than linearly with length. <strong>Prompt caching</strong>, which most providers now offer, cuts the price and latency of a repeated prompt prefix. It helps when the same long corpus prefix is reused across many questions, and it does nothing when every question needs different documents.</p>
+<p>还有两项成本不会出现在账单上。<strong>延迟</strong>：模型要先处理完整个提示词，才会输出第一个答案 token，所以首 token 时间随提示词长度增长。在标准 transformer 中，自注意力要把每个 token 与其他每个 token 做比较，因此预填充（prefill）的计算量随长度超线性增长。<strong>提示词缓存</strong>（prompt caching）如今大多数服务商都提供，它能降低重复提示词前缀的费用和延迟。当同一段很长的语料前缀在大量问题之间复用时，它很有帮助；而当每个问题需要的文档都不同时，它就无能为力了。</p>
 
-<h3>Budgeting the window</h3>
-<p>Even when you retrieve, the context window is a shared budget. Instructions, conversation history, retrieved evidence, the question and room for the answer all compete for it. Every GraphRAG method in this course ends with a budgeting step that decides how many tokens each kind of evidence gets. <a href="14-local-search.html">Local search</a>, for example, splits its budget between text chunks, community reports and entity and relationship tables.</p>
+<h3>为窗口做预算</h3>
+<p>即使采用检索，上下文窗口仍是一份共享的预算。指令、对话历史、检索到的证据、问题以及留给答案的空间，都要争夺这份预算。本课程中的每种 GraphRAG 方法，最后都有一个预算分配步骤，决定每类证据能分到多少 token。以<a href="14-local-search.html">局部搜索</a>为例，它把预算分给文本分块、社区报告，以及实体表和关系表。</p>
 
 <div class="viz" data-viz="token-budget">
 <script type="application/json">
 {
-  "title": "An 8,000-token RAG prompt",
+  "title": "一个 8,000 token 的 RAG 提示词",
   "total": 8000,
   "parts": [
-    {"label": "Instructions", "share": 0.05},
-    {"label": "History", "share": 0.12},
-    {"label": "Evidence", "share": 0.6},
-    {"label": "Question", "share": 0.03},
-    {"label": "Answer room", "share": 0.2}
+    {"label": "指令", "share": 0.05},
+    {"label": "对话历史", "share": 0.12},
+    {"label": "证据", "share": 0.6},
+    {"label": "问题", "share": 0.03},
+    {"label": "答案空间", "share": 0.2}
   ],
-  "note": "Give evidence more room and something else must shrink. Leaving too little answer room truncates the output mid-sentence."
+  "note": "给证据更多空间，其他部分就得缩小。留给答案的空间太少，输出就会在半句话处被截断。"
 }
 </script>
 </div>
 
-<h2>More context is not always better: lost in the middle</h2>
-<p>Suppose money were no object and your corpus fit in the window. Pasting everything in would still not reliably give the best answers. Liu et al. (“Lost in the Middle”, 2023) placed the one document that contained the answer at different positions among many distractor documents. Models did best when the relevant document was at the beginning or the end of the context, and noticeably worse when it sat in the middle, producing a U-shaped curve. Adding more distractor documents also tended to hurt.</p>
+<h2>上下文并非越多越好：中间迷失</h2>
+<p>假设不差钱，语料也放得进窗口，把所有内容一股脑贴进去，依然不能稳定地得到最好的答案。Liu 等人（“Lost in the Middle”，2023）把唯一包含答案的文档放在大量干扰文档中的不同位置。当相关文档位于上下文开头或末尾时，模型表现最好；位于中间时则明显变差，形成一条 U 形曲线。增加干扰文档的数量通常也会带来负面影响。</p>
 
 <figure>
   <div class="diagram">
     <svg viewBox="0 0 680 250" role="img" aria-labelledby="litm-title">
-      <title id="litm-title">Illustrative U-shaped curve: accuracy is highest when evidence is at the start or end of the context and lowest in the middle</title>
+      <title id="litm-title">示意性的 U 形曲线：证据位于上下文开头或末尾时准确率最高，位于中间时最低</title>
       <line class="d-line" x1="80" y1="30" x2="80" y2="190"/>
       <line class="d-line" x1="80" y1="190" x2="620" y2="190"/>
       <path class="d-line hot" d="M100,62 C220,150 300,166 350,166 C400,166 500,150 600,82"/>
       <circle class="d-node warm" cx="100" cy="62" r="6"/>
       <circle class="d-node warm" cx="350" cy="166" r="6"/>
       <circle class="d-node warm" cx="600" cy="82" r="6"/>
-      <text class="d-text small" x="112" y="56">evidence first: best</text>
-      <text class="d-text small" x="350" y="128" text-anchor="middle">evidence in the middle: worst</text>
-      <text class="d-text small" x="588" y="72" text-anchor="end">evidence last: good</text>
-      <text class="d-text small" x="70" y="40" text-anchor="end">higher</text>
-      <text class="d-text small" x="70" y="186" text-anchor="end">lower</text>
-      <text class="d-text small" x="24" y="115" transform="rotate(-90 24 115)" text-anchor="middle">answer accuracy</text>
-      <text class="d-text small" x="100" y="210" text-anchor="middle">start</text>
-      <text class="d-text small" x="600" y="210" text-anchor="middle">end</text>
-      <text class="d-text small" x="350" y="210" text-anchor="middle">position of the relevant document in the context</text>
-      <text class="d-text small" x="350" y="236" text-anchor="middle">Qualitative shape only. See Liu et al. for measured curves per model.</text>
+      <text class="d-text small" x="112" y="56">证据在开头：最好</text>
+      <text class="d-text small" x="350" y="128" text-anchor="middle">证据在中间：最差</text>
+      <text class="d-text small" x="588" y="72" text-anchor="end">证据在末尾：较好</text>
+      <text class="d-text small" x="70" y="40" text-anchor="end">较高</text>
+      <text class="d-text small" x="70" y="186" text-anchor="end">较低</text>
+      <text class="d-text small" x="24" y="115" transform="rotate(-90 24 115)" text-anchor="middle">回答准确率</text>
+      <text class="d-text small" x="100" y="210" text-anchor="middle">开头</text>
+      <text class="d-text small" x="600" y="210" text-anchor="middle">末尾</text>
+      <text class="d-text small" x="350" y="210" text-anchor="middle">相关文档在上下文中的位置</text>
+      <text class="d-text small" x="350" y="236" text-anchor="middle">仅示意定性形状。各模型的实测曲线见 Liu 等人的论文。</text>
     </svg>
   </div>
-  <figcaption>The shape reported by Liu et al.: evidence at the edges of a long context is used more reliably than evidence in the middle. How deep the dip is varies by model and has not been measured for every model you might use, so treat it as a risk to test for: fewer, better-ordered documents are the safer default.</figcaption>
+  <figcaption>Liu 等人报告的曲线形状：在长上下文中，位于两端的证据比位于中间的证据更能被可靠地利用。凹陷有多深因模型而异，而且并非你可能用到的每个模型都测过，所以请把它当作一项需要测试的风险：更少、排序更好的文档是更稳妥的默认做法。</figcaption>
 </figure>
 
-<p>Three practical consequences follow, and they recur throughout the course:</p>
+<p>由此可以得出三条实践结论，它们会在整门课程中反复出现：</p>
 <ul>
-  <li><strong>Rank, then order.</strong> Put the strongest evidence first (or first and last), not in retrieval-index order.</li>
-  <li><strong>Precision matters.</strong> A retriever that returns the answer plus forty distractors can do worse than one that returns the answer plus four.</li>
-  <li><strong>Structure helps.</strong> Tables with ids, short summaries and explicit relationships, which GraphRAG produces, are easier for a model to use than a wall of raw chunks.</li>
+  <li><strong>先排名，再排序。</strong>把最有力的证据放在最前面（或者首尾两端），而不是按检索索引中的顺序排列。</li>
+  <li><strong>精确度很重要。</strong>返回答案外加四十条干扰内容的检索器，效果可能不如返回答案外加四条干扰内容的检索器。</li>
+  <li><strong>结构有帮助。</strong>带 id 的表格、简短的摘要和显式的关系，正是 GraphRAG 产出的东西，它们比一大堆原始分块更便于模型利用。</li>
 </ul>
 
 <div class="callout paper">
   <span class="callout-title">Liu et al., Lost in the Middle (2023)</span>
-  <p>Using multi-document question answering and a synthetic key-value retrieval task, the authors found that performance was highest when relevant information appeared at the start or end of the input and degraded when it appeared in the middle, including for models built for long contexts. The effect motivates careful ordering and aggressive filtering of retrieved context.</p>
+  <p>作者使用多文档问答和一个合成的键值检索任务进行实验，发现当相关信息出现在输入的开头或末尾时性能最高，出现在中间时性能下降，专为长上下文构建的模型也不例外。这一效应促使我们认真安排检索结果的顺序，并大力过滤检索到的上下文。</p>
 </div>
 
-<h2>Retrieve, then generate</h2>
-<p>The pattern that fixes the knowledge problem without paying for the whole corpus on every question is <strong>retrieval-augmented generation</strong> (RAG). Lewis et al. introduced the name in 2020: a neural retriever (Dense Passage Retrieval over Wikipedia) selects passages for a question, and a sequence-to-sequence generator (BART) conditions on them to write the answer. They trained the retriever's query encoder and the generator together, and showed strong results on open-domain question answering and more specific, more factual generations than a comparable model without retrieval. The same year, REALM (Guu et al.) built retrieval into language model pre-training.</p>
-<p>Modern RAG systems rarely train anything end to end. They keep the idea and swap the parts: an off-the-shelf embedding model, a vector index, and a general-purpose LLM steered by a prompt. The loop is retrieve, augment, generate, with an optional check at the end.</p>
+<h2>先检索，后生成</h2>
+<p>既能解决知识问题、又不必为每个问题都支付整个语料的费用，这种模式就是<strong>检索增强生成</strong>（retrieval-augmented generation，RAG）。Lewis 等人在 2020 年提出了这个名称：由一个神经检索器（在 Wikipedia 上运行的 Dense Passage Retrieval）为问题挑选段落，再由一个序列到序列生成器（BART）以这些段落为条件写出答案。他们联合训练了检索器的查询编码器和生成器，在开放域问答上取得了很好的结果，并且与不带检索的同类模型相比，生成的内容更具体、更符合事实。同一年，REALM（Guu 等人）把检索引入了语言模型的预训练。</p>
+<p>现代 RAG 系统很少做端到端训练。它们保留了这个思路，但换掉了组件：现成的嵌入模型、一个向量索引，以及一个由提示词引导的通用 LLM。整个循环是检索、增强、生成，最后还可以加一步校验。</p>
 
 <div class="viz" data-viz="flow">
 <script type="application/json">
 {
-  "title": "Retrieve, augment, generate",
+  "title": "检索、增强、生成",
   "perRow": 3,
   "stages": [
-    {"label": "Question", "detail": "“Who supplied Kestrel's sonar in 2024?” arrives from the user."},
-    {"label": "Retrieve", "detail": "Search an index built ahead of time over the corpus. Return the k most relevant pieces with their ids: for example the Deepcast supply agreement and the board memo."},
-    {"label": "Augment", "detail": "Assemble a prompt: instructions to answer only from the sources and cite them, the sources with their ids, then the question. Respect the token budget."},
-    {"label": "Generate", "detail": "The LLM writes the answer, citing source ids: “Deepcast supplied every sonar module from 2022 [Data: Sources (08_kestrel_board_memo_supply-000)].”"},
-    {"label": "Check", "detail": "Optional but valuable: verify that every cited id was in the context and that the answer does not assert facts the sources lack."}
+    {"label": "问题", "detail": "用户提出问题：“2024 年 Kestrel 的声呐由谁供货？”"},
+    {"label": "检索", "detail": "在预先为语料建好的索引中搜索，返回最相关的 k 条内容及其 id，例如 Deepcast 供货协议和董事会备忘录。"},
+    {"label": "增强", "detail": "组装提示词：先是指令（只依据来源作答并给出引用），然后是带 id 的来源，最后是问题。注意不要超出 token 预算。"},
+    {"label": "生成", "detail": "LLM 写出答案并引用来源 id：“自 2022 年起，Kestrel 的每个声呐模块都由 Deepcast 供货 [Data: Sources (08_kestrel_board_memo_supply-000)]。”"},
+    {"label": "校验", "detail": "可选但很有价值：确认每个被引用的 id 都在上下文中，并且答案没有断言来源中不存在的事实。"}
   ]
 }
 </script>
 </div>
 
-<p>What goes in the “Retrieve” box is the subject of the rest of this course. <a href="02-vector-rag.html">Chapter 2</a> builds the classic version: chunks, embeddings, nearest-neighbor search. <a href="03-where-rag-breaks.html">Chapter 3</a> shows the questions it cannot answer. Parts 2 and 3 replace the box with a knowledge graph, community summaries and graph traversal.</p>
+<p>“检索”这个框里装什么，是本课程其余部分的主题。<a href="02-vector-rag.html">第 2 章</a>构建经典版本：分块、嵌入、最近邻搜索。<a href="03-where-rag-breaks.html">第 3 章</a>展示它回答不了的问题。第 2、3 部分则用知识图谱、社区摘要和图遍历来替换这个框。</p>
 
-<h3>Calling an LLM through minigraphrag</h3>
-<p>Everything in <code>minigraphrag</code> talks to language models through one method. That is the whole interface:</p>
+<h3>通过 minigraphrag 调用 LLM</h3>
+<p><code>minigraphrag</code> 中的一切都通过同一个方法与语言模型交互。整个接口就这么多：</p>
 
 <pre data-file="minigraphrag/llm.py"><code class="language-python">from typing import Protocol
 
 class LLM(Protocol):
     def complete(self, prompt: str, system: str | None = None, json: bool = False) -&gt; str: ...</code></pre>
 
-<p>Any object with that method works: <code>OpenAICompatibleLLM</code> (OpenAI, Ollama, vLLM and other OpenAI-compatible servers), <code>AnthropicLLM</code>, <code>MockLLM</code> for offline runs, and <code>CachedLLM</code>, which wraps any of them with a disk cache. <code>get_llm</code> builds one from a short name and environment variables.</p>
+<p>任何实现了这个方法的对象都可以使用：<code>OpenAICompatibleLLM</code>（OpenAI、Ollama、vLLM 以及其他兼容 OpenAI 的服务）、<code>AnthropicLLM</code>、用于离线运行的 <code>MockLLM</code>，以及可以给其中任何一个加上磁盘缓存的 <code>CachedLLM</code>。<code>get_llm</code> 根据一个简短的名称和环境变量构建相应的对象。</p>
 
 <pre data-file="examples/ch01_call_llm.py"><code class="language-python">import os
 from minigraphrag.llm import get_llm
 
-# "mock" runs offline. Set OPENAI_API_KEY and use "openai", ANTHROPIC_API_KEY and
-# "anthropic", or run Ollama locally and use "ollama" (OLLAMA_MODEL picks the model).
+# "mock" 离线运行。设置 OPENAI_API_KEY 后使用 "openai"，设置 ANTHROPIC_API_KEY 后使用
+# "anthropic"，或者在本地运行 Ollama 并使用 "ollama"（由 OLLAMA_MODEL 指定模型）。
 llm = get_llm(os.getenv("LLM", "mock"), cache_dir=".cache/llm")
 
 closed_book = llm.complete(
@@ -274,24 +274,24 @@ closed_book = llm.complete(
 )
 print(closed_book)</code></pre>
 
-<p>With a real model, the closed-book answer should be some form of “I don't know”, or a made-up name. With <code>MockLLM</code> you will see <code>OK</code>: the mock recognizes each of the course's prompt templates by a marker sentence and returns a deterministic answer for it, and a free-form prompt matches none of them. That is intentional. The mock has no world knowledge to fall back on, so everything it says in later chapters comes from context you retrieved.</p>
+<p>使用真实模型时，闭卷回答应该是某种形式的“我不知道”，或者一个编造的名字。使用 <code>MockLLM</code> 时你会看到 <code>OK</code>：模拟 LLM 通过一句标记语识别课程中的每个提示词模板，并为其返回确定性的答案，而自由格式的提示词匹配不到任何模板。这是有意为之。模拟 LLM 没有任何世界知识可以依赖，所以它在后续章节中说的一切，都来自你检索到的上下文。</p>
 
-<h3>Counting tokens</h3>
+<h3>统计 token</h3>
 <pre data-file="examples/ch01_tokens.py"><code class="language-python">from minigraphrag.chunking import load_documents
 from minigraphrag.tokens import count_tokens
 
-docs = load_documents("data/corpus")                 # {doc_id: text}, 12 documents
+docs = load_documents("data/corpus")                 # {doc_id: text}，共 12 篇文档
 per_doc = {doc_id: count_tokens(text) for doc_id, text in docs.items()}
 total = sum(per_doc.values())
 
 for doc_id, n in sorted(per_doc.items(), key=lambda kv: -kv[1])[:3]:
     print(f"{doc_id:40s} {n:5d}")
-print("corpus total:", total)                         # about 7,200 with the 4/3 estimate</code></pre>
+print("corpus total:", total)                         # 按 4/3 估算约为 7,200</code></pre>
 
-<p><code>count_tokens</code> uses <code>tiktoken</code>'s <code>cl100k_base</code> encoding when it is installed (<code>pip install -e ".[tokens]"</code>) and falls back to the 4-tokens-per-3-words estimate otherwise. Expect the two to differ by a few percent; the estimate exists for budgeting, and no budget in this course is tight enough for that to matter. Different providers use different tokenizers, so treat any count as an estimate and leave headroom.</p>
+<p>如果安装了 <code>tiktoken</code>（<code>pip install -e ".[tokens]"</code>），<code>count_tokens</code> 会使用它的 <code>cl100k_base</code> 编码，否则退回到每 3 个单词 4 个 token 的估算。两者通常相差几个百分点；这个估算只是为了做预算，而本课程中没有哪项预算紧张到需要在意这点差异。不同服务商使用不同的分词器，所以任何计数都只能当作估算，并留出余量。</p>
 
-<h3>A “stuff the whole corpus” baseline</h3>
-<p>Before building retrieval, build the thing retrieval must beat. The baseline below puts every document into the same grounded prompt that later search methods use, as a table of sources with ids, and refuses to run when the prompt would not fit.</p>
+<h3>“把整个语料塞进去”的基线</h3>
+<p>在构建检索之前，先把检索需要超越的东西做出来。下面的基线把每篇文档都放进后续检索方法所用的同一个有事实依据的提示词中，以带 id 的来源表格形式呈现；如果提示词放不下，就拒绝运行。</p>
 
 <pre data-file="examples/ch01_stuffed_baseline.py"><code class="language-python">from minigraphrag.chunking import load_documents
 from minigraphrag.context import format_table
@@ -309,8 +309,8 @@ def stuffed_answer(llm, docs: dict[str, str], question: str,
     n = count_tokens(context)
     if n &gt; max_context_tokens:
         raise ContextTooLarge(f"{n} tokens &gt; budget {max_context_tokens}; you need retrieval")
-    answer = generate_answer(llm, question, context)          # context goes in the system prompt
-    cost = n / 1_000_000 * price_per_million                  # input side only, illustrative price
+    answer = generate_answer(llm, question, context)          # 上下文放在系统提示词中
+    cost = n / 1_000_000 * price_per_million                  # 只计算输入部分，价格仅作示意
     return answer, n, cost
 
 docs = load_documents("data/corpus")
@@ -319,56 +319,56 @@ answer, n, cost = stuffed_answer(llm, docs, "Who supplied Kestrel's sonar in 202
 print(f"{n} context tokens, about ${cost:.4f} per question")
 print(answer)</code></pre>
 
-<p><code>generate_answer</code> formats <code>LOCAL_SEARCH_SYSTEM_PROMPT</code> from <code>minigraphrag/prompts.py</code>. It tells the model to answer from the data tables, say when it does not know, and cite records as <code>[Data: Sources (id)]</code>. The mock answers by picking sentences that overlap the question and citing their rows, so the output is extractive but has the same citation format a real model will use.</p>
+<p><code>generate_answer</code> 会用 <code>minigraphrag/prompts.py</code> 中的 <code>LOCAL_SEARCH_SYSTEM_PROMPT</code> 组装提示词。这个提示词要求模型依据数据表作答，不知道时要明说，并以 <code>[Data: Sources (id)]</code> 的格式引用记录。模拟 LLM 的做法是挑出与问题有重叠的句子并引用其所在的行，所以输出是抽取式的，但引用格式与真实模型会用的完全一致。</p>
 
 <div class="callout tip">
-  <span class="callout-title">Keep the baseline around</span>
-  <p>For a corpus this small, a strong model with the whole corpus in context is a hard baseline to beat on many questions. That is useful information, not an embarrassment. Every later chapter compares against it, and <a href="c1-minigraphrag.html">Capstone 1</a> asks you to show where GraphRAG wins and at what cost.</p>
+  <span class="callout-title">保留这个基线</span>
+  <p>对这么小的语料来说，把整个语料放进上下文的强模型，在许多问题上都是很难超越的基线。这是有用的信息，而不是什么难堪的事。后面每一章都会与它比较，<a href="c1-minigraphrag.html">综合项目 1</a> 还会要求你说明 GraphRAG 在哪些地方胜出、代价是什么。</p>
 </div>
 
-<h2>Long context or retrieval?</h2>
-<p>Context windows grew dramatically between 2023 and 2026, and every increase prompted the question “is RAG dead?” The answer so far has been that the two are complementary. Xu et al. (2023) compared the approaches directly and found that a model with a 4K window plus simple retrieval could perform comparably to a version fine-tuned for a 16K window, and that retrieval also improved the long-context model. The trade-offs are practical:</p>
+<h2>长上下文还是检索？</h2>
+<p>2023 年到 2026 年间，上下文窗口大幅增长，每次增长都会引出同一个问题：“RAG 已死？”到目前为止的答案是：两者互为补充。Xu 等人（2023）直接比较了这两种方法，发现 4K 窗口的模型加上简单的检索，表现可以与微调到 16K 窗口的版本相当，而且检索同样能提升长上下文模型的表现。实际的取舍如下：</p>
 
 <table>
-  <thead><tr><th>Concern</th><th>Stuff everything into a long context</th><th>Retrieve, then generate</th></tr></thead>
+  <thead><tr><th>考量</th><th>全部塞进长上下文</th><th>先检索，后生成</th></tr></thead>
   <tbody>
-    <tr><td>Corpus size</td><td>Must fit in the window; hard ceiling</td><td>Unbounded; the index grows, the prompt does not</td></tr>
-    <tr><td>Cost per question</td><td>Grows with the corpus (prompt caching helps for a fixed corpus)</td><td>Grows with <em>k</em> and chunk size</td></tr>
-    <tr><td>Latency</td><td>Long prefill on every uncached call</td><td>Retrieval step plus a short prompt</td></tr>
-    <tr><td>Recall</td><td>Everything is present, though the model may not use it (lost in the middle)</td><td>Only what the retriever finds; misses are silent</td></tr>
-    <tr><td>Cross-document reasoning</td><td>Possible in principle, since all documents are visible</td><td>Only across what was retrieved together</td></tr>
-    <tr><td>Freshness and access control</td><td>Rebuild the prompt; hard to filter per user</td><td>Update the index; filter results per user</td></tr>
-    <tr><td>Citations</td><td>Possible, with ids on every document</td><td>Natural: every retrieved piece has an id</td></tr>
-    <tr><td>Engineering effort</td><td>Minimal</td><td>Chunking, embeddings, index, tuning, evaluation</td></tr>
+    <tr><td>语料规模</td><td>必须放得进窗口；有硬性上限</td><td>没有上限；增长的是索引，而不是提示词</td></tr>
+    <tr><td>每个问题的成本</td><td>随语料增长（语料固定时，提示词缓存有帮助）</td><td>随 <em>k</em> 和分块大小增长</td></tr>
+    <tr><td>延迟</td><td>每次未命中缓存的调用都要经历很长的预填充</td><td>一次检索加一个短提示词</td></tr>
+    <tr><td>召回</td><td>所有内容都在，但模型未必用得上（中间迷失）</td><td>只有检索器找到的内容；遗漏时悄无声息</td></tr>
+    <tr><td>跨文档推理</td><td>原则上可行，因为所有文档都可见</td><td>只能在一同检索到的内容之间进行</td></tr>
+    <tr><td>时效性与访问控制</td><td>需要重建提示词；难以按用户过滤</td><td>更新索引即可；可按用户过滤结果</td></tr>
+    <tr><td>引用</td><td>可行，前提是每篇文档都带 id</td><td>天然支持：每条检索结果都有 id</td></tr>
+    <tr><td>工程投入</td><td>极少</td><td>分块、嵌入、索引、调优、评估</td></tr>
   </tbody>
 </table>
 
-<p>A reasonable rule in 2026: if your corpus fits well within the window, changes rarely, serves few questions and does not need per-user filtering, try long context first and measure. Otherwise retrieve. Most real systems do both: retrieve to narrow down, then use a generous context for the survivors.</p>
+<p>2026 年一条合理的经验法则是：如果你的语料远小于窗口、很少变化、需要回答的问题不多，而且不需要按用户过滤，就先试试长上下文，并做好度量；否则就用检索。大多数真实系统两者兼用：先用检索缩小范围，再为筛选出的内容提供宽裕的上下文。</p>
 
 <div class="callout note">
-  <span class="callout-title">Where graphs come in</span>
-  <p>Retrieval's weakness sits in the row labeled “cross-document reasoning”. A retriever that scores chunks one at a time cannot see that the chunk about Deepcast's acquisition explains the chunk about Project Tern. GraphRAG keeps the retrieve-then-generate loop and changes what is indexed and retrieved: entities, relationships, paths and community summaries instead of isolated chunks.</p>
+  <span class="callout-title">图在哪里发挥作用</span>
+  <p>检索的弱点就在“跨文档推理”这一行。一次只给一个分块打分的检索器，无法看出讲 Deepcast 被收购的分块能解释讲 Project Tern 的分块。GraphRAG 保留了“先检索、后生成”的循环，改变的是索引和检索的对象：不再是孤立的分块，而是实体、关系、路径和社区摘要。</p>
 </div>
 
-<h2>Exercises</h2>
+<h2>练习</h2>
 
 <section class="exercise" data-level="warmup">
-  <h4>Exercise 1.1 <span class="level">Warm-up</span></h4>
-  <p>By hand, using 4 tokens per 3 words and an input price of $3 per million tokens: (a) estimate the input tokens and daily input cost of answering 1,000 questions a day by stuffing the 5,427-word Kestrel corpus plus 150 tokens of instructions and question; (b) do the same for retrieving five chunks of 300 words each plus the same 150 tokens; (c) repeat (a) for a 50,000-document wiki with 600 tokens per document, and say whether it fits in a 1,000,000-token window.</p>
+  <h4>练习 1.1 <span class="level">热身</span></h4>
+  <p>按每 3 个单词 4 个 token、输入价格每百万 token $3 手工计算：(a) 每天回答 1,000 个问题，每次都塞入 5,427 个单词的 Kestrel 语料，外加 150 个用于指令和问题的 token，估算每个问题的输入 token 数和每天的输入成本；(b) 改为检索五个各 300 个单词的分块，外加同样的 150 个 token，再算一遍；(c) 对一个 50,000 篇文档、每篇 600 token 的 wiki 重复 (a)，并判断它能否放进 1,000,000 token 的窗口。</p>
   <details class="answer">
-    <summary>Show answer</summary>
-    <p>(a) 5,427 × 4/3 = 7,236 tokens. Plus 150 gives 7,386 tokens per question. Per day: 7,386 × 1,000 = 7.386 million tokens, times $3 = <strong>$22.16 a day</strong>.</p>
-    <p>(b) Five chunks of 300 words = 1,500 words = 2,000 tokens. Plus 150 gives 2,150 tokens per question, 2.15 million a day, <strong>$6.45 a day</strong>. That is about 3.4 times cheaper.</p>
-    <p>(c) 50,000 × 600 = 30,000,000 tokens per question. It does not fit in a 1,000,000-token window: it is 30 times too large. Even if it did, one question would cost 30 × $3 = $90 in input alone, and 1,000 a day would cost $90,000. Retrieval (b) stays at $6.45 a day regardless of corpus size, as long as <em>k</em> and chunk size stay fixed.</p>
+    <summary>查看解答</summary>
+    <p>(a) 5,427 × 4/3 = 7,236 个 token。加上 150，每个问题 7,386 个 token。每天：7,386 × 1,000 = 738.6 万个 token，按每百万 $3 计算，<strong>每天 $22.16</strong>。</p>
+    <p>(b) 五个 300 单词的分块 = 1,500 个单词 = 2,000 个 token。加上 150，每个问题 2,150 个 token，每天 215 万个，<strong>每天 $6.45</strong>，成本约为 (a) 的 1/3.4。</p>
+    <p>(c) 50,000 × 600 = 每个问题 30,000,000 个 token。它放不进 1,000,000 token 的窗口，超出了 30 倍。即使放得下，一个问题仅输入部分就要 30 × $3 = $90，每天 1,000 个问题就是 $90,000。只要 <em>k</em> 和分块大小不变，无论语料多大，检索方案 (b) 都保持在每天 $6.45。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="core">
-  <h4>Exercise 1.2 <span class="level">Core</span></h4>
-  <p>Answers that cite sources are only checkable if the citations are real. Write <code>check_citations(answer: str, context: str) -&gt; dict</code> that extracts every id cited as <code>[Data: Sources (a, b)]</code> in the answer, compares them to the ids present in the <code>Sources</code> table of the context, and returns the cited ids, the ids that do not exist in the context, and whether the answer cites anything at all. Test it on the output of the stuffed baseline.</p>
-  <details class="hint"><summary>Hint</summary><p><code>minigraphrag.context.parse_tables</code> turns the context back into <code>{"Sources": [{"id": ..., "text": ...}]}</code>. A single <code>[Data: ...]</code> block can cite several datasets separated by semicolons.</p></details>
+  <h4>练习 1.2 <span class="level">核心</span></h4>
+  <p>只有引用真实存在，带引用的答案才可核查。编写 <code>check_citations(answer: str, context: str) -&gt; dict</code>：提取答案中以 <code>[Data: Sources (a, b)]</code> 形式引用的所有 id，将它们与上下文 <code>Sources</code> 表中出现的 id 比较，返回被引用的 id、上下文中不存在的 id，以及答案是否引用了任何内容。用塞入全部语料的基线的输出测试它。</p>
+  <details class="hint"><summary>提示</summary><p><code>minigraphrag.context.parse_tables</code> 可以把上下文还原为 <code>{"Sources": [{"id": ..., "text": ...}]}</code>。一个 <code>[Data: ...]</code> 块中可以用分号分隔、引用多个数据集。</p></details>
   <details class="answer">
-    <summary>Show answer</summary>
+    <summary>查看解答</summary>
     <pre><code class="language-python">import re
 from minigraphrag.context import parse_tables
 
@@ -389,43 +389,43 @@ def check_citations(answer: str, context: str) -&gt; dict:
         "has_citations": bool(cited),
     }
 
-# Tests
+# 测试
 ctx = "-----Sources-----\nid|text\n03_deepcast_supply_agreement|Deepcast signs...\n08_kestrel_board_memo_supply|Memo..."
 ok = "Deepcast supplied Kestrel. [Data: Sources (03_deepcast_supply_agreement, 08_kestrel_board_memo_supply)]"
 bad = "Deepcast supplied Kestrel. [Data: Sources (99_made_up)]"
 assert check_citations(ok, ctx)["unknown"] == []
 assert check_citations(bad, ctx)["unknown"] == ["99_made_up"]
 assert check_citations("No citations here.", ctx)["has_citations"] is False</code></pre>
-    <p>Microsoft GraphRAG's prompts let the model write <code>+more</code> when a claim has more sources than it lists; <code>minigraphrag</code>'s prompt does not ask for it, but the parser skips it so the checker works on either output. A check like this catches invented ids cheaply. It cannot tell whether a real cited source actually supports the claim; that needs an entailment check or an LLM judge (Chapter 25).</p>
+    <p>Microsoft GraphRAG 的提示词允许模型在一个说法的来源多于所列出的来源时写上 <code>+more</code>；<code>minigraphrag</code> 的提示词并不要求这样做，但解析器会跳过它，这样检查器对两种输出都适用。这样的检查能以很低的代价发现编造的 id，却无法判断被引用的真实来源是否确实支持该说法；那需要蕴含检查或 LLM 评审（第 25 章）。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="core">
-  <h4>Exercise 1.3 <span class="level">Core</span></h4>
-  <p>For each of the seven canonical questions in the running example, answer: (a) could a general-purpose model answer it closed-book? (b) would the stuffed baseline give it everything it needs? (c) what is the main risk even when the evidence is in the context?</p>
+  <h4>练习 1.3 <span class="level">核心</span></h4>
+  <p>针对贯穿示例中的七个典型问题，逐一回答：(a) 通用模型能否闭卷回答？(b) 塞入全部语料的基线能否提供它所需的全部内容？(c) 即使证据就在上下文中，主要风险是什么？</p>
   <details class="answer">
-    <summary>Show answer</summary>
+    <summary>查看解答</summary>
     <table>
-      <thead><tr><th>Question</th><th>(a) Closed-book</th><th>(b) Stuffed has the evidence</th><th>(c) Main risk with evidence present</th></tr></thead>
+      <thead><tr><th>问题</th><th>(a) 闭卷</th><th>(b) 塞入全部语料后是否有证据</th><th>(c) 证据在场时的主要风险</th></tr></thead>
       <tbody>
-        <tr><td>1. Why did Kestrel start Project Tern?</td><td>No, fictional and private</td><td>Yes (docs 07, 08, 09)</td><td>Stopping at “to reduce supplier dependence” without linking Marlow's acquisition, because the memo never names Marlow</td></tr>
-        <tr><td>2. Which investor's board member oversees the company whose drones detected the bleaching?</td><td>No</td><td>Yes (docs 06, 04, 02)</td><td>Three hops across documents; the research note says “Sentinel program”, not “Kestrel Labs”</td></tr>
-        <tr><td>3. What connects Priya Nair to Deepcast?</td><td>No</td><td>Yes (docs 05, 07, 09, 12)</td><td>Listing facts without the connecting chain; confusing “Priya worked at Marlow” with “Priya worked at Deepcast”</td></tr>
-        <tr><td>4. Main themes</td><td>No</td><td>Yes, all documents</td><td>Over-weighting whatever is first or last in the context; missing a theme buried in the middle</td></tr>
-        <tr><td>5. Risks Kestrel faces</td><td>No</td><td>Yes (docs 03, 07, 08, 12)</td><td>Echoing only the risks listed explicitly in the 2026 interview and missing the single-supplier analysis from 2022</td></tr>
-        <tr><td>6. Who is the CTO?</td><td>No</td><td>Yes (docs 01, 12)</td><td>Stale answer: “Jonas Vehl” appears as CTO in several older documents, “Priya Nair” in one newer one</td></tr>
-        <tr><td>7. Sonar supplier in 2024?</td><td>No</td><td>Yes (docs 03, 08)</td><td>Low: the answer is stated directly. The risk is date reasoning if the model latches onto “no longer available” from 2025</td></tr>
+        <tr><td>1. Kestrel 为什么启动 Project Tern？</td><td>不能，虚构且私有</td><td>有（文档 07、08、09）</td><td>停留在“为了降低对供应商的依赖”，没有关联到 Marlow 的收购，因为备忘录从未提到 Marlow</td></tr>
+        <tr><td>2. 旗下无人机发现白化事件的那家公司，由哪家投资机构的董事会成员监督？</td><td>不能</td><td>有（文档 06、04、02）</td><td>跨文档三跳；研究简报写的是 “Sentinel program”，而不是 “Kestrel Labs”</td></tr>
+        <tr><td>3. Priya Nair 与 Deepcast 之间有什么联系？</td><td>不能</td><td>有（文档 05、07、09、12）</td><td>只罗列事实而没有给出连接链条；把“Priya 曾在 Marlow 工作”混淆成“Priya 曾在 Deepcast 工作”</td></tr>
+        <tr><td>4. 主要主题</td><td>不能</td><td>有，全部文档</td><td>过度看重上下文开头或末尾的内容；遗漏埋在中间的主题</td></tr>
+        <tr><td>5. Kestrel 面临的风险</td><td>不能</td><td>有（文档 03、07、08、12）</td><td>只复述 2026 年访谈中明确列出的风险，遗漏 2022 年的单一供应商分析</td></tr>
+        <tr><td>6. CTO 是谁？</td><td>不能</td><td>有（文档 01、12）</td><td>答案过时：多篇较早的文档称 “Jonas Vehl” 为 CTO，只有一篇较新的文档提到 “Priya Nair”</td></tr>
+        <tr><td>7. 2024 年的声呐供应商？</td><td>不能</td><td>有（文档 03、08）</td><td>风险较低：答案被直接写明。风险在于日期推理，比如模型抓住了 2025 年文档中的 “no longer available”（已无法供货）</td></tr>
       </tbody>
     </table>
-    <p>The pattern: for a small corpus, stuffing solves the <em>presence</em> problem for every question, but not the <em>use</em> problem. Questions 1–3 need chains across documents, 4–5 need synthesis across all of them, and 6–7 need time awareness. Later chapters address those three problems with graphs, community summaries and temporal facts.</p>
+    <p>规律是：对于小语料，塞入全部内容为每个问题解决了<em>证据是否在场</em>的问题，却没有解决<em>证据能否被用好</em>的问题。问题 1–3 需要跨文档的推理链，问题 4–5 需要综合所有文档，问题 6–7 需要时间意识。后续章节分别用图、社区摘要和时间型事实来应对这三类问题。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="stretch">
-  <h4>Exercise 1.4 <span class="level">Stretch</span></h4>
-  <p>Reproduce a small lost-in-the-middle experiment on Kestrel with a real model. Ask “Who is the CTO of Kestrel Labs as of April 2026?” with all 12 documents in context, moving document 12 (the only one with the answer) to each position 0–11 while keeping the others in a fixed order. Run each position several times and record accuracy. Then repeat with only three distractors. What do you expect, and what might make your results differ from the paper's?</p>
+  <h4>练习 1.4 <span class="level">进阶</span></h4>
+  <p>用真实模型在 Kestrel 上复现一个小规模的中间迷失实验。把全部 12 篇文档放进上下文，提问 “Who is the CTO of Kestrel Labs as of April 2026?”（截至 2026 年 4 月，Kestrel Labs 的 CTO 是谁？），把文档 12（唯一包含答案的文档）依次移到位置 0–11，其余文档保持固定顺序。每个位置运行多次并记录准确率。然后只保留三篇干扰文档再做一遍。你预期会看到什么？什么因素可能让你的结果与论文不同？</p>
   <details class="answer">
-    <summary>Show answer</summary>
+    <summary>查看解答</summary>
     <pre><code class="language-python">import os
 from minigraphrag.chunking import load_documents
 from minigraphrag.context import format_table
@@ -436,7 +436,7 @@ docs = load_documents("data/corpus")
 target_id = "12_interview_leadership_change_2026"
 others = [(d, t) for d, t in docs.items() if d != target_id]
 question = "Who is the CTO of Kestrel Labs as of April 2026? Answer with a name."
-llm = get_llm(os.getenv("LLM", "openai"))   # a real model; the mock cannot show position effects
+llm = get_llm(os.getenv("LLM", "openai"))   # 真实模型；模拟 LLM 无法体现位置效应
 
 def run(distractors, trials=5):
     results = {}
@@ -449,143 +449,143 @@ def run(distractors, trials=5):
 
 print("11 distractors:", run(others))
 print(" 3 distractors:", run(others[:3]))</code></pre>
-    <p><code>CachedLLM</code> would return the same answer for every trial, so do not pass <code>cache_dir</code> here, and use a provider setting that allows some sampling variation, or vary the distractor order across trials instead.</p>
-    <p>What to expect: with only about 7,000 tokens of context, many 2026 models will answer correctly at every position, so you may see no dip at all. That is a legitimate finding: the effect in the paper appeared with longer contexts and more distractors, and newer models have been trained to reduce it. A more telling failure here is the <em>stale</em> answer “Jonas Vehl”, because documents 01, 03 and 08 call him CTO. If you see errors, check whether they cluster in middle positions (position effect) or are spread evenly (distractor effect). To make a dip more likely, pad the context with longer distractors, such as the corpus repeated with Kestrel names swapped out, until it reaches tens of thousands of tokens.</p>
+    <p><code>CachedLLM</code> 在每次试验中都会返回相同的答案，所以这里不要传 <code>cache_dir</code>；同时要使用允许一定采样随机性的服务商设置，或者改为在每次试验中打乱干扰文档的顺序。</p>
+    <p>预期结果：上下文只有约 7,000 个 token，许多 2026 年的模型在每个位置都能答对，所以你可能根本看不到凹陷。这本身就是一个合理的发现：论文中的效应出现在更长的上下文和更多干扰文档的条件下，而较新的模型经过训练已在削弱这一效应。在这里更能说明问题的失败，是给出<em>过时</em>的答案 “Jonas Vehl”，因为文档 01、03 和 08 都称他为 CTO。如果出现错误，看看它们是集中在中间位置（位置效应），还是均匀分布（干扰效应）。要让凹陷更容易出现，可以用更长的干扰文档填充上下文，比如把语料复制若干份并替换掉其中的 Kestrel 名称，直到上下文达到数万 token。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="core">
-  <h4>Exercise 1.5 <span class="level">Core</span></h4>
-  <p>A team runs an internal assistant over 4,000 policy documents averaging 1,500 tokens each. Documents change weekly, answers must respect each employee's access rights, and about 20,000 questions arrive per day. A colleague proposes a 1-million-token-context model with the whole corpus in the prompt. Write a short recommendation with numbers.</p>
+  <h4>练习 1.5 <span class="level">核心</span></h4>
+  <p>某团队基于 4,000 份政策文档运行一个内部助手，每份文档平均 1,500 token。文档每周都有变化，答案必须遵守每位员工的访问权限，每天大约有 20,000 个问题。一位同事提议使用 100 万 token 上下文的模型，把整个语料放进提示词。请写一段简短的建议，并给出数字。</p>
   <details class="answer">
-    <summary>Show answer</summary>
-    <p>Corpus size: 4,000 × 1,500 = 6,000,000 tokens. It does not fit in a 1M-token window: it is six times too large, so the proposal fails before cost is even considered. Suppose you split it into six 1M-token shards and queried each: that is 6M input tokens per question, 120 billion tokens a day at 20,000 questions, $360,000 a day at $3 per million before any caching discount. Access control is the second blocker: one shared prompt cannot hide documents from users who are not allowed to see them, so you would need a different prompt per permission group, which breaks prompt caching.</p>
-    <p>Recommendation: retrieval with per-user filtering at query time. With, say, eight 500-token chunks plus 500 tokens of overhead, that is 4,500 tokens per question, 90 million tokens a day, about $270 a day at the same price. Weekly updates become index upserts. Keep a long-context model for the final generation step so you can afford generous <em>k</em> for hard questions.</p>
+    <summary>查看解答</summary>
+    <p>语料规模：4,000 × 1,500 = 6,000,000 个 token。它放不进 100 万 token 的窗口，超出了六倍，所以还没考虑成本，这个提议就已经行不通了。假设把它切成六个 100 万 token 的分片并逐个查询：每个问题就是 600 万输入 token，每天 20,000 个问题就是 1,200 亿 token，按每百万 $3 计算，在不计任何缓存折扣的情况下每天 $360,000。访问控制是第二个拦路虎：一个共享的提示词无法对无权查看的用户隐藏文档，你得为每个权限组准备不同的提示词，这又会让提示词缓存失效。</p>
+    <p>建议：采用检索，并在查询时按用户过滤。比如取八个 500 token 的分块，再加 500 token 的开销，每个问题 4,500 token，每天 9,000 万 token，按同样的价格每天约 $270。每周的更新变成对索引的 upsert。最终的生成步骤仍可使用长上下文模型，这样遇到难题时你负担得起较大的 <em>k</em>。</p>
   </details>
 </section>
 
-<h2>Check your understanding</h2>
+<h2>检验理解</h2>
 <p class="quiz-score"></p>
 
 <div class="quiz">
-  <p class="q">A model trained before March 2026 is asked “Who is the CTO of Kestrel Labs?” with no context. What is the best description of the problem?</p>
+  <p class="q">一个在 2026 年 3 月之前训练的模型，在没有任何上下文的情况下被问到“Kestrel Labs 的 CTO 是谁？”。下面哪项最准确地描述了问题所在？</p>
   <ol>
-    <li>The context window is too small</li>
-    <li>The model is lost in the middle</li>
-    <li data-correct>The fact is non-parametric for this model: it is private, fictional and after its cutoff, so only supplied context can provide it</li>
-    <li>The tokenizer cannot represent the name “Priya Nair”</li>
+    <li>上下文窗口太小</li>
+    <li>模型迷失在了中间</li>
+    <li data-correct>对这个模型而言，该事实是非参数化的：它是私有的、虚构的，而且晚于知识截止日期，所以只有通过提供上下文才能获得</li>
+    <li>分词器无法表示 “Priya Nair” 这个名字</li>
   </ol>
-  <div class="explain">No weights contain this fact. The only fix is to supply the evidence in the prompt, which is what retrieval does.</div>
+  <div class="explain">没有任何权重包含这个事实。唯一的办法是把证据放进提示词，而这正是检索要做的事。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">Why does next-token prediction produce confident-sounding hallucinations?</p>
+  <p class="q">为什么下一个 token 预测会产生听起来很有把握的幻觉？</p>
   <ol>
-    <li data-correct>The objective rewards plausible continuations; a flat distribution at a fact-bearing token still yields a fluent sentence once a token is sampled</li>
-    <li>Models are trained to avoid saying “I don't know”</li>
-    <li>Sampling temperature is always too high</li>
-    <li>Hallucinations only happen when the context is too long</li>
+    <li data-correct>训练目标奖励的是看似合理的续写；即使承载事实的那个 token 的分布很平坦，一旦采样出一个 token，照样能得到一个流畅的句子</li>
+    <li>模型被训练成避免说“我不知道”</li>
+    <li>采样温度总是设得太高</li>
+    <li>只有在上下文太长时才会出现幻觉</li>
   </ol>
-  <div class="explain">Uncertainty lives in individual token distributions, which the final text hides. Temperature 0 makes the choice deterministic, not correct.</div>
+  <div class="explain">不确定性藏在单个 token 的分布里，而最终文本把它隐藏了。温度设为 0 只会让选择变得确定，并不会让它变得正确。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">With a price of $3 per million input tokens, a prompt of 2,150 tokens and 1,000 questions a day, what is the daily input cost?</p>
+  <p class="q">输入价格为每百万 token $3，提示词 2,150 个 token，每天 1,000 个问题，每天的输入成本是多少？</p>
   <ol>
     <li>$0.65</li>
     <li>$2.15</li>
     <li>$21.50</li>
     <li data-correct>$6.45</li>
   </ol>
-  <div class="explain">2,150 × 1,000 = 2.15 million tokens; 2.15 × $3 = $6.45.</div>
+  <div class="explain">2,150 × 1,000 = 215 万个 token；按每百万 token $3 计，2.15 × $3 = $6.45。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">What did Liu et al. find about where relevant information sits in a long context?</p>
+  <p class="q">关于相关信息在长上下文中所处的位置，Liu 等人发现了什么？</p>
   <ol>
-    <li>Position does not matter for modern models</li>
-    <li>Models use information best when it is in the middle</li>
-    <li data-correct>Models tended to use it best at the beginning or end, and worse in the middle</li>
-    <li>Only the last document in the context is ever used</li>
+    <li>对现代模型来说，位置无关紧要</li>
+    <li>信息位于中间时，模型利用得最好</li>
+    <li data-correct>信息位于开头或末尾时，模型往往利用得最好，位于中间时较差</li>
+    <li>模型只会用到上下文中的最后一篇文档</li>
   </ol>
-  <div class="explain">The U-shaped curve motivates putting the best evidence first and keeping retrieved context short and precise.</div>
+  <div class="explain">这条 U 形曲线促使我们把最好的证据放在最前面，并让检索到的上下文保持简短而精确。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">In Lewis et al.'s original RAG, what were the two main components?</p>
+  <p class="q">在 Lewis 等人最初的 RAG 中，两个主要组件是什么？</p>
   <ol>
-    <li>A BM25 index and GPT-3</li>
-    <li data-correct>A dense passage retriever over Wikipedia and a BART sequence-to-sequence generator</li>
-    <li>A knowledge graph and a graph neural network</li>
-    <li>A long-context transformer and a reranker</li>
+    <li>一个 BM25 索引和 GPT-3</li>
+    <li data-correct>一个在 Wikipedia 上运行的稠密段落检索器，以及一个 BART 序列到序列生成器</li>
+    <li>一个知识图谱和一个图神经网络</li>
+    <li>一个长上下文 transformer 和一个重排器</li>
   </ol>
-  <div class="explain">RAG combined DPR-style retrieval with BART generation and fine-tuned the query encoder and generator together.</div>
+  <div class="explain">RAG 把 DPR 风格的检索与 BART 生成结合起来，并对查询编码器和生成器进行了联合微调。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">Which workload most favors pasting the whole corpus into a long context over building retrieval?</p>
+  <p class="q">下面哪种工作负载最适合把整个语料贴进长上下文，而不是构建检索？</p>
   <ol>
-    <li>Millions of documents, updated hourly, with per-user permissions</li>
-    <li>A support bot answering 100,000 questions a day over a product wiki</li>
-    <li>A multi-tenant SaaS search over each customer's files</li>
-    <li data-correct>A one-off analysis of a 40-page contract that fits easily in the window, asked a handful of questions</li>
+    <li>数百万份文档，每小时更新，且需要按用户控制权限</li>
+    <li>一个基于产品 wiki 的客服机器人，每天回答 100,000 个问题</li>
+    <li>一个多租户 SaaS 产品，在每个客户的文件中搜索</li>
+    <li data-correct>对一份 40 页的合同做一次性分析，合同能轻松放进窗口，只问少数几个问题</li>
   </ol>
-  <div class="explain">Small, static, few questions, no access control: the engineering cost of retrieval is not worth it. Measure quality anyway.</div>
+  <div class="explain">规模小、内容静态、问题少、无需访问控制：构建检索的工程成本不值得。不过仍然要度量质量。</div>
 </div>
 
-<h2>Questions learners often ask</h2>
+<h2>常见问题</h2>
 
 <details class="qa">
-  <summary>If context windows keep growing, will RAG become unnecessary?</summary>
-  <div><p>For small, static corpora it already is sometimes unnecessary. For large, changing or access-controlled data it is not, for three reasons that bigger windows do not remove: cost and latency grow with prompt length, models do not use every part of a long context equally well, and access control and freshness are easier to enforce in an index than in a giant prompt. What is changing is the balance: retrieval can afford to be less precise because the generator can read more.</p></div>
+  <summary>如果上下文窗口越来越大，RAG 会变得没有必要吗？</summary>
+  <div><p>对于小型的静态语料，有时它现在就已经没有必要了。但对于规模大、经常变化或需要访问控制的数据，它依然必要，原因有三个，而且更大的窗口消除不了其中任何一个：成本和延迟随提示词长度增长；模型并不能同样好地利用长上下文的每个部分；在索引中落实访问控制和时效性，比在一个巨大的提示词中容易得多。真正在变化的是两者之间的平衡：生成器能读的内容越多，检索就越可以不那么精确。</p></div>
 </details>
 
 <details class="qa">
-  <summary>Why not fine-tune the model on our documents instead?</summary>
-  <div><p>Fine-tuning changes parametric knowledge, which brings back the problems retrieval avoids: you cannot cite where an answer came from, updating a fact means training again, deleting a document's influence is hard, and small fine-tunes are an unreliable way to inject new facts. Fine-tuning is better for style, format and task behavior, such as teaching a small model to follow your extraction format. Chapter 24 covers training with graphs.</p></div>
+  <summary>为什么不直接用我们的文档微调模型？</summary>
+  <div><p>微调改变的是参数化知识，这会把检索所规避的问题重新带回来：你无法指出答案的出处；更新一个事实就得重新训练；很难消除某份文档的影响；而且小规模微调并不是注入新事实的可靠途径。微调更适合调整风格、格式和任务行为，比如教一个小模型遵循你的抽取格式。第 24 章会介绍如何结合图训练模型。</p></div>
 </details>
 
 <details class="qa">
-  <summary>Does temperature 0 stop hallucinations?</summary>
-  <div><p>No. Temperature 0 makes the model pick the most likely token at each step, which makes outputs more reproducible. If the most likely name is wrong because the evidence is missing, you get the same wrong name every time. Use low temperature for reproducibility and caching, and grounding for correctness. The reference code's <code>AnthropicLLM</code> sends no temperature at all, because the Claude models it was written against reject sampling parameters; providers change these rules, so check the current API documentation rather than assuming the knob exists.</p></div>
+  <summary>把温度设为 0 能阻止幻觉吗？</summary>
+  <div><p>不能。温度为 0 时，模型在每一步都选择概率最高的 token，这会让输出更可复现。但如果因为缺少证据，概率最高的名字本身就是错的，你每次都会得到同一个错误的名字。低温度用于保证可复现性和便于缓存，事实依据才用于保证正确性。参考代码中的 <code>AnthropicLLM</code> 根本不传温度参数，因为它所针对的 Claude 模型会拒绝采样参数；服务商会调整这些规则，所以请查阅当前的 API 文档，不要想当然地认为这个参数一定存在。</p></div>
 </details>
 
 <details class="qa">
-  <summary>Why does the course put the context in the system prompt and the question in the user message?</summary>
-  <div><p>It mirrors Microsoft GraphRAG's search prompts, which <code>minigraphrag</code> follows: the system prompt carries the role, rules and data tables, and the user turn carries only the question. That keeps the question easy to find for logging and caching. Putting everything in one user message also works. What matters is that instructions, evidence with ids, and the question are clearly separated.</p></div>
+  <summary>为什么课程把上下文放在系统提示词里，而把问题放在用户消息里？</summary>
+  <div><p>这沿用了 Microsoft GraphRAG 的检索提示词，<code>minigraphrag</code> 也遵循这一做法：系统提示词承载角色、规则和数据表，用户轮次只包含问题。这样在记录日志和做缓存时很容易找到问题本身。把所有内容放进一条用户消息里同样可行。关键在于把指令、带 id 的证据和问题清楚地分开。</p></div>
 </details>
 
 <details class="qa">
-  <summary>Why does the mock LLM answer “OK” to my own prompt?</summary>
-  <div><p><code>MockLLM</code> is not a language model. It recognizes the course's prompt templates by a marker sentence in each (listed in <code>prompts.MARKERS</code>) and runs a deterministic heuristic for that task, such as extracting entities with a gazetteer or picking overlapping sentences to answer from data tables. A free-form prompt matches no marker, so it returns <code>OK</code>. Use it to run pipelines offline and in tests; use a real model to judge answer quality.</p></div>
+  <summary>为什么模拟 LLM 对我自己写的提示词只回答“OK”？</summary>
+  <div><p><code>MockLLM</code> 并不是语言模型。它通过每个课程提示词模板中的一句标记语（列在 <code>prompts.MARKERS</code> 中）识别模板，然后针对该任务运行确定性的启发式规则，比如用实体词表抽取实体，或者挑出有重叠的句子来依据数据表作答。自由格式的提示词匹配不到任何标记语，所以它返回 <code>OK</code>。它适合用来离线运行流程和跑测试；评判回答质量请使用真实模型。</p></div>
 </details>
 
 <section class="project">
-  <h3>Project: a closed-book versus stuffed-context baseline report</h3>
-  <p>Measure the starting point every later chapter will be compared against, with a real model if you have access to one and the mock otherwise.</p>
+  <h3>项目：闭卷与全量塞入上下文的基线对比报告</h3>
+  <p>测出后续每一章都要与之比较的起点。有条件就用真实模型，否则用模拟 LLM。</p>
   <ul class="checklist deliverables">
-    <li><input type="checkbox" aria-label="Done"> <span>A script that answers all questions in <code>data/questions.jsonl</code> twice: closed-book, and with the whole corpus stuffed into the grounded prompt</span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>For each run, the input tokens per question, total LLM calls and an estimated cost at a price you state</span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>The citation checker from Exercise 1.2 applied to every stuffed answer, with the count of answers that have no citations or invalid ids</span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>A hand-graded accuracy column (correct, partial, wrong) against the reference answers, broken down by question type</span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>A short paragraph naming the question types where the stuffed baseline struggles most, and your guess at why</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>一个脚本，把 <code>data/questions.jsonl</code> 中的所有问题各回答两遍：一遍闭卷，一遍把整个语料塞进有事实依据的提示词</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>每次运行的每个问题的输入 token 数、LLM 调用总次数，以及按你注明的价格估算的成本</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>对每个塞入全部语料得到的答案运行练习 1.2 的引用检查器，并统计没有引用或含无效 id 的答案数量</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>对照参考答案人工评分的准确率一栏（正确、部分正确、错误），并按问题类型分别统计</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>一小段文字，指出全量塞入基线表现最差的问题类型，并给出你对原因的猜测</span></li>
   </ul>
-  <p><strong>Done when</strong> you have a table of accuracy and cost by question type that you would be willing to show a colleague as “the number to beat”.</p>
+  <p><strong>完成标准：</strong>你得到一张按问题类型划分的准确率和成本表，并且愿意把它作为“要超越的数字”拿给同事看。</p>
 </section>
 
 <div class="keypoints">
-  <h2>Key takeaways</h2>
+  <h2>本章要点</h2>
   <ul>
-    <li>A language model predicts plausible next tokens. Fluency does not signal that a fact is known.</li>
-    <li>Parametric knowledge is frozen, public and uncitable. Private, recent and checkable facts must be supplied in the prompt.</li>
-    <li>Grounding means evidence in context, instructions to use only that evidence, and citations you can verify.</li>
-    <li>Stuffing the corpus works for small, static data; cost, latency and window limits grow with the corpus, while retrieval grows with <em>k</em>.</li>
-    <li>More context is not automatically better: models use evidence in the middle of long contexts less reliably, so rank, filter and order.</li>
-    <li>Retrieve-then-generate is the backbone of the course; GraphRAG changes what is retrieved, not the loop.</li>
+    <li>语言模型预测的是看似合理的下一个 token。流畅并不代表它知道某个事实。</li>
+    <li>参数化知识是冻结的、公开的、无法引用的。私有的、最新的、需要可核查的事实，必须通过提示词提供。</li>
+    <li>事实依据意味着三件事：证据在上下文中，指示模型只使用这些证据，以及可以验证的引用。</li>
+    <li>对小型静态数据，把语料全部塞进去是可行的；但成本、延迟和窗口限制随语料增长，而检索只随 <em>k</em> 增长。</li>
+    <li>上下文并非越多越好：模型对长上下文中间位置的证据利用得不够可靠，所以要排名、过滤并排序。</li>
+    <li>“先检索、后生成”是整门课程的骨架；GraphRAG 改变的是检索的内容，而不是这个循环。</li>
   </ul>
 </div>
 
-<h2>References</h2>
+<h2>参考文献</h2>
 <ul class="refs">
   <li>Lewis et al. <a href="https://arxiv.org/abs/2005.11401">Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</a>. <span class="venue">NeurIPS 2020; arXiv 2005.11401</span></li>
   <li>Guu et al. <a href="https://arxiv.org/abs/2002.08909">REALM: Retrieval-Augmented Language Model Pre-Training</a>. <span class="venue">ICML 2020; arXiv 2002.08909</span></li>
@@ -599,9 +599,9 @@ print(" 3 distractors:", run(others[:3]))</code></pre>
 
 </main>
 <script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
-<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/curriculum.zh.js?v=b04137e8"></script>
 <script src="../../assets/js/site.js?v=fe74656c"></script>
-<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script src="../../assets/js/viz.js?v=e8a5746b"></script>
 <script>
 GRFSViz.register("ch01-next-token", function (el, cfg, api) {
   const { stage } = api.frame(el, cfg);
@@ -619,7 +619,7 @@ GRFSViz.register("ch01-next-token", function (el, cfg, api) {
     }
     text.innerHTML = html;
     bars.innerHTML = "";
-    const title = api.h("div", { class: "viz-sub" }, bars, "Candidates for token " + (i + 1) + " (top 5)");
+    const title = api.h("div", { class: "viz-sub" }, bars, "第 " + (i + 1) + " 个 token 的候选（前 5 名）");
     title.style.marginBottom = "6px";
     steps[i].candidates.forEach(function (c) {
       const row = api.h("div", {}, bars);
@@ -647,32 +647,32 @@ GRFSViz.register("ch01-cost", function (el, cfg, api) {
     s.addEventListener("input", render);
     return { s, v };
   }
-  const corpus = slider("Corpus", { min: 0, max: sizes.length - 1, step: 1, value: 0 });
-  const qpd = slider("Questions/day", { min: 100, max: 20000, step: 100, value: 1000 });
-  const price = slider("$ per M input", { min: 0.1, max: 15, step: 0.1, value: 3 });
+  const corpus = slider("语料规模", { min: 0, max: sizes.length - 1, step: 1, value: 0 });
+  const qpd = slider("每日问题数", { min: 100, max: 20000, step: 100, value: 1000 });
+  const price = slider("每百万输入 token 价格", { min: 0.1, max: 15, step: 0.1, value: 3 });
   const W = cfg.window || 1000000, R = cfg.retrieved || 2150, O = cfg.overhead || 150;
   const money = (x) => "$" + (x >= 100 ? Math.round(x).toLocaleString() : x.toFixed(2));
   function row(label, tokens, daily, maxDaily, color) {
     const r = api.h("div", {}, out);
     r.style.cssText = "margin:8px 0";
     const t = api.h("div", {}, r);
-    t.innerHTML = "<strong>" + label + "</strong>: " + tokens.toLocaleString() + " input tokens per question, " + money(daily) + " per day";
+    t.innerHTML = "<strong>" + label + "</strong>：每个问题 " + tokens.toLocaleString() + " 个输入 token，每天 " + money(daily);
     const bg = api.h("div", {}, r); bg.style.cssText = "height:12px;background:var(--paper-2);border-radius:6px;overflow:hidden;margin-top:4px";
     const fg = api.h("div", {}, bg); fg.style.cssText = "height:12px;border-radius:6px;background:" + color + ";width:" + Math.max(0.5, 100 * Math.sqrt(daily / maxDaily)) + "%";
   }
   function render() {
     const C = sizes[+corpus.s.value], Q = +qpd.s.value, P = +price.s.value;
-    corpus.v.textContent = C.toLocaleString() + " tok";
+    corpus.v.textContent = C.toLocaleString() + " token";
     qpd.v.textContent = Q.toLocaleString();
     price.v.textContent = "$" + P.toFixed(1);
     const stuffed = C + O, rag = R + O;
     const dS = stuffed * Q * P / 1e6, dR = rag * Q * P / 1e6;
     out.innerHTML = "";
-    row("Stuff everything", stuffed, dS, Math.max(dS, dR), stuffed > W ? "var(--bad)" : "var(--edge)");
-    row("Retrieve 5 chunks", rag, dR, Math.max(dS, dR), "var(--node)");
+    row("全部塞入", stuffed, dS, Math.max(dS, dR), stuffed > W ? "var(--bad)" : "var(--edge)");
+    row("检索 5 个分块", rag, dR, Math.max(dS, dR), "var(--node)");
     const fits = stuffed <= W;
-    cap.innerHTML = (fits ? "The stuffed prompt fits a " + W.toLocaleString() + "-token window." : "<strong>The stuffed prompt does not fit</strong> a " + W.toLocaleString() + "-token window, so this option is not available at any price.") +
-      " Retrieval is " + (stuffed / rag).toFixed(1) + "&times; cheaper per question. Bar length uses a square-root scale so both stay visible. The first setting is the Kestrel corpus.";
+    cap.innerHTML = (fits ? "全部塞入的提示词放得进 " + W.toLocaleString() + " token 的窗口。" : "<strong>全部塞入的提示词放不进</strong> " + W.toLocaleString() + " token 的窗口，所以无论花多少钱，这个方案都不可行。") +
+      "每个问题的成本，全部塞入是检索的 " + (stuffed / rag).toFixed(1) + " 倍。条形长度采用平方根刻度，以便两者都能看清。第一档设置对应 Kestrel 语料。";
   }
   render();
 });

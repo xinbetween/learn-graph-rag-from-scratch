@@ -40,7 +40,8 @@ quizzes and figure controls are already in Chinese. `/zh/` is complete and navig
 - Paper titles in references and citations, and author names.
 - The Kestrel Labs world: Kestrel Labs, Project Tern, Project Sentinel, Deepcast, Marlow Dynamics, Tidewater
   Institute, Brightwater Capital, Halden Reef, Port Avalon, the Ocean Health Act, and every person's name.
-  Relationship labels in figures (`CTO_OF`, `SUPPLIED`) stay as they are.
+  Uppercase relation types (`CTO_OF`, `SUPPLIED`) stay as they are; lowercase edge labels that are ordinary
+  words (acquired, supplied) are translated (收购, 供货).
 - Figure node `id` values and edge references (`"a>b"`). Node `label`s that are entity names stay English;
   labels that are ordinary words may be translated.
 - Exact quotations from the corpus documents, which are English sources. Quote them in English and add a
@@ -119,6 +120,17 @@ Use these renderings consistently. On first use in a chapter, give the English t
 | key takeaways | 本章要点 |
 | running example | 贯穿示例 |
 | mock LLM | 模拟 LLM |
+| lexical graph / domain graph | 词汇图 / 领域图 |
+| lost in the middle | 中间迷失 |
+| gazetteer | 实体词表 |
+| episode (Graphiti, Zep) | episode（片段） |
+| sensemaking | 意义建构 |
+| query-focused summarization | 查询聚焦摘要 |
+| bridge entity | 桥接实体 |
+| blocking (entity resolution) | 分桶预筛 |
+| parametric / non-parametric knowledge | 参数化知识 / 非参数化知识 |
+| boilerplate | 样板文字 |
+| smoke test | 冒烟测试 |
 
 ## Style
 
@@ -126,6 +138,7 @@ Use these renderings consistently. On first use in a chapter, give the English t
   sentence rendering of the English. Restructure long English sentences; split where Chinese reads better.
 - Keep the technical content exact. Numbers, formulas, units, ranges and hedges (“about”, “roughly”,
   “in our run”) must survive translation unchanged. Do not add claims or drop caveats.
+- Write large numbers the Chinese way (739 万 token, 1200 万美元); keep prices with `$` as in the source.
 - Use full-width Chinese punctuation in Chinese text (，。：；？！“”（）), and ASCII punctuation inside code.
 - Put a half-width space between Chinese characters and adjacent Latin words or numbers: 使用 PageRank 时，
   取 α = 0.85。 No space next to full-width punctuation.

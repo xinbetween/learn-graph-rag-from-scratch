@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Glossary | Graph RAG from Scratch</title>
-<meta name="description" content="Definitions of every GraphRAG term used in the course, with examples and links to the chapters that teach them.">
+<title>术语表 | 从零构建 Graph RAG</title>
+<meta name="description" content="课程中用到的每个 GraphRAG 术语的定义，附示例和讲解该术语的章节链接。">
 <meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
@@ -15,11 +15,11 @@
 <link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
 <script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head>
-<body data-slug="glossary" data-root="../.." data-fallback="en">
+<body data-slug="glossary" data-root="../.." data-translated="true">
 <main class="chapter" id="main">
 <header class="chapter-head">
-  <h1>Glossary</h1>
-  <p class="lede">Every term the course uses, defined in one to three sentences, with the Kestrel Labs example where it helps and links to the chapters that teach it.</p>
+  <h1>术语表</h1>
+  <p class="lede">课程用到的每个术语都在这里，每条用一到三句话定义；必要时附上 Kestrel Labs 的例子，并链接到讲解它的章节。</p>
 </header>
 <style>
 .az-bar { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 18px; font-family: var(--font-ui); }
@@ -38,463 +38,463 @@ dl.gloss dd p { margin: 0 0 4px; }
 dl.gloss .see { font-family: var(--font-ui); font-size: .85rem; color: var(--muted); }
 .gloss-letter[hidden], dl.gloss [hidden], .gloss-empty[hidden] { display: none !important; }
 </style>
-<nav class="az-bar" aria-label="Jump to letter"><a href="#letter-a">A</a><a href="#letter-b">B</a><a href="#letter-c">C</a><a href="#letter-d">D</a><a href="#letter-e">E</a><a href="#letter-f">F</a><a href="#letter-g">G</a><a href="#letter-h">H</a><a href="#letter-i">I</a><span aria-hidden="true">J</span><a href="#letter-k">K</a><a href="#letter-l">L</a><a href="#letter-m">M</a><a href="#letter-n">N</a><a href="#letter-o">O</a><a href="#letter-p">P</a><a href="#letter-q">Q</a><a href="#letter-r">R</a><a href="#letter-s">S</a><a href="#letter-t">T</a><a href="#letter-u">U</a><a href="#letter-v">V</a><span aria-hidden="true">W</span><span aria-hidden="true">X</span><span aria-hidden="true">Y</span><a href="#letter-z">Z</a></nav>
+<nav class="az-bar" aria-label="按首字母跳转"><a href="#letter-a">A</a><a href="#letter-b">B</a><a href="#letter-c">C</a><a href="#letter-d">D</a><a href="#letter-e">E</a><a href="#letter-f">F</a><a href="#letter-g">G</a><a href="#letter-h">H</a><a href="#letter-i">I</a><span aria-hidden="true">J</span><a href="#letter-k">K</a><a href="#letter-l">L</a><a href="#letter-m">M</a><a href="#letter-n">N</a><a href="#letter-o">O</a><a href="#letter-p">P</a><a href="#letter-q">Q</a><a href="#letter-r">R</a><a href="#letter-s">S</a><a href="#letter-t">T</a><a href="#letter-u">U</a><a href="#letter-v">V</a><span aria-hidden="true">W</span><span aria-hidden="true">X</span><span aria-hidden="true">Y</span><a href="#letter-z">Z</a></nav>
 <div class="gloss-tools" id="gloss-tools" hidden>
-  <label for="gloss-filter">Filter terms and definitions</label>
-  <input type="search" id="gloss-filter" placeholder="Try: temporal, PageRank, Deepcast" autocomplete="off">
+  <label for="gloss-filter">筛选术语和定义（中英文均可）</label>
+  <input type="search" id="gloss-filter" placeholder="试试：temporal、社区、Deepcast" autocomplete="off">
   <p class="gloss-count" id="gloss-count" aria-live="polite"></p>
 </div>
-<p class="gloss-empty" id="gloss-empty" hidden>No terms match. Try a shorter word.</p>
+<p class="gloss-empty" id="gloss-empty" hidden>没有匹配的术语，换个更短的词试试。</p>
 
 <section class="gloss-letter">
 <h2 id="letter-a">A</h2>
 <dl class="gloss">
   <dt id="term-a-mem">A-MEM</dt>
-  <dd><p>An agentic memory system for LLM agents (Xu et al., 2025). Each memory is a note with keywords, tags and links to related notes, and adding a note can update the notes it links to, in the spirit of a Zettelkasten.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
-  <dt id="term-access-control-list-acl">Access control list (ACL)</dt>
-  <dd><p>A list of the users or groups allowed to read a resource. In GraphRAG, ACLs have to follow the data into text units, entities, edges and every derived summary, because one community report can blend facts from documents with different permissions. Example: the board memo about the Deepcast supply crisis must not leak, through the DEEPCAST entity summary, into a community report every employee can read.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a>, <a href="c4-enterprise-kgqa.html">Capstone 4</a></p></dd>
-  <dt id="term-adjacency-list">Adjacency list</dt>
-  <dd><p>A graph representation that maps each node to its neighbors, optionally with edge attributes. It uses memory proportional to nodes plus edges and makes "give me the neighbors of X", the core step of every traversal, fast.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
-  <dt id="term-agent-memory">Agent memory</dt>
-  <dd><p>Information an LLM agent keeps outside its context window so it survives across turns and sessions. Graph memory stores entities and dated facts, so the agent can update a fact (Priya Nair is now CTO) instead of appending a contradiction.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
-  <dt id="term-agentic-graphrag">Agentic GraphRAG</dt>
-  <dd><p>GraphRAG in which an LLM agent chooses which graph operations to call (search entities, expand neighbors, run a Cypher query, read a report), looks at the results and repeats until it has enough evidence. The alternative is a fixed retrieval pipeline.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
-  <dt id="term-approximate-nearest-neighbor-ann-search">Approximate nearest neighbor (ANN) search</dt>
-  <dd><p>Finding vectors that are probably the closest to a query vector without comparing against every vector. Index structures such as HNSW trade a little recall for large speedups on big collections.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dd><p>面向 LLM 智能体的智能体式记忆系统（Xu et al., 2025）。每条记忆都是一则笔记，带有关键词、标签和指向相关笔记的链接；新增一则笔记时，还可能更新它所链接的笔记，思路与 Zettelkasten（卡片盒笔记法）一脉相承。</p><p class="see">参见：<a href="30-agentic-graphrag.html">第 30 章</a>、<a href="c3-temporal-memory.html">综合项目 3</a></p></dd>
+  <dt id="term-access-control-list-acl">Access control list (ACL)（访问控制列表）</dt>
+  <dd><p>列出允许读取某项资源的用户或用户组。在 GraphRAG 中，ACL 必须随数据一路传递到文本单元、实体、边以及每一份派生摘要，因为一份社区报告可能混合了来自不同权限文档的事实。例如：关于 Deepcast 供货危机的董事会备忘录，不能经由 DEEPCAST 的实体摘要，泄露进全体员工都能读到的社区报告。</p><p class="see">参见：<a href="29-production-ops.html">第 29 章</a>、<a href="c4-enterprise-kgqa.html">综合项目 4</a></p></dd>
+  <dt id="term-adjacency-list">Adjacency list（邻接表）</dt>
+  <dd><p>一种图表示方法：把每个节点映射到它的邻居，可附带边属性。它占用的内存与节点数加边数成正比，并让“给出 X 的邻居”这一操作（所有遍历的核心步骤）非常快。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="13-storage-indexing.html">第 13 章</a></p></dd>
+  <dt id="term-agent-memory">Agent memory（智能体记忆）</dt>
+  <dd><p>LLM 智能体保存在上下文窗口之外的信息，使其能跨轮次、跨会话留存。图记忆存储实体和带日期的事实，因此智能体可以更新某个事实（Priya Nair 现任 CTO），而不是再追加一条相互矛盾的记录。</p><p class="see">参见：<a href="30-agentic-graphrag.html">第 30 章</a>、<a href="27-incremental-temporal.html">第 27 章</a>、<a href="c3-temporal-memory.html">综合项目 3</a></p></dd>
+  <dt id="term-agentic-graphrag">Agentic GraphRAG（智能体式 GraphRAG）</dt>
+  <dd><p>由 LLM 智能体自行选择调用哪些图操作（搜索实体、扩展邻居、执行 Cypher 查询、阅读报告）的 GraphRAG：智能体查看结果，反复迭代，直到收集到足够的证据。与之相对的是固定的检索流水线。</p><p class="see">参见：<a href="30-agentic-graphrag.html">第 30 章</a>、<a href="18-paths-and-agents.html">第 18 章</a></p></dd>
+  <dt id="term-approximate-nearest-neighbor-ann-search">Approximate nearest neighbor (ANN) search（近似最近邻搜索）</dt>
+  <dd><p>在不与每个向量逐一比较的前提下，找出很可能离查询向量最近的向量。HNSW 等索引结构以少量召回率为代价，在大规模数据集上换来大幅提速。</p><p class="see">参见：<a href="02-vector-rag.html">第 2 章</a>、<a href="13-storage-indexing.html">第 13 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-b">B</h2>
 <dl class="gloss">
-  <dt id="term-beam-search">Beam search</dt>
-  <dd><p>A search that keeps only the best B partial candidates at each step and expands only those. Think-on-Graph uses the LLM to score candidate relations and entities and keeps the top few reasoning paths at each depth.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
-  <dt id="term-bfs-breadth-first-search">BFS (breadth-first search)</dt>
-  <dd><p>A traversal that visits nodes in order of hop distance from a start node, using a queue. It yields k-hop neighborhoods and unweighted shortest paths in time proportional to nodes plus edges. From Deepcast, BFS reaches Kestrel Labs, Marlow Dynamics and Project Tern at hop 1.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
-  <dt id="term-bi-temporal">Bi-temporal</dt>
-  <dd><p>A data model that records two time axes for every fact: valid time (when it was true in the world) and transaction time, also called record time (when the system learned it or learned it had ended). minigraphrag stores them as <code>valid_from</code>/<code>valid_to</code> and <code>recorded_at</code>/<code>invalidated_at</code>; Graphiti as <code>valid_at</code>/<code>invalid_at</code> and <code>created_at</code>/<code>expired_at</code>. It can answer both "who was CTO in February 2026?" and "what did we believe on 1 March 2026?"</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a>, <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
-  <dt id="term-blocking">Blocking</dt>
-  <dd><p>In entity resolution, a cheap first pass that groups candidate names (same normalized first token, shared embedding bucket, same type) so that expensive pairwise comparisons happen only inside a group. It avoids comparing all n&sup2; pairs.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dt id="term-beam-search">Beam search（束搜索）</dt>
+  <dd><p>一种搜索方法：每一步只保留最好的 B 个部分候选，并且只扩展这些候选。Think-on-Graph 用 LLM 为候选关系和实体打分，在每一层深度保留得分最高的几条推理路径。</p><p class="see">参见：<a href="18-paths-and-agents.html">第 18 章</a></p></dd>
+  <dt id="term-bfs-breadth-first-search">BFS (breadth-first search)（广度优先搜索）</dt>
+  <dd><p>借助队列，按距起始节点的跳数由近及远访问节点的遍历方法。它能在与节点数加边数成正比的时间内得到 k 跳邻域和无权最短路径。从 Deepcast 出发，BFS 在第 1 跳到达 Kestrel Labs、Marlow Dynamics 和 Project Tern。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="14-local-search.html">第 14 章</a></p></dd>
+  <dt id="term-bi-temporal">Bi-temporal（双时态）</dt>
+  <dd><p>一种为每个事实记录两条时间轴的数据模型：有效时间（事实在现实世界中成立的时间）和事务时间，后者也叫记录时间（系统得知该事实、或得知它已终止的时间）。minigraphrag 用 <code>valid_from</code>/<code>valid_to</code> 和 <code>recorded_at</code>/<code>invalidated_at</code> 存储这两条轴；Graphiti 用的是 <code>valid_at</code>/<code>invalid_at</code> 和 <code>created_at</code>/<code>expired_at</code>。双时态模型既能回答“2026 年 2 月谁是 CTO？”，也能回答“2026 年 3 月 1 日时我们认为的情况是什么？”</p><p class="see">参见：<a href="10-claims-temporal.html">第 10 章</a>、<a href="27-incremental-temporal.html">第 27 章</a>、<a href="c3-temporal-memory.html">综合项目 3</a></p></dd>
+  <dt id="term-blocking">Blocking（分桶预筛）</dt>
+  <dd><p>实体消解中开销很低的第一轮处理：先把候选名称分组（规范化后首个词相同、落在同一个嵌入桶、类型相同），昂贵的两两比较只在组内进行，从而避免比较全部 n&sup2; 对。</p><p class="see">参见：<a href="09-entity-resolution.html">第 9 章</a></p></dd>
   <dt id="term-bm25">BM25</dt>
-  <dd><p>A sparse lexical ranking function. A document's score is the sum over query terms of IDF(q) &middot; f(q,D)(k<sub>1</sub>+1) / (f(q,D) + k<sub>1</sub>(1 &minus; b + b&middot;|D|/avgdl)), with typical k<sub>1</sub> between 1.2 and 2 and b = 0.75. It excels at rare exact names such as "Deepcast" that embeddings can blur.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dd><p>一种稀疏的词法排序函数。文档得分是对各查询词求和：IDF(q) &middot; f(q,D)(k<sub>1</sub>+1) / (f(q,D) + k<sub>1</sub>(1 &minus; b + b&middot;|D|/avgdl))，其中 k<sub>1</sub> 通常取 1.2 到 2，b = 0.75。它擅长匹配“Deepcast”这类罕见的精确名称，而嵌入可能会把这类名称的区分度抹平。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-c">C</h2>
 <dl class="gloss">
-  <dt id="term-centrality">Centrality</dt>
-  <dd><p>A family of node-importance scores: degree, betweenness, closeness, eigenvector and PageRank. GraphRAG systems use them to decide which entities and edges get space when the context budget is tight.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
-  <dt id="term-chain-of-thought-cot">Chain-of-thought (CoT)</dt>
-  <dd><p>Prompting a model to write intermediate reasoning steps before its answer. Graph-guided variants ground each step in nodes, edges or paths retrieved from a graph.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a></p></dd>
-  <dt id="term-chunk">Chunk</dt>
-  <dd><p>A contiguous span of a document used as the unit of embedding, extraction and citation. Microsoft GraphRAG calls chunks text units.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
-  <dt id="term-claim">Claim</dt>
-  <dd><p>A dated, sourced statement extracted from text, with subject, object, claim type, status (TRUE, FALSE or SUSPECTED), start and end dates, a description and the source quote. Example: Marlow Dynamics ended Deepcast's outside supply contracts, status TRUE, 2025. Microsoft GraphRAG stores claims as covariates.</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a></p></dd>
-  <dt id="term-code-graph">Code graph</dt>
-  <dd><p>A graph of a software repository whose nodes are files, classes and functions and whose edges are relations such as defines, imports, calls and inherits. It lets an assistant answer call-chain and impact questions.</p><p class="see">See: <a href="32-domain-graphrag.html">Chapter 32</a>, <a href="c2-code-graph.html">Capstone 2</a></p></dd>
-  <dt id="term-community">Community</dt>
-  <dd><p>A group of nodes more densely connected to each other than to the rest of the graph. In the Kestrel graph, {Marlow Dynamics, Deepcast} and {Brightwater Capital, Lena Park} are small communities.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
-  <dt id="term-community-report">Community report</dt>
-  <dd><p>An LLM-written summary of one community, with a title, a summary, an impact rating with explanation, and a list of findings. Reports are the retrieval units of global search.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a>, <a href="15-global-search.html">Chapter 15</a></p></dd>
-  <dt id="term-connected-component">Connected component</dt>
-  <dd><p>A maximal set of nodes in which every pair is joined by some path. Many small components in an extracted graph often signal missed relationships or aliases that were never merged.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="11-community-detection.html">Chapter 11</a></p></dd>
-  <dt id="term-context-recall">Context recall</dt>
-  <dd><p>The fraction of the gold supporting documents or facts that appear in the retrieved context. It measures retrieval separately from answer quality. In minigraphrag: <code>context_recall(retrieved_doc_ids, supporting_docs)</code>.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-context-window">Context window</dt>
-  <dd><p>The maximum number of tokens a model can take in one call, counting prompt and output. Longer windows do not remove the need for retrieval: cost grows with tokens, and models use the middle of long inputs less reliably.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
-  <dt id="term-cosine-similarity">Cosine similarity</dt>
-  <dd><p>The cosine of the angle between two vectors: a&middot;b / (|a| |b|), between &minus;1 and 1. For unit-length vectors it equals the dot product, which is why vector stores often normalize embeddings.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a></p></dd>
-  <dt id="term-covariate">Covariate</dt>
-  <dd><p>Microsoft GraphRAG's name for extra records attached to entities, in practice claims. See Claim.</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a></p></dd>
-  <dt id="term-cross-encoder">Cross-encoder</dt>
-  <dd><p>A model that reads the query and a candidate passage together and outputs one relevance score. It is more accurate than comparing separate embeddings but must run once per pair, so it is used to rerank a short list.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-centrality">Centrality（中心性）</dt>
+  <dd><p>一族衡量节点重要性的指标：度中心性、介数中心性、接近中心性、特征向量中心性和 PageRank。上下文预算紧张时，GraphRAG 系统用它们决定哪些实体和边能占用篇幅。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="14-local-search.html">第 14 章</a></p></dd>
+  <dt id="term-chain-of-thought-cot">Chain-of-thought (CoT)（思维链）</dt>
+  <dd><p>通过提示词让模型在给出答案之前先写出中间推理步骤。图引导的变体会让每一步都以从图中检索到的节点、边或路径为事实依据。</p><p class="see">参见：<a href="23-graph-reasoning.html">第 23 章</a></p></dd>
+  <dt id="term-chunk">Chunk（分块）</dt>
+  <dd><p>文档中一段连续的文本，作为嵌入、抽取和引用的基本单位。Microsoft GraphRAG 把分块称为文本单元（text unit）。</p><p class="see">参见：<a href="02-vector-rag.html">第 2 章</a>、<a href="07-chunking-text-units.html">第 7 章</a></p></dd>
+  <dt id="term-claim">Claim（声明）</dt>
+  <dd><p>从文本中抽取的、带日期和来源的陈述，包含主体、客体、声明类型、状态（TRUE、FALSE 或 SUSPECTED）、起止日期、描述和原文引语。例如：Marlow Dynamics 终止了 Deepcast 的对外供货合同，状态 TRUE，2025 年。Microsoft GraphRAG 把声明存为协变量（covariate）。</p><p class="see">参见：<a href="10-claims-temporal.html">第 10 章</a></p></dd>
+  <dt id="term-code-graph">Code graph（代码图谱）</dt>
+  <dd><p>描述软件仓库的图：节点是文件、类和函数，边是定义、导入、调用、继承等关系。借助它，助手可以回答调用链和变更影响类的问题。</p><p class="see">参见：<a href="32-domain-graphrag.html">第 32 章</a>、<a href="c2-code-graph.html">综合项目 2</a></p></dd>
+  <dt id="term-community">Community（社区）</dt>
+  <dd><p>一组节点，它们彼此之间的连接比与图中其余部分的连接更紧密。在 Kestrel 图中，{Marlow Dynamics, Deepcast} 和 {Brightwater Capital, Lena Park} 都是小社区。</p><p class="see">参见：<a href="11-community-detection.html">第 11 章</a></p></dd>
+  <dt id="term-community-report">Community report（社区报告）</dt>
+  <dd><p>由 LLM 为单个社区撰写的总结，包含标题、摘要、影响力评级及其说明，以及一组发现项。社区报告是全局搜索的检索单位。</p><p class="see">参见：<a href="12-community-reports.html">第 12 章</a>、<a href="15-global-search.html">第 15 章</a></p></dd>
+  <dt id="term-connected-component">Connected component（连通分量）</dt>
+  <dd><p>一个极大节点集合，其中任意两个节点之间都有路径相连。抽取出的图中如果有许多小连通分量，往往说明漏抽了关系，或者有别名一直没有合并。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="11-community-detection.html">第 11 章</a></p></dd>
+  <dt id="term-context-recall">Context recall（上下文召回率）</dt>
+  <dd><p>标准支撑文档或事实中，出现在检索上下文里的比例。它脱离答案质量，单独衡量检索效果。在 minigraphrag 中对应 <code>context_recall(retrieved_doc_ids, supporting_docs)</code>。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-context-window">Context window（上下文窗口）</dt>
+  <dd><p>模型单次调用能处理的最大 token 数，提示词和输出都计算在内。更长的窗口并不能取代检索：成本随 token 数增长，而且模型对长输入中间部分的利用不够可靠。</p><p class="see">参见：<a href="01-llms-and-context.html">第 1 章</a>、<a href="22-context-construction.html">第 22 章</a></p></dd>
+  <dt id="term-cosine-similarity">Cosine similarity（余弦相似度）</dt>
+  <dd><p>两个向量夹角的余弦：a&middot;b / (|a| |b|)，取值在 &minus;1 到 1 之间。对单位长度的向量，它等于点积，这正是向量存储常常先对嵌入做归一化的原因。</p><p class="see">参见：<a href="02-vector-rag.html">第 2 章</a></p></dd>
+  <dt id="term-covariate">Covariate（协变量）</dt>
+  <dd><p>Microsoft GraphRAG 对附加在实体上的额外记录的称呼，实践中就是声明。参见 Claim（声明）条目。</p><p class="see">参见：<a href="10-claims-temporal.html">第 10 章</a></p></dd>
+  <dt id="term-cross-encoder">Cross-encoder（交叉编码器）</dt>
+  <dd><p>把查询和候选段落放在一起读入、输出单一相关性分数的模型。它比分别计算嵌入再比较更准确，但每一对都要运行一次，因此用于对较短的候选列表做重排。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
   <dt id="term-cypher">Cypher</dt>
-  <dd><p>A declarative query language for property graphs, used by Neo4j and other databases through openCypher. Patterns look like drawings: <code>(p:Person)-[:CTO_OF]-&gt;(o:Organization)</code>.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+  <dd><p>一种面向属性图的声明式查询语言，Neo4j 使用它，其他数据库也通过 openCypher 支持它。它的模式写起来就像画图：<code>(p:Person)-[:CTO_OF]-&gt;(o:Organization)</code>。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="20-text2cypher.html">第 20 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-d">D</h2>
 <dl class="gloss">
-  <dt id="term-damping-factor">Damping factor</dt>
-  <dd><p>In PageRank, the probability &alpha; that the random walker follows an outgoing edge instead of teleporting; 1 &minus; &alpha; is the restart probability. The web default is 0.85 (minigraphrag's <code>personalized_pagerank</code> uses it too); HippoRAG's paper uses 0.5. A lower &alpha; restarts more often and keeps Personalized PageRank mass closer to the seeds.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
-  <dt id="term-degree">Degree</dt>
-  <dd><p>The number of edges touching a node (in-degree and out-degree for directed graphs; weighted degree sums edge weights). A cheap importance signal; Kestrel Labs has the highest degree in the course graph.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
-  <dt id="term-dense-retrieval">Dense retrieval</dt>
-  <dd><p>Retrieval by similarity between learned embeddings of the query and the passages, as in Dense Passage Retrieval. It matches paraphrases well and misses rare exact tokens more often than BM25.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
-  <dt id="term-description-summarization">Description summarization</dt>
-  <dd><p>Merging the many per-chunk descriptions of one entity or relationship into a single coherent description with an LLM. Priya Nair might appear in five chunks with five partial descriptions that become one profile.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
-  <dt id="term-dfs-depth-first-search">DFS (depth-first search)</dt>
-  <dd><p>A traversal that follows one branch as deep as possible before backtracking, using a stack or recursion. It is used to enumerate paths and detect cycles; always cap the depth on real graphs.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a></p></dd>
-  <dt id="term-directed-graph">Directed graph</dt>
-  <dd><p>A graph whose edges have a direction, such as Marlow Dynamics &rarr; ACQUIRED &rarr; Deepcast. Many GraphRAG pipelines store directed relationships but traverse them as undirected for retrieval.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
-  <dt id="term-directness">Directness</dt>
-  <dd><p>An evaluation criterion from the GraphRAG paper: how specifically and clearly the answer addresses the question. It was used as a control, since it tends to trade off against comprehensiveness and diversity.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-diversity">Diversity</dt>
-  <dd><p>An evaluation criterion from the GraphRAG paper: how varied an answer is in offering different perspectives and insights.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-domain-graph">Domain graph</dt>
-  <dd><p>A graph whose nodes are real-world entities and concepts (people, organizations, projects) and whose edges are semantic relationships. Contrast with a lexical graph, whose nodes are documents and chunks.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a></p></dd>
-  <dt id="term-drift-search">DRIFT search</dt>
-  <dd><p>Dynamic Reasoning and Inference with Flexible Traversal, a Microsoft GraphRAG query mode. It first compares the question with the most relevant community reports to draft a broad answer and follow-up questions, then refines those with local search, returning a ranked hierarchy of answers.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
-  <dt id="term-dynamic-community-selection">Dynamic community selection</dt>
-  <dd><p>A global search variant that walks the community hierarchy from the top, asks a cheaper LLM to rate each report's relevance, and only descends into children of relevant communities. Irrelevant reports never reach the map step, which cuts tokens.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dt id="term-damping-factor">Damping factor（阻尼系数）</dt>
+  <dd><p>PageRank 中随机游走者沿出边前进、而不是随机跳转的概率 &alpha;；1 &minus; &alpha; 即重启概率。网页排序的默认值是 0.85（minigraphrag 的 <code>personalized_pagerank</code> 也用这个值）；HippoRAG 论文用的是 0.5。&alpha; 越小，重启越频繁，个性化 PageRank 的概率质量就越集中在种子附近。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
+  <dt id="term-degree">Degree（度）</dt>
+  <dd><p>与一个节点相连的边数（有向图区分入度和出度；加权度是边权重之和）。度是一种廉价的重要性信号；在课程的图中，Kestrel Labs 的度最高。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="14-local-search.html">第 14 章</a></p></dd>
+  <dt id="term-dense-retrieval">Dense retrieval（稠密检索）</dt>
+  <dd><p>依据查询与段落的学习型嵌入之间的相似度来检索，Dense Passage Retrieval 就是一例。它善于匹配同义改写，但比 BM25 更容易漏掉罕见的精确词项。</p><p class="see">参见：<a href="02-vector-rag.html">第 2 章</a>、<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
+  <dt id="term-description-summarization">Description summarization（描述摘要）</dt>
+  <dd><p>用 LLM 把同一实体或关系在各个分块中的多条描述合并成一条连贯的描述。Priya Nair 可能出现在五个分块里，带着五段零散描述，合并后成为一份完整档案。</p><p class="see">参见：<a href="09-entity-resolution.html">第 9 章</a></p></dd>
+  <dt id="term-dfs-depth-first-search">DFS (depth-first search)（深度优先搜索）</dt>
+  <dd><p>借助栈或递归，沿一条分支尽可能深入、再回溯的遍历方法。它用于枚举路径和检测环；在真实的图上务必限制深度。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a></p></dd>
+  <dt id="term-directed-graph">Directed graph（有向图）</dt>
+  <dd><p>边带有方向的图，例如 Marlow Dynamics &rarr; ACQUIRED &rarr; Deepcast。许多 GraphRAG 流水线按有向关系存储，但检索时把它们当作无向边遍历。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="05-knowledge-graphs.html">第 5 章</a></p></dd>
+  <dt id="term-directness">Directness（直接性）</dt>
+  <dd><p>GraphRAG 论文中的一项评估标准：答案回应问题有多具体、多清晰。论文把它用作对照指标，因为它往往与全面性和多样性此消彼长。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-diversity">Diversity（多样性）</dt>
+  <dd><p>GraphRAG 论文中的一项评估标准：答案在提供不同视角和见解方面有多丰富。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-domain-graph">Domain graph（领域图）</dt>
+  <dd><p>节点是现实世界的实体和概念（人、组织、项目），边是语义关系的图。与之相对的是词汇图，其节点是文档和分块。</p><p class="see">参见：<a href="06-graph-shapes.html">第 6 章</a></p></dd>
+  <dt id="term-drift-search">DRIFT search（DRIFT 搜索）</dt>
+  <dd><p>全称 Dynamic Reasoning and Inference with Flexible Traversal，是 Microsoft GraphRAG 的一种查询模式。它先把问题与最相关的社区报告比对，起草一个宽泛的答案和若干后续问题，再用局部搜索细化这些问题，最终返回按层级排序的答案。</p><p class="see">参见：<a href="15-global-search.html">第 15 章</a></p></dd>
+  <dt id="term-dynamic-community-selection">Dynamic community selection（动态社区选择）</dt>
+  <dd><p>全局搜索的一种变体：从顶层开始遍历社区层级，让一个更便宜的 LLM 为每份报告的相关性打分，只深入相关社区的子社区。无关报告根本不会进入 map 步骤，从而节省 token。</p><p class="see">参见：<a href="15-global-search.html">第 15 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-e">E</h2>
 <dl class="gloss">
-  <dt id="term-edge-weight">Edge weight</dt>
-  <dd><p>A number on an edge expressing strength, frequency or cost. In minigraphrag a merged edge's <code>weight</code> is the sum of the <code>strength</code> values of every extracted mention of that relationship, and modularity, PageRank and path pruning all read it.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
-  <dt id="term-embedding">Embedding</dt>
-  <dd><p>A dense vector representation of text (or a node, or an image) produced by a model so that similar meanings land close together. Chunks, entity descriptions and community reports are all embedded for search.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
-  <dt id="term-empowerment">Empowerment</dt>
-  <dd><p>An evaluation criterion from the GraphRAG paper: how well an answer helps the reader understand the topic and make informed judgments.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-entity">Entity</dt>
-  <dd><p>A distinct real-world thing, such as a person, organization, place, project, event or concept, represented as a node with a name, type, description and source ids. Kestrel Labs, Dr. Mira Okafor and Halden Reef are entities.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
-  <dt id="term-entity-linking">Entity linking</dt>
-  <dd><p>Mapping a mention in a query or document to a node in the graph. "the CEO" in a question about Kestrel should link to Dr. Mira Okafor. Seed selection in local search and HippoRAG is a form of entity linking.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="17-ppr-hipporag.html">Chapter 17</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
-  <dt id="term-entity-resolution">Entity resolution</dt>
-  <dd><p>Deciding which extracted names refer to the same real-world entity and merging them into one node. "Dr. Mira Okafor", "Mira Okafor" and "Okafor" should become one node; "Tidewater" and "TWI" should join "Tidewater Institute".</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
-  <dt id="term-entity-type">Entity type</dt>
-  <dd><p>The category an extractor assigns to an entity from a fixed list, such as ORGANIZATION, PERSON, PROJECT, LOCATION, EVENT or LAW. Types constrain extraction, guide resolution and become node labels in a database.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
-  <dt id="term-evidence-panel">Evidence panel</dt>
-  <dd><p>An interface pattern that shows the entities, paths and source passages behind an answer next to it, so users can check the answer instead of trusting it.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
-  <dt id="term-exact-match-em">Exact match (EM)</dt>
-  <dd><p>An answer metric that scores 1 if the normalized prediction equals the normalized gold answer and 0 otherwise. It is strict: "Priya Nair" matches, "Priya Nair, since March 2026" does not.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-extraction">Extraction</dt>
-  <dd><p>The indexing step in which an LLM reads a text unit and returns entities and relationships (and optionally claims) in a fixed output format.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+  <dt id="term-edge-weight">Edge weight（边权重）</dt>
+  <dd><p>边上的一个数值，表示强度、频次或代价。在 minigraphrag 中，合并后边的 <code>weight</code> 是该关系每次被抽取到时 <code>strength</code> 值的总和，模块度、PageRank 和路径剪枝都会读取它。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="09-entity-resolution.html">第 9 章</a></p></dd>
+  <dt id="term-embedding">Embedding（嵌入）</dt>
+  <dd><p>由模型生成的文本（或节点、图像）稠密向量表示，语义相近的内容在向量空间中彼此靠近。分块、实体描述和社区报告都会做嵌入，供搜索使用。</p><p class="see">参见：<a href="02-vector-rag.html">第 2 章</a>、<a href="13-storage-indexing.html">第 13 章</a></p></dd>
+  <dt id="term-empowerment">Empowerment（赋能性）</dt>
+  <dd><p>GraphRAG 论文中的一项评估标准：答案在多大程度上帮助读者理解主题、做出有依据的判断。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-entity">Entity（实体）</dt>
+  <dd><p>现实世界中一个可区分的事物，如人、组织、地点、项目、事件或概念，表示为带有名称、类型、描述和来源 id 的节点。Kestrel Labs、Dr. Mira Okafor 和 Halden Reef 都是实体。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="08-entity-relation-extraction.html">第 8 章</a></p></dd>
+  <dt id="term-entity-linking">Entity linking（实体链接）</dt>
+  <dd><p>把查询或文档中的提及映射到图中的节点。在一个关于 Kestrel 的问题里，“the CEO”（首席执行官）应链接到 Dr. Mira Okafor。局部搜索和 HippoRAG 中的种子选择就是一种实体链接。</p><p class="see">参见：<a href="14-local-search.html">第 14 章</a>、<a href="17-ppr-hipporag.html">第 17 章</a>、<a href="20-text2cypher.html">第 20 章</a></p></dd>
+  <dt id="term-entity-resolution">Entity resolution（实体消解）</dt>
+  <dd><p>判断抽取出的哪些名称指向同一个现实实体，并把它们合并为一个节点。“Dr. Mira Okafor”“Mira Okafor”和“Okafor”应合并为一个节点；“Tidewater”和“TWI”应并入“Tidewater Institute”。</p><p class="see">参见：<a href="09-entity-resolution.html">第 9 章</a></p></dd>
+  <dt id="term-entity-type">Entity type（实体类型）</dt>
+  <dd><p>抽取器从固定列表中为实体指定的类别，如 ORGANIZATION、PERSON、PROJECT、LOCATION、EVENT 或 LAW。类型约束抽取、指导消解，并在数据库中成为节点标签。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="08-entity-relation-extraction.html">第 8 章</a></p></dd>
+  <dt id="term-evidence-panel">Evidence panel（证据面板）</dt>
+  <dd><p>一种界面模式：在答案旁边展示其背后的实体、路径和来源段落，让用户能核查答案，而不必盲目信任。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
+  <dt id="term-exact-match-em">Exact match (EM)（精确匹配）</dt>
+  <dd><p>一种答案指标：规范化后的预测与规范化后的标准答案完全相同则得 1 分，否则得 0 分。它很严格：“Priya Nair”算匹配，“Priya Nair, since March 2026”则不算。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-extraction">Extraction（抽取）</dt>
+  <dd><p>索引阶段的一个步骤：LLM 阅读文本单元，按固定输出格式返回实体和关系（可选地还有声明）。</p><p class="see">参见：<a href="08-entity-relation-extraction.html">第 8 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-f">F</h2>
 <dl class="gloss">
-  <dt id="term-f1-token-f1">F1 (token F1)</dt>
-  <dd><p>The harmonic mean of token-level precision and recall between a predicted and a gold answer. It gives partial credit where exact match gives none.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-faithfulness">Faithfulness</dt>
-  <dd><p>How far every statement in an answer is supported by the retrieved context. An answer can be correct but unfaithful, if the model used its own memory instead of the evidence.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a>, <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-f1-token-f1">F1 (token F1)（词元级 F1）</dt>
+  <dd><p>预测答案与标准答案之间token 级精确率和召回率的调和平均。精确匹配给 0 分的情况，它仍能给出部分分数。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-faithfulness">Faithfulness（忠实度）</dt>
+  <dd><p>答案中的每一处陈述在多大程度上得到检索上下文的支持。如果模型依靠自身记忆而非证据作答，答案可能正确却不忠实。</p><p class="see">参见：<a href="23-graph-reasoning.html">第 23 章</a>、<a href="25-evaluation.html">第 25 章</a></p></dd>
   <dt id="term-fastgraphrag">FastGraphRAG</dt>
-  <dd><p>An open-source GraphRAG framework by Circlemind that builds an entity graph with an LLM and uses PageRank-based exploration at query time, with the aim of lower cost than Microsoft GraphRAG.</p><p class="see">See: <a href="26-cost-scaling.html">Chapter 26</a>, <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
-  <dt id="term-finding">Finding</dt>
-  <dd><p>One item in a community report: a short summary statement plus a longer explanation grounded in the community's data.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a></p></dd>
-  <dt id="term-flow-based-pruning">Flow-based pruning</dt>
-  <dd><p>PathRAG's path filter. Resource starts at a source node and is split among neighbors and multiplied by a decay rate at each hop; nodes whose flow falls below a threshold are pruned early, and surviving paths are scored by their average flow.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dd><p>Circlemind 开源的 GraphRAG 框架：用 LLM 构建实体图，查询时基于 PageRank 探索，目标是成本低于 Microsoft GraphRAG。</p><p class="see">参见：<a href="26-cost-scaling.html">第 26 章</a>、<a href="28-frameworks-in-practice.html">第 28 章</a></p></dd>
+  <dt id="term-finding">Finding（发现项）</dt>
+  <dd><p>社区报告中的一项内容：一句简短的总结陈述，加上一段以该社区数据为依据的较长解释。</p><p class="see">参见：<a href="12-community-reports.html">第 12 章</a></p></dd>
+  <dt id="term-flow-based-pruning">Flow-based pruning（基于流的剪枝）</dt>
+  <dd><p>PathRAG 的路径过滤方法。资源从源节点出发，每经过一跳就在邻居之间分配，并乘以衰减率；流量低于阈值的节点被提前剪除，保留下来的路径按平均流量打分。</p><p class="see">参见：<a href="18-paths-and-agents.html">第 18 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-g">G</h2>
 <dl class="gloss">
   <dt id="term-g-retriever">G-Retriever</dt>
-  <dd><p>A method for question answering over textual graphs (He et al., 2024). It retrieves a connected subgraph with a prize-collecting Steiner tree, encodes it with a GNN into a soft prompt, and also passes the subgraph as text to the LLM.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dd><p>一种在文本图上做问答的方法（He et al., 2024）。它用奖励收集斯坦纳树检索一个连通子图，用 GNN 把子图编码成软提示，同时把子图以文本形式传给 LLM。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a>、<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
   <dt id="term-gfm-rag">GFM-RAG</dt>
-  <dd><p>Graph Foundation Model for RAG (Luo et al., 2025). A query-dependent GNN, pre-trained on many graphs, scores entities in one pass for multi-hop retrieval and can be used on new datasets without retraining.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
-  <dt id="term-gleaning">Gleaning</dt>
-  <dd><p>A recall booster for extraction: after the first pass, tell the LLM that entities were missed and ask it to add them, then ask a yes/no question about whether any remain; repeat until it says no or <code>max_gleanings</code> rounds (1 by default in minigraphrag) are used.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
-  <dt id="term-global-search">Global search</dt>
-  <dd><p>Microsoft GraphRAG's query mode for corpus-wide questions. It runs map-reduce over community reports at a chosen level: each batch of reports yields scored partial answers, low scores are dropped, and a final call combines the rest.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
-  <dt id="term-gnn-graph-neural-network">GNN (graph neural network)</dt>
-  <dd><p>A neural network that computes node, edge or graph representations by repeatedly aggregating information from neighbors. In GraphRAG, GNNs score nodes for retrieval or encode subgraphs into vectors an LLM can read.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dd><p>全称 Graph Foundation Model for RAG（Luo et al., 2025）。一个在大量图上预训练、依赖查询的 GNN 一次性为实体打分，用于多跳检索，并且无需重新训练即可用于新数据集。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a></p></dd>
+  <dt id="term-gleaning">Gleaning（补漏抽取）</dt>
+  <dd><p>提升抽取召回率的手段：第一轮抽取之后，告诉 LLM 还有实体被漏掉，让它补充；再用是/否问题询问是否还有遗漏；如此反复，直到它回答“否”，或用完 <code>max_gleanings</code> 轮（minigraphrag 默认为 1 轮）。</p><p class="see">参见：<a href="08-entity-relation-extraction.html">第 8 章</a></p></dd>
+  <dt id="term-global-search">Global search（全局搜索）</dt>
+  <dd><p>Microsoft GraphRAG 面向全语料问题的查询模式。它在选定层级的社区报告上执行 map-reduce：每批报告产出带分数的部分答案，丢弃低分项，最后一次调用把其余部分汇总起来。</p><p class="see">参见：<a href="15-global-search.html">第 15 章</a></p></dd>
+  <dt id="term-gnn-graph-neural-network">GNN (graph neural network)（图神经网络）</dt>
+  <dd><p>通过反复聚合邻居信息来计算节点、边或整图表示的神经网络。在 GraphRAG 中，GNN 用于为检索给节点打分，或把子图编码成 LLM 可读取的向量。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a>、<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
   <dt id="term-gnn-rag">GNN-RAG</dt>
-  <dd><p>A method (Mavromatis and Karypis, 2024) in which a GNN reasons over a knowledge-graph subgraph to find candidate answers, then the shortest paths from question entities to those candidates are written as text for the LLM.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
-  <dt id="term-graph-constrained-decoding">Graph-constrained decoding</dt>
-  <dd><p>Restricting an LLM's token generation so it can only produce paths that exist in the graph. Graph-constrained Reasoning (GCR) builds a trie of valid knowledge-graph paths to enforce this, which rules out invented relations.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a></p></dd>
-  <dt id="term-graph-cot">Graph CoT</dt>
-  <dd><p>Graph Chain-of-Thought (Jin et al., 2024). The LLM alternates between reasoning, choosing a graph function to call (such as retrieving a node, reading a feature, checking neighbors) and reading the result, iterating until it can answer.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a></p></dd>
-  <dt id="term-graph-database">Graph database</dt>
-  <dd><p>A database that stores nodes and edges natively and answers traversal queries efficiently, such as Neo4j, Memgraph or FalkorDB. Postgres with edge tables can play the same role at modest scale.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
-  <dt id="term-graph-foundation-model">Graph foundation model</dt>
-  <dd><p>A graph model pre-trained across many graphs so it transfers to new graphs with little or no retraining. GFM-RAG applies the idea to retrieval.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
+  <dd><p>一种方法（Mavromatis and Karypis, 2024）：GNN 在知识图谱子图上推理，找出候选答案，再把问题实体到这些候选之间的最短路径写成文本交给 LLM。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a></p></dd>
+  <dt id="term-graph-constrained-decoding">Graph-constrained decoding（图约束解码）</dt>
+  <dd><p>限制 LLM 的 token 生成，使其只能产出图中实际存在的路径。Graph-constrained Reasoning（GCR）为有效的知识图谱路径构建前缀树（trie）来强制执行这一约束，从而杜绝编造的关系。</p><p class="see">参见：<a href="23-graph-reasoning.html">第 23 章</a></p></dd>
+  <dt id="term-graph-cot">Graph CoT（图思维链）</dt>
+  <dd><p>全称 Graph Chain-of-Thought（Jin et al., 2024）。LLM 交替进行推理、选择要调用的图函数（如获取节点、读取特征、查看邻居）并阅读结果，反复迭代直到能够作答。</p><p class="see">参见：<a href="23-graph-reasoning.html">第 23 章</a></p></dd>
+  <dt id="term-graph-database">Graph database（图数据库）</dt>
+  <dd><p>原生存储节点和边、能高效响应遍历查询的数据库，如 Neo4j、Memgraph 或 FalkorDB。在规模不大时，带边表的 Postgres 也能承担同样的角色。</p><p class="see">参见：<a href="13-storage-indexing.html">第 13 章</a></p></dd>
+  <dt id="term-graph-foundation-model">Graph foundation model（图基础模型）</dt>
+  <dd><p>在大量图上预训练的图模型，只需少量甚至无需重新训练即可迁移到新图。GFM-RAG 把这一思路用于检索。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a></p></dd>
   <dt id="term-graph-r1">Graph-R1</dt>
-  <dd><p>An agentic GraphRAG framework (Luo et al., 2025) that trains the model with end-to-end reinforcement learning to interact with a hypergraph knowledge environment over multiple turns.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dd><p>一个智能体式 GraphRAG 框架（Luo et al., 2025），用端到端强化学习训练模型，使其在超图知识环境中进行多轮交互。</p><p class="see">参见：<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
   <dt id="term-graphgpt">GraphGPT</dt>
-  <dd><p>A graph instruction tuning method (Tang et al., 2023) that aligns a graph encoder with an LLM through a projector and tunes the model on graph tasks in two stages.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dd><p>一种图指令微调方法（Tang et al., 2023）：通过投影器把图编码器与 LLM 对齐，并分两个阶段在图任务上微调模型。</p><p class="see">参见：<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
   <dt id="term-graphiti">Graphiti</dt>
-  <dd><p>An open-source library from Zep for building temporally aware knowledge graphs for agents. It ingests episodes incrementally, keeps bi-temporal edges, and invalidates facts that newer information contradicts.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
+  <dd><p>Zep 开源的库，用于为智能体构建具备时间感知的知识图谱。它增量摄入 episode（片段），保留双时态边，并对被新信息推翻的事实做失效标记。</p><p class="see">参见：<a href="27-incremental-temporal.html">第 27 章</a>、<a href="30-agentic-graphrag.html">第 30 章</a>、<a href="c3-temporal-memory.html">综合项目 3</a></p></dd>
   <dt id="term-graphrag">GraphRAG</dt>
-  <dd><p>Broadly, any retrieval-augmented generation that uses graph structure to organize, retrieve or integrate knowledge. Narrowly, Microsoft's method and library: extract an entity graph, detect communities, write community reports, then answer with local, global or DRIFT search.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a>, <a href="06-graph-shapes.html">Chapter 6</a>, <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
-  <dt id="term-grounding">Grounding</dt>
-  <dd><p>Tying generated statements to supplied evidence. Retrieval grounds answers; citations to source ids make the grounding checkable.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a></p></dd>
+  <dd><p>广义上，指任何利用图结构来组织、检索或整合知识的检索增强生成。狭义上，指 Microsoft 的方法和同名库：抽取实体图、发现社区、撰写社区报告，再通过局部搜索、全局搜索或 DRIFT 搜索作答。</p><p class="see">参见：<a href="00-welcome.html">第 0 章</a>、<a href="06-graph-shapes.html">第 6 章</a>、<a href="28-frameworks-in-practice.html">第 28 章</a></p></dd>
+  <dt id="term-grounding">Grounding（事实依据）</dt>
+  <dd><p>把生成的陈述与所提供的证据绑定。检索为答案提供事实依据；引用来源 id 则让这种依据可以核查。</p><p class="see">参见：<a href="01-llms-and-context.html">第 1 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-h">H</h2>
 <dl class="gloss">
-  <dt id="term-hallucination">Hallucination</dt>
-  <dd><p>Fluent output that is not supported by the input or by reality. Retrieval reduces hallucination only if the answer actually uses the evidence.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a></p></dd>
-  <dt id="term-helpfulness-score">Helpfulness score</dt>
-  <dd><p>In global search's map step, a 0 to 100 score the LLM attaches to each partial answer to say how much it helps answer the question. Low-scoring points are dropped and the rest are sorted before the reduce step.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
-  <dt id="term-hierarchical-leiden">Hierarchical Leiden</dt>
-  <dd><p>Running Leiden recursively: any community larger than a maximum cluster size is partitioned again, producing levels from coarse to fine. Microsoft GraphRAG uses it to build its community hierarchy.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a>, <a href="12-community-reports.html">Chapter 12</a></p></dd>
-  <dt id="term-high-level-keywords">High-level keywords</dt>
-  <dd><p>In LightRAG, abstract theme words extracted from the question ("supply-chain risk") that are matched against relationships to gather broad context. Contrast with low-level keywords.</p><p class="see">See: <a href="16-lightrag.html">Chapter 16</a></p></dd>
+  <dt id="term-hallucination">Hallucination（幻觉）</dt>
+  <dd><p>行文流畅、却得不到输入或现实支持的输出。只有当答案真正用上了证据，检索才能减少幻觉。</p><p class="see">参见：<a href="01-llms-and-context.html">第 1 章</a></p></dd>
+  <dt id="term-helpfulness-score">Helpfulness score（有用性评分）</dt>
+  <dd><p>在全局搜索的 map 步骤中，LLM 为每个部分答案附上的 0 到 100 分，表示它对回答问题有多大帮助。低分要点被丢弃，其余按分数排序后进入 reduce 步骤。</p><p class="see">参见：<a href="15-global-search.html">第 15 章</a></p></dd>
+  <dt id="term-hierarchical-leiden">Hierarchical Leiden（层次化 Leiden）</dt>
+  <dd><p>递归地运行 Leiden：任何超过最大簇规模的社区都会再次划分，由此得到从粗到细的多个层级。Microsoft GraphRAG 用它构建社区层级。</p><p class="see">参见：<a href="11-community-detection.html">第 11 章</a>、<a href="12-community-reports.html">第 12 章</a></p></dd>
+  <dt id="term-high-level-keywords">High-level keywords（高层关键词）</dt>
+  <dd><p>在 LightRAG 中，从问题里抽取的抽象主题词（如“supply-chain risk”，供应链风险），用来匹配关系，收集宽泛的上下文。与之相对的是低层关键词。</p><p class="see">参见：<a href="16-lightrag.html">第 16 章</a></p></dd>
   <dt id="term-hipporag">HippoRAG</dt>
-  <dd><p>A retrieval method (Jim&eacute;nez Guti&eacute;rrez et al., 2024) inspired by hippocampal memory. It builds a graph of OpenIE triples plus synonymy edges, seeds Personalized PageRank from the question's entities, and ranks passages by the mass of the nodes they contain. HippoRAG 2 adds passage nodes to the graph and links the query to triples rather than only to entities.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dd><p>受海马体记忆机制启发的检索方法（Jim&eacute;nez Guti&eacute;rrez et al., 2024）。它用 OpenIE 三元组加同义边构建图，以问题中的实体为种子运行个性化 PageRank，并按段落所含节点的概率质量为段落排序。HippoRAG 2 在图中加入了段落节点，并把查询链接到三元组，而不只是链接到实体。</p><p class="see">参见：<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
   <dt id="term-hnsw">HNSW</dt>
-  <dd><p>Hierarchical Navigable Small World, a graph-based approximate nearest neighbor index (Malkov and Yashunin). Searches start in a sparse top layer and descend to denser layers. Most vector databases offer it, and pgvector supports it alongside IVFFlat.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dd><p>全称 Hierarchical Navigable Small World（分层可导航小世界），一种基于图的近似最近邻索引（Malkov and Yashunin）。搜索从稀疏的顶层开始，逐层下降到更稠密的层。大多数向量数据库都提供它，pgvector 也同时支持它和 IVFFlat。</p><p class="see">参见：<a href="13-storage-indexing.html">第 13 章</a></p></dd>
   <dt id="term-hotpotqa">HotpotQA</dt>
-  <dd><p>A multi-hop question answering dataset built on Wikipedia (Yang et al., 2018) whose questions require two supporting paragraphs, with annotated supporting facts. A standard benchmark for multi-hop retrieval.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-hub-node">Hub node</dt>
-  <dd><p>A node with very high degree, such as Kestrel Labs or a generic entity like "the company". Expanding through hubs floods the context with loosely related facts, so retrievers cap, down-weight or skip them.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
-  <dt id="term-hybrid-retrieval">Hybrid retrieval</dt>
-  <dd><p>Combining several retrievers, typically BM25, dense vectors and graph traversal, and fusing their rankings, often with reciprocal rank fusion and a reranker.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
-  <dt id="term-hyperedge">Hyperedge</dt>
-  <dd><p>An edge that connects any number of nodes at once. "Brightwater Capital led Kestrel Labs' $40M Series B in 2025" is one n-ary fact that a hyperedge can hold without splitting it into pairs.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
-  <dt id="term-hypergraph">Hypergraph</dt>
-  <dd><p>A graph whose edges (hyperedges) can join more than two nodes. HyperGraphRAG and related methods use hypergraphs to keep n-ary facts intact.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
+  <dd><p>基于 Wikipedia 构建的多跳问答数据集（Yang et al., 2018），每个问题需要两个支撑段落，并标注了支撑事实。它是多跳检索的标准基准。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-hub-node">Hub node（枢纽节点）</dt>
+  <dd><p>度非常高的节点，例如 Kestrel Labs，或“the company”（公司）这类泛指实体。经由枢纽节点扩展会让上下文充斥着关联松散的事实，因此检索器会对它们设上限、降低权重或直接跳过。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="14-local-search.html">第 14 章</a>、<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
+  <dt id="term-hybrid-retrieval">Hybrid retrieval（混合检索）</dt>
+  <dd><p>组合多个检索器（通常是 BM25、稠密向量和图遍历）并融合它们的排序结果，常配合倒数排名融合和重排器。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
+  <dt id="term-hyperedge">Hyperedge（超边）</dt>
+  <dd><p>可以同时连接任意多个节点的边。“Brightwater Capital 于 2025 年领投 Kestrel Labs 4000 万美元 B 轮融资”是一个 n 元事实，超边可以完整容纳它，而不必拆成若干二元关系。</p><p class="see">参见：<a href="06-graph-shapes.html">第 6 章</a>、<a href="31-multimodal-hypergraph.html">第 31 章</a></p></dd>
+  <dt id="term-hypergraph">Hypergraph（超图）</dt>
+  <dd><p>边（超边）可以连接两个以上节点的图。HyperGraphRAG 及相关方法用超图保持 n 元事实的完整。</p><p class="see">参见：<a href="06-graph-shapes.html">第 6 章</a>、<a href="31-multimodal-hypergraph.html">第 31 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-i">I</h2>
 <dl class="gloss">
-  <dt id="term-incremental-indexing">Incremental indexing</dt>
-  <dd><p>Updating a graph index when documents are added, changed or removed without rebuilding everything: extract only new text units, upsert entities and edges, and recompute only the communities and reports that changed.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="26-cost-scaling.html">Chapter 26</a></p></dd>
-  <dt id="term-instruction-tuning">Instruction tuning</dt>
-  <dd><p>Fine-tuning a model on instruction and response pairs. Graph instruction tuning (GraphGPT, LLaGA, MuseGraph) teaches a model to read graph inputs and perform graph tasks.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
-  <dt id="term-invalidation">Invalidation</dt>
-  <dd><p>Marking a fact as no longer true when newer information contradicts it, rather than deleting it: close its valid-time interval and stamp when the system learned that (minigraphrag's <code>valid_to</code> and <code>invalidated_at</code>, Graphiti's <code>invalid_at</code> and <code>expired_at</code>). When Priya Nair became CTO in March 2026, Jonas Vehl's CTO_OF edge was invalidated, not erased.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
+  <dt id="term-incremental-indexing">Incremental indexing（增量索引）</dt>
+  <dd><p>在文档新增、修改或删除时更新图索引，而不重建全部内容：只抽取新的文本单元，upsert 实体和边，只重新计算发生变化的社区和报告。</p><p class="see">参见：<a href="27-incremental-temporal.html">第 27 章</a>、<a href="26-cost-scaling.html">第 26 章</a></p></dd>
+  <dt id="term-instruction-tuning">Instruction tuning（指令微调）</dt>
+  <dd><p>在“指令–回复”对上微调模型。图指令微调（GraphGPT、LLaGA、MuseGraph）教模型读取图输入并完成图任务。</p><p class="see">参见：<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
+  <dt id="term-invalidation">Invalidation（失效标记）</dt>
+  <dd><p>当新信息与某个事实矛盾时，把该事实标记为不再成立，而不是删除它：关闭其有效时间区间，并记下系统得知这一点的时间（minigraphrag 的 <code>valid_to</code> 和 <code>invalidated_at</code>，Graphiti 的 <code>invalid_at</code> 和 <code>expired_at</code>）。2026 年 3 月 Priya Nair 出任 CTO 后，Jonas Vehl 的 CTO_OF 边被标记为失效，而不是被抹去。</p><p class="see">参见：<a href="27-incremental-temporal.html">第 27 章</a>、<a href="c3-temporal-memory.html">综合项目 3</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-k">K</h2>
 <dl class="gloss">
-  <dt id="term-k-hop-neighborhood">k-hop neighborhood</dt>
-  <dd><p>All nodes reachable from a node within k edges, plus the edges among them. The 2-hop neighborhood of Project Tern includes Deepcast (1 hop, through REPLACES) and Marlow Dynamics (2 hops, through Priya Nair's FORMERLY_WORKED_AT edge).</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
-  <dt id="term-kestrel-labs-corpus">Kestrel Labs corpus</dt>
-  <dd><p>The fictional running example of this course: an ocean-tech startup, its people, projects, investors, supplier and regulators. Every chapter builds and queries the same graph.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a></p></dd>
-  <dt id="term-kgqa">KGQA</dt>
-  <dd><p>Knowledge graph question answering: answering natural-language questions from an existing knowledge graph, with benchmarks such as WebQSP, CWQ and MetaQA. Think-on-Graph, RoG and GNN-RAG were evaluated in this setting.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a>, <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
-  <dt id="term-knowledge-graph">Knowledge graph</dt>
-  <dd><p>A graph of entities and typed relationships that encodes facts about a domain, usually with a schema or ontology. It can be stored as RDF triples or as a property graph.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
+  <dt id="term-k-hop-neighborhood">k-hop neighborhood（k 跳邻域）</dt>
+  <dd><p>从某节点出发在 k 条边以内可达的所有节点，以及它们之间的边。Project Tern 的 2 跳邻域包括 Deepcast（1 跳，经由 REPLACES）和 Marlow Dynamics（2 跳，经由 Priya Nair 的 FORMERLY_WORKED_AT 边）。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="14-local-search.html">第 14 章</a></p></dd>
+  <dt id="term-kestrel-labs-corpus">Kestrel Labs corpus（Kestrel Labs 语料库）</dt>
+  <dd><p>本课程虚构的贯穿示例：一家海洋科技初创公司，及其人员、项目、投资方、供应商和监管机构。每一章都构建并查询同一张图。</p><p class="see">参见：<a href="00-welcome.html">第 0 章</a></p></dd>
+  <dt id="term-kgqa">KGQA（知识图谱问答）</dt>
+  <dd><p>Knowledge graph question answering：基于现有知识图谱回答自然语言问题，常用基准有 WebQSP、CWQ 和 MetaQA。Think-on-Graph、RoG 和 GNN-RAG 都在这一设定下评估。</p><p class="see">参见：<a href="18-paths-and-agents.html">第 18 章</a>、<a href="19-subgraph-gnn.html">第 19 章</a></p></dd>
+  <dt id="term-knowledge-graph">Knowledge graph（知识图谱）</dt>
+  <dd><p>由实体和带类型的关系组成、编码某个领域事实的图，通常配有模式或本体。它可以存储为 RDF 三元组，也可以存储为属性图。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-l">L</h2>
 <dl class="gloss">
   <dt id="term-lazygraphrag">LazyGraphRAG</dt>
-  <dd><p>A Microsoft Research approach that skips LLM summarization at indexing time (using lightweight concept extraction and co-occurrence instead) and defers LLM work to query time, bringing indexing cost close to vector RAG.</p><p class="see">See: <a href="26-cost-scaling.html">Chapter 26</a></p></dd>
+  <dd><p>Microsoft Research 提出的一种方法：索引阶段跳过 LLM 摘要（改用轻量级的概念抽取和共现关系），把 LLM 的工作推迟到查询阶段，使索引成本接近向量 RAG。</p><p class="see">参见：<a href="26-cost-scaling.html">第 26 章</a></p></dd>
   <dt id="term-leiden">Leiden</dt>
-  <dd><p>A community detection algorithm (Traag, Waltman and van Eck, 2019) that fixes a flaw in Louvain: a refinement phase between local moving and aggregation guarantees that communities are well connected.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
-  <dt id="term-lexical-graph">Lexical graph</dt>
-  <dd><p>A graph of documents and their structure, with nodes for documents, sections and chunks and edges such as PART_OF and NEXT. Entities can be attached to it to form a hybrid graph.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
+  <dd><p>一种社区发现算法（Traag, Waltman and van Eck, 2019），修正了 Louvain 的一个缺陷：在局部移动和聚合之间加入细化阶段，保证社区内部连通良好。</p><p class="see">参见：<a href="11-community-detection.html">第 11 章</a></p></dd>
+  <dt id="term-lexical-graph">Lexical graph（词汇图）</dt>
+  <dd><p>描述文档及其结构的图，节点是文档、章节和分块，边有 PART_OF、NEXT 等。可以把实体挂接到它上面，形成混合图。</p><p class="see">参见：<a href="06-graph-shapes.html">第 6 章</a>、<a href="07-chunking-text-units.html">第 7 章</a></p></dd>
   <dt id="term-lightrag">LightRAG</dt>
-  <dd><p>A graph-based RAG system (Guo et al., 2024) that indexes entities and relationships with key-value descriptions and retrieves in two levels: low-level keywords match entities, high-level keywords match relationships. It supports incremental updates by merging new subgraphs.</p><p class="see">See: <a href="16-lightrag.html">Chapter 16</a></p></dd>
-  <dt id="term-linearization">Linearization</dt>
-  <dd><p>Turning a graph or subgraph into text an LLM can read: triples, markdown tables, adjacency lists, JSON or natural-language sentences. The format and ordering both affect answer quality.</p><p class="see">See: <a href="22-context-construction.html">Chapter 22</a></p></dd>
+  <dd><p>一个基于图的 RAG 系统（Guo et al., 2024），用键值描述为实体和关系建立索引，分两级检索：低层关键词匹配实体，高层关键词匹配关系。它通过合并新子图支持增量更新。</p><p class="see">参见：<a href="16-lightrag.html">第 16 章</a></p></dd>
+  <dt id="term-linearization">Linearization（线性化）</dt>
+  <dd><p>把图或子图转成 LLM 能读的文本：三元组、Markdown 表格、邻接表、JSON 或自然语言句子。格式和排列顺序都会影响答案质量。</p><p class="see">参见：<a href="22-context-construction.html">第 22 章</a></p></dd>
   <dt id="term-llaga">LLaGA</dt>
-  <dd><p>Large Language and Graph Assistant (Chen et al., 2024). It turns each node's neighborhood into a structure-aware sequence and maps it into the LLM's token embedding space with a trained projector.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dd><p>全称 Large Language and Graph Assistant（Chen et al., 2024）。它把每个节点的邻域转换成结构感知的序列，再通过训练好的投影器映射到 LLM 的 token 嵌入空间。</p><p class="see">参见：<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
   <dt id="term-llamaindex-propertygraphindex">LlamaIndex PropertyGraphIndex</dt>
-  <dd><p>LlamaIndex's index type for building and querying labeled property graphs, with pluggable extractors and retrievers and support for graph stores such as Neo4j.</p><p class="see">See: <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
-  <dt id="term-llm-as-judge">LLM-as-judge</dt>
-  <dd><p>Using an LLM to grade answers against criteria or against each other. Useful when there is no single gold answer, but sensitive to position, length and self-preference biases, so randomize order and check agreement.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-local-search">Local search</dt>
-  <dd><p>Microsoft GraphRAG's query mode for questions about specific entities. It links the question to seed entities by embedding, gathers their relationships, claims, community reports and source text units, and fills a token budget with ranked tables.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a></p></dd>
-  <dt id="term-lost-in-the-middle">Lost in the middle</dt>
-  <dd><p>The finding (Liu et al., 2023) that language models use information at the start and end of a long context more reliably than information in the middle. It is why context builders put the strongest evidence at the edges.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
+  <dd><p>LlamaIndex 中用于构建和查询带标签属性图的索引类型，抽取器和检索器可插拔，并支持 Neo4j 等图存储。</p><p class="see">参见：<a href="28-frameworks-in-practice.html">第 28 章</a></p></dd>
+  <dt id="term-llm-as-judge">LLM-as-judge（LLM 评审）</dt>
+  <dd><p>让 LLM 按标准为答案打分，或对答案两两比较。在没有唯一标准答案时很有用，但它容易受位置、长度和偏好自身输出等偏差影响，因此要随机打乱顺序并检查评审一致性。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-local-search">Local search（局部搜索）</dt>
+  <dd><p>Microsoft GraphRAG 面向特定实体问题的查询模式。它通过嵌入把问题链接到种子实体，收集这些实体的关系、声明、社区报告和来源文本单元，再用排好序的表格填满 token 预算。</p><p class="see">参见：<a href="14-local-search.html">第 14 章</a></p></dd>
+  <dt id="term-lost-in-the-middle">Lost in the middle（中间迷失）</dt>
+  <dd><p>一项研究发现（Liu et al., 2023）：语言模型利用长上下文开头和结尾的信息，比利用中间部分的信息更可靠。这就是上下文构建器把最有力的证据放在两端的原因。</p><p class="see">参见：<a href="01-llms-and-context.html">第 1 章</a>、<a href="22-context-construction.html">第 22 章</a></p></dd>
   <dt id="term-louvain">Louvain</dt>
-  <dd><p>A greedy modularity-maximization algorithm (Blondel et al., 2008). It repeats two phases: move single nodes to the neighboring community with the best modularity gain, then collapse communities into super-nodes.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
-  <dt id="term-low-level-keywords">Low-level keywords</dt>
-  <dd><p>In LightRAG, specific entity words extracted from the question ("Deepcast", "Project Tern") that are matched against entity embeddings to retrieve precise facts.</p><p class="see">See: <a href="16-lightrag.html">Chapter 16</a></p></dd>
+  <dd><p>一种贪心的模块度最大化算法（Blondel et al., 2008）。它反复执行两个阶段：把单个节点移入模块度增益最大的相邻社区，然后把社区折叠成超节点。</p><p class="see">参见：<a href="11-community-detection.html">第 11 章</a></p></dd>
+  <dt id="term-low-level-keywords">Low-level keywords（低层关键词）</dt>
+  <dd><p>在 LightRAG 中，从问题里抽取的具体实体词（如“Deepcast”“Project Tern”），用来与实体嵌入匹配，检索精确的事实。</p><p class="see">参见：<a href="16-lightrag.html">第 16 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-m">M</h2>
 <dl class="gloss">
   <dt id="term-map-reduce">Map-reduce</dt>
-  <dd><p>A two-step pattern: apply the same operation to many pieces independently (map), then combine the partial results (reduce). Global search maps the question over batches of community reports and reduces the partial answers.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dd><p>一种两步模式：先对许多片段各自独立地执行同一操作（map），再合并部分结果（reduce）。全局搜索把问题分别作用于各批社区报告（map），再把部分答案归并起来（reduce）。</p><p class="see">参见：<a href="15-global-search.html">第 15 章</a></p></dd>
   <dt id="term-match">MATCH</dt>
-  <dd><p>The Cypher clause that describes a graph pattern to find, such as <code>MATCH (p:Person)-[:CO_LEADS]-&gt;(:Project {name: 'Project Tern'}) RETURN p.name</code>.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
-  <dt id="term-message-passing">Message passing</dt>
-  <dd><p>The core operation of most GNNs: each node builds a message from its neighbors' current representations, aggregates the messages (sum, mean, attention) and updates its own representation. k rounds give each node a k-hop receptive field.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
-  <dt id="term-metapath">Metapath</dt>
-  <dd><p>A sequence of node and edge types that defines a kind of connection, such as Person &rarr; FORMERLY_WORKED_AT &rarr; Organization &rarr; ACQUIRED &rarr; Organization. Following metapaths retrieves only meaningful routes instead of every path.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dd><p>Cypher 中描述待查找图模式的子句，例如 <code>MATCH (p:Person)-[:CO_LEADS]-&gt;(:Project {name: 'Project Tern'}) RETURN p.name</code>。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="20-text2cypher.html">第 20 章</a></p></dd>
+  <dt id="term-message-passing">Message passing（消息传递）</dt>
+  <dd><p>大多数 GNN 的核心操作：每个节点根据邻居的当前表示构造消息，聚合这些消息（求和、取平均、注意力），并更新自身表示。经过 k 轮后，每个节点获得 k 跳感受野。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a></p></dd>
+  <dt id="term-metapath">Metapath（元路径）</dt>
+  <dd><p>由节点类型和边类型组成、定义某类连接的序列，例如 Person &rarr; FORMERLY_WORKED_AT &rarr; Organization &rarr; ACQUIRED &rarr; Organization。沿元路径检索只会得到有意义的路线，而不是所有路径。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
   <dt id="term-minigraphrag">minigraphrag</dt>
-  <dd><p>The course's small Python reference implementation of GraphRAG: chunking, extraction, resolution, communities, reports, indexing, several search methods and evaluation, runnable offline.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a>, <a href="c1-minigraphrag.html">Capstone 1</a></p></dd>
-  <dt id="term-mockllm">MockLLM</dt>
-  <dd><p>minigraphrag's deterministic offline LLM. It recognizes each prompt by a marker phrase and answers with heuristics: gazetteer-based extraction, extractive answers built from the context sentences. Pipelines and tests run without an API key or network, but its answers show what retrieval supplied, not how well a model would reason.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a></p></dd>
-  <dt id="term-modularity">Modularity</dt>
-  <dd><p>A score for a partition: Q = (1/2m) &Sigma;<sub>ij</sub> [A<sub>ij</sub> &minus; &gamma; k<sub>i</sub>k<sub>j</sub>/2m] &delta;(c<sub>i</sub>, c<sub>j</sub>), where m is total edge weight, k<sub>i</sub> is a node's degree and &gamma; is the resolution. It compares edges inside communities with what a random graph with the same degrees would give.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="11-community-detection.html">Chapter 11</a></p></dd>
-  <dt id="term-multi-hop-question">Multi-hop question</dt>
-  <dd><p>A question whose answer requires combining facts from several places. "Why did Kestrel Labs start Project Tern?" needs acquisition, supply and project facts from different chunks.</p><p class="see">See: <a href="03-where-rag-breaks.html">Chapter 3</a></p></dd>
+  <dd><p>本课程配套的小型 Python GraphRAG 参考实现，涵盖分块、抽取、消解、社区、报告、索引、多种搜索方法和评估，可离线运行。</p><p class="see">参见：<a href="00-welcome.html">第 0 章</a>、<a href="c1-minigraphrag.html">综合项目 1</a></p></dd>
+  <dt id="term-mockllm">MockLLM（模拟 LLM）</dt>
+  <dd><p>minigraphrag 中确定性的离线 LLM。它通过标记短语识别每个提示词，并用启发式规则作答：基于地名词典（gazetteer）的抽取，以及从上下文句子中摘取拼成的答案。流水线和测试无需 API 密钥或网络即可运行；但它的答案只反映检索提供了什么，并不代表真实模型的推理水平。</p><p class="see">参见：<a href="00-welcome.html">第 0 章</a></p></dd>
+  <dt id="term-modularity">Modularity（模块度）</dt>
+  <dd><p>衡量一种划分的分数：Q = (1/2m) &Sigma;<sub>ij</sub> [A<sub>ij</sub> &minus; &gamma; k<sub>i</sub>k<sub>j</sub>/2m] &delta;(c<sub>i</sub>, c<sub>j</sub>)，其中 m 是边权重总和，k<sub>i</sub> 是节点的度，&gamma; 是分辨率。它把社区内部的边与“度分布相同的随机图”中预期的边数作比较。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="11-community-detection.html">第 11 章</a></p></dd>
+  <dt id="term-multi-hop-question">Multi-hop question（多跳问题）</dt>
+  <dd><p>需要把多处事实组合起来才能回答的问题。“Kestrel Labs 为什么启动 Project Tern？”需要分散在不同分块里的收购、供货和项目事实。</p><p class="see">参见：<a href="03-where-rag-breaks.html">第 3 章</a></p></dd>
   <dt id="term-multihop-rag">MultiHop-RAG</dt>
-  <dd><p>A benchmark (Tang and Yang, 2024) of multi-hop queries over a news corpus, with inference, comparison, temporal and null query types, for testing retrieval and answering.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-multimodal-knowledge-graph">Multimodal knowledge graph</dt>
-  <dd><p>A knowledge graph whose nodes or attributes include images, tables, audio or video segments alongside text entities.</p><p class="see">See: <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
+  <dd><p>一个在新闻语料上构建的多跳查询基准（Tang and Yang, 2024），包含推理、比较、时间和空查询四种类型，用于测试检索与作答。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-multimodal-knowledge-graph">Multimodal knowledge graph（多模态知识图谱）</dt>
+  <dd><p>节点或属性中除文本实体外，还包含图像、表格、音频或视频片段的知识图谱。</p><p class="see">参见：<a href="31-multimodal-hypergraph.html">第 31 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-n">N</h2>
 <dl class="gloss">
-  <dt id="term-neighborhood-expansion">Neighborhood expansion</dt>
-  <dd><p>Retrieving the entities that match a query, then adding their k-hop neighbors and the connecting edges as context. It is the first of the seven Graph RAG designs and the core of local search.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-neighborhood-expansion">Neighborhood expansion（邻域扩展）</dt>
+  <dd><p>先检索与查询匹配的实体，再把它们的 k 跳邻居及相连的边加入上下文。它是七种 Graph RAG 设计中的第一种，也是局部搜索的核心。</p><p class="see">参见：<a href="14-local-search.html">第 14 章</a>、<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
   <dt id="term-neo4j">Neo4j</dt>
-  <dd><p>A widely used property graph database queried with Cypher. It offers vector indexes and an official GraphRAG Python package.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a>, <a href="20-text2cypher.html">Chapter 20</a>, <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
+  <dd><p>一款广泛使用、以 Cypher 查询的属性图数据库。它提供向量索引和官方的 GraphRAG Python 包。</p><p class="see">参见：<a href="13-storage-indexing.html">第 13 章</a>、<a href="20-text2cypher.html">第 20 章</a>、<a href="28-frameworks-in-practice.html">第 28 章</a></p></dd>
   <dt id="term-networkx">NetworkX</dt>
-  <dd><p>A pure-Python library for building and analyzing graphs. It is ideal for learning and for graphs up to a few hundred thousand edges; minigraphrag uses it throughout.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
-  <dt id="term-node-specificity">Node specificity</dt>
-  <dd><p>HippoRAG's weight for a node, the inverse of the number of passages it appears in. Rare entities get stronger seeds in Personalized PageRank, like IDF for graph nodes.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
-  <dt id="term-normalization-entity-names">Normalization (entity names)</dt>
-  <dd><p>Rewriting names into a canonical comparison form: case folding, trimming punctuation and titles ("Dr."), collapsing whitespace. It is the cheapest step of entity resolution.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dd><p>纯 Python 实现的图构建与分析库。它非常适合学习，也适合边数在几十万以内的图；minigraphrag 全程使用它。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="13-storage-indexing.html">第 13 章</a></p></dd>
+  <dt id="term-node-specificity">Node specificity（节点特异性）</dt>
+  <dd><p>HippoRAG 给节点的权重，等于该节点出现的段落数的倒数。罕见实体在个性化 PageRank 中获得更强的种子权重，相当于图节点版的 IDF。</p><p class="see">参见：<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
+  <dt id="term-normalization-entity-names">Normalization (entity names)（实体名称规范化）</dt>
+  <dd><p>把名称改写成统一的比较形式：大小写折叠、去掉标点和头衔（“Dr.”）、合并多余空白。这是实体消解中开销最低的一步。</p><p class="see">参见：<a href="09-entity-resolution.html">第 9 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-o">O</h2>
 <dl class="gloss">
-  <dt id="term-observability">Observability</dt>
-  <dd><p>Being able to see what a running system did and why: traces of each retrieval step, prompts, token counts, latency, cost and the ids of evidence used for each answer.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a></p></dd>
-  <dt id="term-ontology">Ontology</dt>
-  <dd><p>A formal specification of the types of things in a domain, their properties and the relations allowed between them, often with inheritance and constraints (for example in OWL). Stronger than a simple schema.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
-  <dt id="term-openie">OpenIE</dt>
-  <dd><p>Open information extraction: pulling (subject, relation, object) triples from text without a fixed schema of relation types. HippoRAG builds its graph from LLM-based OpenIE.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
-  <dt id="term-overlap">Overlap</dt>
-  <dd><p>The number of tokens (or words) consecutive chunks share. Overlap keeps a sentence or relationship that straddles a boundary intact in at least one chunk, at the cost of duplicate extraction work.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
+  <dt id="term-observability">Observability（可观测性）</dt>
+  <dd><p>能够看清运行中的系统做了什么、为什么这样做：每个检索步骤的追踪、提示词、token 数、延迟、成本，以及每个答案所用证据的 id。</p><p class="see">参见：<a href="29-production-ops.html">第 29 章</a></p></dd>
+  <dt id="term-ontology">Ontology（本体）</dt>
+  <dd><p>对某个领域中事物类型、其属性以及类型之间允许的关系所做的形式化规范，通常带有继承和约束（例如用 OWL 描述）。它比简单的模式表达能力更强。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a></p></dd>
+  <dt id="term-openie">OpenIE（开放信息抽取）</dt>
+  <dd><p>Open information extraction：在没有固定关系类型模式的情况下，从文本中抽取（主体, 关系, 客体）三元组。HippoRAG 用基于 LLM 的 OpenIE 构建它的图。</p><p class="see">参见：<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
+  <dt id="term-overlap">Overlap（重叠）</dt>
+  <dd><p>相邻分块共享的 token（或词）数。重叠能让跨越边界的句子或关系至少在一个分块中保持完整，代价是重复的抽取工作。</p><p class="see">参见：<a href="02-vector-rag.html">第 2 章</a>、<a href="07-chunking-text-units.html">第 7 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-p">P</h2>
 <dl class="gloss">
   <dt id="term-pagerank">PageRank</dt>
-  <dd><p>A node-importance score: the stationary probability that a random walker is at a node, where at each step it follows a random edge with probability &alpha; or jumps to a random node otherwise. Computed by power iteration: r = (1&minus;&alpha;)/N + &alpha; &middot; M r.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
-  <dt id="term-pairwise-evaluation">Pairwise evaluation</dt>
-  <dd><p>Showing a judge two answers to the same question and asking which is better on a criterion. Relative judgments are more stable than absolute scores; swap positions to cancel order bias.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-path-retrieval">Path retrieval</dt>
-  <dd><p>Retrieving chains of edges that connect query entities, rather than isolated nodes or chunks, so the model sees how facts link. Marlow Dynamics &rarr; ACQUIRED &rarr; Deepcast &rarr; SUPPLIED &rarr; Kestrel Labs explains Project Tern.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dd><p>一种节点重要性分数：随机游走者停留在某节点的平稳概率。游走者每一步以概率 &alpha; 沿一条随机边前进，否则跳转到一个随机节点。通过幂迭代计算：r = (1&minus;&alpha;)/N + &alpha; &middot; M r。</p><p class="see">参见：<a href="04-graph-fundamentals.html">第 4 章</a>、<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
+  <dt id="term-pairwise-evaluation">Pairwise evaluation（成对评估）</dt>
+  <dd><p>把同一问题的两个答案交给评审，让它按某项标准判断哪个更好。相对判断比绝对分数更稳定；交换两者位置可以抵消顺序偏差。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-path-retrieval">Path retrieval（路径检索）</dt>
+  <dd><p>检索连接查询实体的边链，而不是孤立的节点或分块，让模型看到事实之间如何关联。Marlow Dynamics &rarr; ACQUIRED &rarr; Deepcast &rarr; SUPPLIED &rarr; Kestrel Labs 这条路径解释了 Project Tern 的由来。</p><p class="see">参见：<a href="18-paths-and-agents.html">第 18 章</a></p></dd>
   <dt id="term-pathrag">PathRAG</dt>
-  <dd><p>A graph RAG method (Chen et al., 2025) that retrieves relational paths between retrieved nodes, prunes them with flow-based pruning, and places paths in the prompt ordered by reliability.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
-  <dt id="term-pcst-prize-collecting-steiner-tree">PCST (prize-collecting Steiner tree)</dt>
-  <dd><p>An optimization that picks a connected subgraph maximizing the prizes of included nodes (relevance to the query) minus the costs of included edges. G-Retriever uses it to extract a compact, connected subgraph.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
-  <dt id="term-personalized-pagerank-ppr">Personalized PageRank (PPR)</dt>
-  <dd><p>PageRank in which the walker restarts, with probability 1 &minus; &alpha;, at a chosen seed distribution instead of a uniform one. Mass concentrates on nodes close to and well connected with the seeds, which makes it a multi-hop relevance score.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dd><p>一种图 RAG 方法（Chen et al., 2025）：检索已检索节点之间的关系路径，用基于流的剪枝加以筛选，再按可靠性排序放入提示词。</p><p class="see">参见：<a href="18-paths-and-agents.html">第 18 章</a></p></dd>
+  <dt id="term-pcst-prize-collecting-steiner-tree">PCST (prize-collecting Steiner tree)（奖励收集斯坦纳树）</dt>
+  <dd><p>一种优化问题：选出一个连通子图，使所含节点的奖励（与查询的相关性）减去所含边的代价最大。G-Retriever 用它抽取紧凑的连通子图。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a></p></dd>
+  <dt id="term-personalized-pagerank-ppr">Personalized PageRank (PPR)（个性化 PageRank）</dt>
+  <dd><p>一种 PageRank 变体：游走者以概率 1 &minus; &alpha; 重启时，按选定的种子分布跳转，而不是均匀分布。概率质量集中在离种子近、且与种子连接紧密的节点上，因此它可用作多跳相关性分数。</p><p class="see">参见：<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
   <dt id="term-pgvector">pgvector</dt>
-  <dd><p>A PostgreSQL extension that adds a vector column type, distance operators and HNSW and IVFFlat indexes, so embeddings can live next to relational and edge tables.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dd><p>PostgreSQL 扩展，增加了向量列类型、距离运算符以及 HNSW 和 IVFFlat 索引，让嵌入可以与关系表、边表存放在一起。</p><p class="see">参见：<a href="13-storage-indexing.html">第 13 章</a></p></dd>
   <dt id="term-plan-on-graph-pog">Plan-on-Graph (PoG)</dt>
-  <dd><p>A knowledge-graph reasoning method (Chen et al., 2024) that decomposes a question into sub-objectives, explores the graph adaptively, and uses memory and reflection to correct wrong exploration paths.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
-  <dt id="term-prompt-caching">Prompt caching</dt>
-  <dd><p>Reusing the provider-side computation for an identical prompt prefix across calls, which lowers cost and latency. Put static instructions and examples first and variable text last to benefit.</p><p class="see">See: <a href="26-cost-scaling.html">Chapter 26</a></p></dd>
-  <dt id="term-prompt-injection">Prompt injection</dt>
-  <dd><p>Text that tries to override a model's instructions. In GraphRAG it can arrive through indexed documents, be copied into entity descriptions and community reports, and reach many future queries.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a></p></dd>
-  <dt id="term-property-graph">Property graph</dt>
-  <dd><p>A graph model in which nodes and edges have labels or types and arbitrary key-value properties, such as a CTO_OF edge with since and until properties. Used by Neo4j and most GraphRAG tools.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
-  <dt id="term-provenance">Provenance</dt>
-  <dd><p>The record of where a fact came from: document, text unit, character span, extraction run and time. It enables citations, debugging bad edges, deletions and access control.</p><p class="see">See: <a href="07-chunking-text-units.html">Chapter 7</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a>, <a href="29-production-ops.html">Chapter 29</a></p></dd>
+  <dd><p>一种知识图谱推理方法（Chen et al., 2024）：把问题分解为子目标，自适应地探索图，并借助记忆和反思纠正错误的探索路径。</p><p class="see">参见：<a href="18-paths-and-agents.html">第 18 章</a></p></dd>
+  <dt id="term-prompt-caching">Prompt caching（提示词缓存）</dt>
+  <dd><p>在多次调用之间，复用服务商端对相同提示词前缀的计算结果，从而降低成本和延迟。要从中受益，应把静态指令和示例放在前面，可变文本放在最后。</p><p class="see">参见：<a href="26-cost-scaling.html">第 26 章</a></p></dd>
+  <dt id="term-prompt-injection">Prompt injection（提示词注入）</dt>
+  <dd><p>试图覆盖模型指令的文本。在 GraphRAG 中，它可能随被索引的文档进入系统，被复制进实体描述和社区报告，进而影响此后的大量查询。</p><p class="see">参见：<a href="29-production-ops.html">第 29 章</a></p></dd>
+  <dt id="term-property-graph">Property graph（属性图）</dt>
+  <dd><p>一种图模型：节点和边带有标签或类型，以及任意的键值属性，例如带 since 和 until 属性的 CTO_OF 边。Neo4j 和大多数 GraphRAG 工具都采用它。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a></p></dd>
+  <dt id="term-provenance">Provenance（溯源）</dt>
+  <dd><p>记录事实的来历：文档、文本单元、字符区间、抽取批次和时间。有了它，才能提供引用、排查错误的边、执行删除和访问控制。</p><p class="see">参见：<a href="07-chunking-text-units.html">第 7 章</a>、<a href="21-hybrid-design-patterns.html">第 21 章</a>、<a href="29-production-ops.html">第 29 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-q">Q</h2>
 <dl class="gloss">
-  <dt id="term-query-focused-summarization-qfs">Query-focused summarization (QFS)</dt>
-  <dd><p>Summarizing a document collection with respect to a question. The GraphRAG paper frames global sensemaking questions such as "What are the main themes?" as QFS.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a>, <a href="15-global-search.html">Chapter 15</a></p></dd>
-  <dt id="term-query-routing">Query routing</dt>
-  <dd><p>Choosing a retrieval strategy per question, for example local search for entity questions, global search for themes, Text2Cypher for aggregates.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a>, <a href="29-production-ops.html">Chapter 29</a></p></dd>
+  <dt id="term-query-focused-summarization-qfs">Query-focused summarization (QFS)（查询聚焦摘要）</dt>
+  <dd><p>围绕一个问题对文档集合做摘要。GraphRAG 论文把“主要主题有哪些？”这类全局性的理解问题（sensemaking）视为 QFS。</p><p class="see">参见：<a href="12-community-reports.html">第 12 章</a>、<a href="15-global-search.html">第 15 章</a></p></dd>
+  <dt id="term-query-routing">Query routing（查询路由）</dt>
+  <dd><p>为每个问题选择检索策略，例如实体类问题用局部搜索，主题类问题用全局搜索，聚合类问题用 Text2Cypher。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a>、<a href="29-production-ops.html">第 29 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-r">R</h2>
 <dl class="gloss">
-  <dt id="term-rag-retrieval-augmented-generation">RAG (retrieval-augmented generation)</dt>
-  <dd><p>Answering with an LLM after retrieving relevant external information and placing it in the prompt. It adds fresh or private knowledge without retraining and makes answers citable.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a>, <a href="02-vector-rag.html">Chapter 2</a></p></dd>
+  <dt id="term-rag-retrieval-augmented-generation">RAG (retrieval-augmented generation)（检索增强生成）</dt>
+  <dd><p>先检索相关的外部信息并放入提示词，再由 LLM 作答。它无需重新训练就能引入新鲜或私有的知识，并让答案可以引用来源。</p><p class="see">参见：<a href="01-llms-and-context.html">第 1 章</a>、<a href="02-vector-rag.html">第 2 章</a></p></dd>
   <dt id="term-raptor">RAPTOR</dt>
-  <dd><p>Recursive Abstractive Processing for Tree-Organized Retrieval (Sarthi et al., 2024). It clusters chunk embeddings, summarizes each cluster, and repeats on the summaries to build a tree; retrieval can search all levels at once.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="12-community-reports.html">Chapter 12</a></p></dd>
-  <dt id="term-rating">Rating</dt>
-  <dd><p>The impact or importance score (0 to 10 in Microsoft GraphRAG) an LLM assigns to a community report, with a short explanation. It can be used to rank reports.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a></p></dd>
+  <dd><p>全称 Recursive Abstractive Processing for Tree-Organized Retrieval（Sarthi et al., 2024）。它对分块嵌入做聚类，为每个簇写摘要，再对摘要重复这一过程，构建出一棵树；检索时可以同时搜索所有层级。</p><p class="see">参见：<a href="06-graph-shapes.html">第 6 章</a>、<a href="12-community-reports.html">第 12 章</a></p></dd>
+  <dt id="term-rating">Rating（评级）</dt>
+  <dd><p>LLM 为社区报告给出的影响力或重要性分数（Microsoft GraphRAG 中为 0 到 10），附简短说明。可用于给报告排序。</p><p class="see">参见：<a href="12-community-reports.html">第 12 章</a></p></dd>
   <dt id="term-rdf">RDF</dt>
-  <dd><p>Resource Description Framework, the W3C model that represents knowledge as subject-predicate-object triples with IRIs as identifiers, queried with SPARQL.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
-  <dt id="term-recall-k">Recall@k</dt>
-  <dd><p>The fraction of relevant items that appear in the top k retrieved results.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
-  <dt id="term-reciprocal-rank-fusion-rrf">Reciprocal rank fusion (RRF)</dt>
-  <dd><p>A way to merge ranked lists without comparable scores: each item gets &Sigma; 1/(k + rank) over the lists it appears in, commonly with k = 60 (Cormack et al., 2009).</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
-  <dt id="term-record-delimiter">Record delimiter</dt>
-  <dd><p>The separator between records in delimited extraction output; minigraphrag and Microsoft GraphRAG's default prompts use <code>##</code>, and the output ends with <code>&lt;|COMPLETE|&gt;</code>.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
-  <dt id="term-reification">Reification</dt>
-  <dd><p>Turning a relationship into a node so that it can carry its own properties and links. The Series B becomes a FundingRound node connected to Brightwater Capital, Kestrel Labs, an amount and a date.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
-  <dt id="term-relationship">Relationship</dt>
-  <dd><p>A typed or described connection between two entities. In minigraphrag each extracted <code>Relationship</code> has a source, target, description, <code>strength</code> and one <code>source_id</code>; merging turns all mentions into one edge with a summed <code>weight</code> and a <code>source_ids</code> list. Example: Deepcast SUPPLIED Kestrel Labs from 2022 to 2025.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
-  <dt id="term-relationship-strength">Relationship strength</dt>
-  <dd><p>The 1 to 10 score the extractor assigns to how strong a relationship is (<code>Relationship.strength</code>). Merging sums the strengths of all mentions into the edge's <code>weight</code>.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a>, <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
-  <dt id="term-reranker">Reranker</dt>
-  <dd><p>A second-stage model that reorders a short candidate list by relevance, usually a cross-encoder or an LLM.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
-  <dt id="term-resolution-parameter">Resolution parameter</dt>
-  <dd><p>The &gamma; in modularity. Values above 1 favor more, smaller communities; values below 1 favor fewer, larger ones.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
+  <dd><p>全称 Resource Description Framework（资源描述框架），W3C 制定的模型，把知识表示为以 IRI 为标识符的“主语–谓语–宾语”三元组，用 SPARQL 查询。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a></p></dd>
+  <dt id="term-recall-k">Recall@k（前 k 召回率）</dt>
+  <dd><p>相关条目中出现在检索结果前 k 位的比例。</p><p class="see">参见：<a href="25-evaluation.html">第 25 章</a></p></dd>
+  <dt id="term-reciprocal-rank-fusion-rrf">Reciprocal rank fusion (RRF)（倒数排名融合）</dt>
+  <dd><p>一种在分数不可比时合并多个排序列表的方法：每个条目的得分是 &Sigma; 1/(k + rank)，对它出现的各个列表求和，k 通常取 60（Cormack et al., 2009）。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
+  <dt id="term-record-delimiter">Record delimiter（记录分隔符）</dt>
+  <dd><p>分隔式抽取输出中记录与记录之间的分隔符；minigraphrag 和 Microsoft GraphRAG 的默认提示词使用 <code>##</code>，输出以 <code>&lt;|COMPLETE|&gt;</code> 结尾。</p><p class="see">参见：<a href="08-entity-relation-extraction.html">第 8 章</a></p></dd>
+  <dt id="term-reification">Reification（具体化）</dt>
+  <dd><p>把一个关系转成节点，使它能拥有自己的属性和链接。例如 B 轮融资变成一个 FundingRound 节点，连接 Brightwater Capital、Kestrel Labs、金额和日期。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="31-multimodal-hypergraph.html">第 31 章</a></p></dd>
+  <dt id="term-relationship">Relationship（关系）</dt>
+  <dd><p>两个实体之间带类型或描述的连接。在 minigraphrag 中，每条抽取出的 <code>Relationship</code> 有源、目标、描述、<code>strength</code> 和一个 <code>source_id</code>；合并时，所有提及变成一条边，带有累加的 <code>weight</code> 和一个 <code>source_ids</code> 列表。例如：Deepcast 在 2022 年到 2025 年间 SUPPLIED Kestrel Labs。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="08-entity-relation-extraction.html">第 8 章</a></p></dd>
+  <dt id="term-relationship-strength">Relationship strength（关系强度）</dt>
+  <dd><p>抽取器为关系强弱给出的 1 到 10 分（<code>Relationship.strength</code>）。合并时，所有提及的强度相加，成为边的 <code>weight</code>。</p><p class="see">参见：<a href="08-entity-relation-extraction.html">第 8 章</a>、<a href="09-entity-resolution.html">第 9 章</a></p></dd>
+  <dt id="term-reranker">Reranker（重排器）</dt>
+  <dd><p>第二阶段的模型，按相关性对较短的候选列表重新排序，通常是交叉编码器或 LLM。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
+  <dt id="term-resolution-parameter">Resolution parameter（分辨率参数）</dt>
+  <dd><p>模块度公式中的 &gamma;。大于 1 时倾向于得到更多、更小的社区；小于 1 时倾向于得到更少、更大的社区。</p><p class="see">参见：<a href="11-community-detection.html">第 11 章</a></p></dd>
   <dt id="term-rog-reasoning-on-graphs">RoG (Reasoning on Graphs)</dt>
-  <dd><p>A method (Luo et al., 2024) that fine-tunes an LLM to generate relation paths as plans, retrieves the matching paths from the knowledge graph, and reasons over them to answer faithfully.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dd><p>一种方法（Luo et al., 2024）：微调 LLM，让它生成关系路径作为计划，从知识图谱中检索匹配的路径，再基于这些路径推理，给出忠实的答案。</p><p class="see">参见：<a href="23-graph-reasoning.html">第 23 章</a>、<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-s">S</h2>
 <dl class="gloss">
-  <dt id="term-schema">Schema</dt>
-  <dd><p>The declared node labels, relationship types and properties a graph uses. A schema given to the extractor keeps types consistent; given to Text2Cypher it keeps queries valid.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
-  <dt id="term-seed-entity">Seed entity</dt>
-  <dd><p>A node chosen as the starting point of retrieval because it matches the question, by embedding similarity or name match. Local search expands from seeds; PPR teleports to them.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
-  <dt id="term-soft-prompt">Soft prompt</dt>
-  <dd><p>Learned continuous vectors inserted into the LLM's input embeddings in place of or alongside text tokens. G-Retriever and GraphToken pass a graph to the LLM this way.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-schema">Schema（模式）</dt>
+  <dd><p>图所声明使用的节点标签、关系类型和属性。把模式交给抽取器，能保持类型一致；交给 Text2Cypher，能保证查询有效。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="20-text2cypher.html">第 20 章</a></p></dd>
+  <dt id="term-seed-entity">Seed entity（种子实体）</dt>
+  <dd><p>因与问题匹配（依据嵌入相似度或名称匹配）而被选作检索起点的节点。局部搜索从种子出发扩展；PPR 跳转时落到种子上。</p><p class="see">参见：<a href="14-local-search.html">第 14 章</a>、<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
+  <dt id="term-soft-prompt">Soft prompt（软提示）</dt>
+  <dd><p>学习得到的连续向量，插入 LLM 的输入嵌入中，替代文本 token 或与之并列。G-Retriever 和 GraphToken 就是这样把图传给 LLM 的。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a>、<a href="24-training-with-graphs.html">第 24 章</a></p></dd>
   <dt id="term-source-ids">source_ids</dt>
-  <dd><p>The list of text unit ids a merged entity or relationship was extracted from. Each extracted mention carries a single <code>source_id</code>; merging collects them into <code>source_ids</code>. It powers citations, lets you delete a document's facts cleanly, and tells incremental indexing what to recompute.</p><p class="see">See: <a href="07-chunking-text-units.html">Chapter 7</a>, <a href="09-entity-resolution.html">Chapter 9</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
+  <dd><p>合并后的实体或关系所来自的文本单元 id 列表。每次抽取到的提及只带一个 <code>source_id</code>；合并时把它们收集到 <code>source_ids</code> 中。它支撑引用功能，让你能干净地删除某份文档的事实，也告诉增量索引需要重新计算哪些内容。</p><p class="see">参见：<a href="07-chunking-text-units.html">第 7 章</a>、<a href="09-entity-resolution.html">第 9 章</a>、<a href="27-incremental-temporal.html">第 27 章</a></p></dd>
   <dt id="term-sparql">SPARQL</dt>
-  <dd><p>The W3C query language for RDF data, based on triple patterns such as <code>?person ex:ctoOf ex:KestrelLabs</code>.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
-  <dt id="term-sparse-retrieval">Sparse retrieval</dt>
-  <dd><p>Retrieval with high-dimensional, mostly-zero term vectors, such as BM25 or learned sparse models. Strong on exact terms, names and codes.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
-  <dt id="term-subgraph-assembly">Subgraph assembly</dt>
-  <dd><p>Building a small, connected subgraph that covers all the query's entities (for example via shortest paths or PCST) and giving it to the model as one coherent piece of evidence.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
-  <dt id="term-summary-leakage">Summary leakage</dt>
-  <dd><p>When a generated summary (entity description or community report) exposes facts from sources the reader is not allowed to see, because it was built from mixed-permission data.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a></p></dd>
-  <dt id="term-synonymy-edge">Synonymy edge</dt>
-  <dd><p>An edge HippoRAG adds between nodes whose names have very similar embeddings ("Tidewater" and "Tidewater Institute"), letting PPR flow across aliases that resolution missed.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dd><p>W3C 制定的 RDF 数据查询语言，基于三元组模式，例如 <code>?person ex:ctoOf ex:KestrelLabs</code>。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a></p></dd>
+  <dt id="term-sparse-retrieval">Sparse retrieval（稀疏检索）</dt>
+  <dd><p>使用高维、绝大多数分量为零的词项向量来检索，如 BM25 或学习型稀疏模型。擅长匹配精确词项、名称和编码。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
+  <dt id="term-subgraph-assembly">Subgraph assembly（子图组装）</dt>
+  <dd><p>构建一个覆盖查询中全部实体的小型连通子图（例如借助最短路径或 PCST），作为一份连贯的证据交给模型。</p><p class="see">参见：<a href="19-subgraph-gnn.html">第 19 章</a>、<a href="21-hybrid-design-patterns.html">第 21 章</a></p></dd>
+  <dt id="term-summary-leakage">Summary leakage（摘要泄露）</dt>
+  <dd><p>生成的摘要（实体描述或社区报告）由于基于混合权限的数据构建，暴露了读者无权查看的来源中的事实。</p><p class="see">参见：<a href="29-production-ops.html">第 29 章</a></p></dd>
+  <dt id="term-synonymy-edge">Synonymy edge（同义边）</dt>
+  <dd><p>HippoRAG 在名称嵌入非常相似的节点之间添加的边（如“Tidewater”和“Tidewater Institute”），让 PPR 能在消解阶段漏合并的别名之间流动。</p><p class="see">参见：<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-t">T</h2>
 <dl class="gloss">
-  <dt id="term-teleport">Teleport</dt>
-  <dd><p>In PageRank, the random jump to a node chosen from the teleport distribution, taken with probability 1 &minus; &alpha;. In Personalized PageRank the jump lands on seed nodes.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
-  <dt id="term-temporal-window">Temporal window</dt>
-  <dd><p>Restricting retrieval to facts valid in a time range. "Who supplied Kestrel's sonar in 2024?" should only see edges valid in 2024, which returns Deepcast.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
-  <dt id="term-text-unit">Text unit</dt>
-  <dd><p>Microsoft GraphRAG's name for a chunk: the span of text sent to extraction, with a stable id that every derived entity, relationship and claim cites.</p><p class="see">See: <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
+  <dt id="term-teleport">Teleport（随机跳转）</dt>
+  <dd><p>在 PageRank 中，以概率 1 &minus; &alpha; 发生的随机跳转，目标节点从跳转分布中选取。在个性化 PageRank 中，跳转落在种子节点上。</p><p class="see">参见：<a href="17-ppr-hipporag.html">第 17 章</a></p></dd>
+  <dt id="term-temporal-window">Temporal window（时间窗口）</dt>
+  <dd><p>把检索限制在某个时间范围内有效的事实上。“2024 年谁为 Kestrel 供应声呐？”只应看到 2024 年有效的边，答案是 Deepcast。</p><p class="see">参见：<a href="21-hybrid-design-patterns.html">第 21 章</a>、<a href="27-incremental-temporal.html">第 27 章</a></p></dd>
+  <dt id="term-text-unit">Text unit（文本单元）</dt>
+  <dd><p>Microsoft GraphRAG 对分块的称呼：送去抽取的一段文本，带有稳定的 id，每个派生出的实体、关系和声明都会引用它。</p><p class="see">参见：<a href="07-chunking-text-units.html">第 7 章</a></p></dd>
   <dt id="term-text2cypher">Text2Cypher</dt>
-  <dd><p>Generating a Cypher query from a natural-language question, given the graph schema, then validating, running and possibly repairing it. It answers precise and aggregate questions ("how many projects does Priya Nair lead?").</p><p class="see">See: <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+  <dd><p>在给定图模式的前提下，从自然语言问题生成 Cypher 查询，然后校验、执行，必要时修复。它能回答精确类和聚合类问题（“Priya Nair 领导几个项目？”）。</p><p class="see">参见：<a href="20-text2cypher.html">第 20 章</a></p></dd>
   <dt id="term-think-on-graph-tog">Think-on-Graph (ToG)</dt>
-  <dd><p>A method (Sun et al., 2023) in which the LLM acts as an agent on a knowledge graph, running a beam search that repeatedly explores and prunes relations and entities, until it judges that the collected paths answer the question. ToG 2.0 interleaves graph and text retrieval.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
-  <dt id="term-token-budget">Token budget</dt>
-  <dd><p>The number of tokens allotted to retrieved context, often split across sections (entities, relationships, reports, source text). Builders rank items and add them until the budget is full.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
-  <dt id="term-tool-calling">Tool calling</dt>
-  <dd><p>Letting an LLM request calls to declared functions with structured arguments, such as <code>expand_neighbors(entity, hops)</code>, and continue after reading the results. It is how agentic GraphRAG accesses the graph.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a></p></dd>
-  <dt id="term-transaction-time">Transaction time</dt>
-  <dd><p>In a bi-temporal model, when the system recorded a fact or recorded that it had ended, regardless of when it was true in the world. minigraphrag and Capstone 3 call it record time (<code>recorded_at</code>, <code>invalidated_at</code>).</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
-  <dt id="term-triple">Triple</dt>
-  <dd><p>A (subject, predicate, object) statement, the atomic unit of RDF and a common linearization format: (Marlow Dynamics, ACQUIRED, Deepcast).</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
-  <dt id="term-tuple-delimiter">Tuple delimiter</dt>
-  <dd><p>The separator between fields of one extracted record. minigraphrag and Microsoft GraphRAG's default prompts use <code>&lt;|&gt;</code>, as in <code>("entity"&lt;|&gt;DEEPCAST&lt;|&gt;ORGANIZATION&lt;|&gt;Sonar supplier)</code>.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+  <dd><p>一种方法（Sun et al., 2023）：LLM 作为智能体在知识图谱上执行束搜索，反复探索并剪枝关系和实体，直到它判断已收集的路径足以回答问题。ToG 2.0 交替进行图检索和文本检索。</p><p class="see">参见：<a href="18-paths-and-agents.html">第 18 章</a></p></dd>
+  <dt id="term-token-budget">Token budget（token 预算）</dt>
+  <dd><p>分配给检索上下文的 token 数，通常再按部分（实体、关系、报告、来源文本）划分。上下文构建器给条目排序，依次加入，直到预算用完。</p><p class="see">参见：<a href="14-local-search.html">第 14 章</a>、<a href="22-context-construction.html">第 22 章</a></p></dd>
+  <dt id="term-tool-calling">Tool calling（工具调用）</dt>
+  <dd><p>让 LLM 以结构化参数请求调用已声明的函数，例如 <code>expand_neighbors(entity, hops)</code>，并在读取结果后继续。智能体式 GraphRAG 正是通过它访问图。</p><p class="see">参见：<a href="30-agentic-graphrag.html">第 30 章</a></p></dd>
+  <dt id="term-transaction-time">Transaction time（事务时间）</dt>
+  <dd><p>在双时态模型中，系统记录某个事实、或记录该事实已终止的时间，与它在现实世界中何时成立无关。minigraphrag 和综合项目 3 称之为记录时间（<code>recorded_at</code>、<code>invalidated_at</code>）。</p><p class="see">参见：<a href="10-claims-temporal.html">第 10 章</a>、<a href="27-incremental-temporal.html">第 27 章</a></p></dd>
+  <dt id="term-triple">Triple（三元组）</dt>
+  <dd><p>（主语, 谓语, 宾语）形式的陈述，是 RDF 的原子单位，也是常见的线性化格式：(Marlow Dynamics, ACQUIRED, Deepcast)。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="22-context-construction.html">第 22 章</a></p></dd>
+  <dt id="term-tuple-delimiter">Tuple delimiter（元组分隔符）</dt>
+  <dd><p>一条抽取记录内部各字段之间的分隔符。minigraphrag 和 Microsoft GraphRAG 的默认提示词使用 <code>&lt;|&gt;</code>，例如 <code>("entity"&lt;|&gt;DEEPCAST&lt;|&gt;ORGANIZATION&lt;|&gt;Sonar supplier)</code>。</p><p class="see">参见：<a href="08-entity-relation-extraction.html">第 8 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-u">U</h2>
 <dl class="gloss">
-  <dt id="term-union-find">Union-find</dt>
-  <dd><p>A disjoint-set data structure with near-constant-time find and union operations. Entity resolution uses it to merge chains of matches: if A matches B and B matches C, all three end in one cluster.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
-  <dt id="term-upsert">Upsert</dt>
-  <dd><p>Insert a record if it does not exist, otherwise update it. Incremental graph updates upsert entities and edges by canonical key and append new source_ids.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
+  <dt id="term-union-find">Union-find（并查集）</dt>
+  <dd><p>一种不相交集合数据结构，查找和合并操作的时间接近常数。实体消解用它合并匹配链：如果 A 匹配 B、B 匹配 C，三者最终归入同一个簇。</p><p class="see">参见：<a href="09-entity-resolution.html">第 9 章</a></p></dd>
+  <dt id="term-upsert">Upsert（插入或更新）</dt>
+  <dd><p>记录不存在则插入，否则更新。增量图更新按规范键 upsert 实体和边，并追加新的 source_ids。</p><p class="see">参见：<a href="27-incremental-temporal.html">第 27 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-v">V</h2>
 <dl class="gloss">
-  <dt id="term-valid-time">Valid time</dt>
-  <dd><p>In a bi-temporal model, the period during which a fact was true in the world. Jonas Vehl's CTO_OF edge is valid from 2021 to March 2026.</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
-  <dt id="term-variable-length-path">Variable-length path</dt>
-  <dd><p>A Cypher pattern that matches paths of a range of lengths, such as <code>(a)-[*1..3]-(b)</code>. Always bound the upper length, since unbounded patterns can explode.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
-  <dt id="term-vector-store">Vector store</dt>
-  <dd><p>A system that stores embeddings with ids and metadata and answers nearest-neighbor queries, from an in-memory matrix to pgvector or a dedicated database.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dt id="term-valid-time">Valid time（有效时间）</dt>
+  <dd><p>在双时态模型中，事实在现实世界中成立的时间段。Jonas Vehl 的 CTO_OF 边从 2021 年到 2026 年 3 月有效。</p><p class="see">参见：<a href="10-claims-temporal.html">第 10 章</a>、<a href="27-incremental-temporal.html">第 27 章</a></p></dd>
+  <dt id="term-variable-length-path">Variable-length path（变长路径）</dt>
+  <dd><p>匹配一定长度范围内路径的 Cypher 模式，例如 <code>(a)-[*1..3]-(b)</code>。务必限定长度上限，因为不设上限的模式可能导致结果爆炸。</p><p class="see">参见：<a href="05-knowledge-graphs.html">第 5 章</a>、<a href="20-text2cypher.html">第 20 章</a></p></dd>
+  <dt id="term-vector-store">Vector store（向量存储）</dt>
+  <dd><p>存储嵌入及其 id 和元数据、并响应最近邻查询的系统，从内存中的矩阵，到 pgvector，再到专用数据库都属此类。</p><p class="see">参见：<a href="02-vector-rag.html">第 2 章</a>、<a href="13-storage-indexing.html">第 13 章</a></p></dd>
 </dl>
 </section>
 <section class="gloss-letter">
 <h2 id="letter-z">Z</h2>
 <dl class="gloss">
   <dt id="term-zep">Zep</dt>
-  <dd><p>A memory service for AI agents whose core is Graphiti, a temporal knowledge graph that tracks episodes, entities and bi-temporal facts (Rasmussen et al., 2025).</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="30-agentic-graphrag.html">Chapter 30</a></p></dd>
+  <dd><p>面向 AI 智能体的记忆服务，核心是 Graphiti：一个跟踪 episode（片段）、实体和双时态事实的时序知识图谱（Rasmussen et al., 2025）。</p><p class="see">参见：<a href="27-incremental-temporal.html">第 27 章</a>、<a href="30-agentic-graphrag.html">第 30 章</a></p></dd>
 </dl>
 </section>
 </main>
 <script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
-<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/curriculum.zh.js?v=b04137e8"></script>
 <script src="../../assets/js/site.js?v=fe74656c"></script>
-<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script src="../../assets/js/viz.js?v=e8a5746b"></script>
 <script>
 (function () {
   var tools = document.getElementById("gloss-tools");
@@ -516,7 +516,7 @@ dl.gloss .see { font-family: var(--font-ui); font-size: .85rem; color: var(--mut
       if (hit) shown++;
     });
     secs.forEach(function (s) { s.hidden = !s.querySelector("dt:not([hidden])"); });
-    count.textContent = q ? shown + " of " + dts.length + " terms match" : dts.length + " terms";
+    count.textContent = q ? "共 " + dts.length + " 个术语，匹配 " + shown + " 个" : "共 " + dts.length + " 个术语";
     empty.hidden = shown !== 0;
   }
   input.addEventListener("input", run);

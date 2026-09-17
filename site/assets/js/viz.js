@@ -52,7 +52,9 @@
       fused: "Fused (RRF)",
       rrfCaption: (k, low) => "score(d) = Σ 1 / (k + rank). With k = " + k + ", " + (low ? "top positions dominate: whichever list ranks an item first nearly decides." : "ranks are flattened, so items that appear in several lists rise above one-list winners."),
       tokens: " tokens",
-      configError: "Figure configuration error: ", unknown: "Unknown figure type: ", failed: "Figure failed to load: "
+      configError: "Figure configuration error: ", unknown: "Unknown figure type: ", failed: "Figure failed to load: ",
+      stageEnd: ".", labelSep: ": ",
+      ariaGraph: "Graph animation", ariaLouvain: "Louvain community detection", ariaExtracted: "Extracted graph", ariaPipeline: "Pipeline", ariaEmbedding: "2D embedding space", ariaPagerank: "PageRank"
     },
     zh: {
       interactive: "交互", reset: "重置", back: "上一步", play: "播放", pause: "暂停", replay: "重播", next: "下一步",
@@ -78,7 +80,9 @@
       fused: "融合结果（RRF）",
       rrfCaption: (k, low) => "score(d) = Σ 1 / (k + rank)。k = " + k + " 时，" + (low ? "排名靠前的位置占主导：哪个列表把某项排在第一，几乎就决定了结果。" : "排名差距被拉平，出现在多个列表中的项会超过只在一个列表中夺冠的项。"),
       tokens: " 个 token",
-      configError: "交互图配置错误：", unknown: "未知的交互图类型：", failed: "交互图加载失败："
+      configError: "交互图配置错误：", unknown: "未知的交互图类型：", failed: "交互图加载失败：",
+      stageEnd: "：", labelSep: "：",
+      ariaGraph: "图动画", ariaLouvain: "Louvain 社区发现", ariaExtracted: "抽取出的图", ariaPipeline: "流程", ariaEmbedding: "二维嵌入空间", ariaPagerank: "PageRank"
     }
   })[LANG];
 
@@ -106,6 +110,8 @@
   function hashStr(s) { let x = 0; for (let i = 0; i < s.length; i++) x = (x * 31 + s.charCodeAt(i)) | 0; return Math.abs(x) % 8 + 1; }
   function mulberry(seed) { return function () { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
   function edgeKey(a, b) { return a + ">" + b; }
+  // Approximate rendered width in Latin-letter units: CJK and full-width characters count double.
+  function textWidth(t) { let w = 0; for (const ch of String(t)) w += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/.test(ch) ? 2 : 1; return w; }
   function fmt(x, d) { return Number(x).toFixed(d == null ? 3 : d); }
   function setCaption(el, html) { el.innerHTML = html || ""; }
 
@@ -273,7 +279,7 @@
   registry["graph-steps"] = function (el, cfg) {
     const W = cfg.width || 720, H = cfg.height || 380;
     const { stage } = frame(el, cfg);
-    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Graph animation" }, stage);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || L.ariaGraph }, stage);
     const G = drawGraph(svg, cfg, W, H);
     const cap = h("div", { class: "viz-caption", "aria-live": "polite" }, el);
     const steps = cfg.steps && cfg.steps.length ? cfg.steps : [{ caption: cfg.caption || "" }];
@@ -324,7 +330,7 @@
     const bw = 150, bh = 54, gx = 34, gy = 46;
     const rows = Math.ceil(stages.length / perRow);
     const W = perRow * bw + (perRow - 1) * gx + 40, H = rows * bh + (rows - 1) * gy + 40;
-    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Pipeline" }, stage);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || L.ariaPipeline }, stage);
     svg.style.maxHeight = H * 1.3 + "px";
     const pos = stages.map((s, i) => {
       const r = Math.floor(i / perRow); let c = i % perRow;
@@ -358,7 +364,7 @@
       boxes.forEach((b, k) => { b.classList.toggle("active", k === i); b.classList.toggle("done", k < i); });
       arrows.forEach((a, k) => a.classList.toggle("done", k < i));
       const s = stages[i];
-      setCaption(cap, "<strong>" + s.label + ".</strong> " + (s.detail || ""));
+      setCaption(cap, "<strong>" + s.label + L.stageEnd + "</strong> " + (s.detail || ""));
       if (i > 0 && !reduceMotion) {
         const path = arrows[i - 1]; const L = path.getTotalLength(); const t0 = performance.now();
         packet.setAttribute("opacity", 1);
@@ -408,7 +414,7 @@
   registry["embedding-space"] = function (el, cfg) {
     const W = 640, H = cfg.height || 380;
     const { stage } = frame(el, cfg);
-    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "2D embedding space" }, stage);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || L.ariaEmbedding }, stage);
     const pts = cfg.points.map((p) => ({ ...p, X: (p.x / 100) * W, Y: (p.y / 100) * H }));
     const gl = svgEl("g", {}, svg);
     pts.forEach((p) => {
@@ -468,7 +474,7 @@
   registry["pagerank"] = function (el, cfg) {
     const W = cfg.width || 720, H = cfg.height || 380;
     const { stage } = frame(el, cfg);
-    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "PageRank" }, stage);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || L.ariaPagerank }, stage);
     const seeds = new Set(cfg.seeds || []);
     const conf = Object.assign({}, cfg, { focusable: true, onNodeClick: (n) => { seeds.has(n.id) ? seeds.delete(n.id) : seeds.add(n.id); run(); } });
     const G = drawGraph(svg, conf, W, H);
@@ -529,7 +535,7 @@
   registry["louvain"] = function (el, cfg) {
     const W = cfg.width || 720, H = cfg.height || 380;
     const { stage } = frame(el, cfg);
-    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Louvain community detection" }, stage);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || L.ariaLouvain }, stage);
     const G = drawGraph(svg, Object.assign({}, cfg, { edgeLabels: false }), W, H);
     const cap = h("div", { class: "viz-caption", "aria-live": "polite" }, el);
     const trace = louvainTrace(G.nodes, G.edges, cfg.seed);
@@ -562,7 +568,7 @@
     const text = h("div", { class: "viz-text" }, stage);
     const W = 640, H = cfg.height || 300;
     const svgWrap = h("div", {}, stage); svgWrap.style.borderTop = "1px solid var(--rule)";
-    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Extracted graph" }, svgWrap);
+    const svg = svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": L.ariaExtracted }, svgWrap);
     const ents = cfg.entities || [], rels = cfg.relations || [];
     const G = drawGraph(svg, { nodes: ents.map((e) => ({ id: e.name, label: e.name, group: e.group || e.type, x: e.x, y: e.y })), edges: rels.map((r) => ({ source: r.source, target: r.target, label: r.label })), directed: true, layout: cfg.layout }, W, H);
     const cap = h("div", { class: "viz-caption", "aria-live": "polite" }, el);
@@ -671,7 +677,7 @@
     function render() {
       const raw = sliders.map((s) => +s.value); const sum = raw.reduce((a, b) => a + b, 0) || 1;
       barWrap.innerHTML = "";
-      const rows = parts.map((p, i) => { const share = raw[i] / sum; const seg = h("div", {}, barWrap); seg.style.cssText = "width:" + share * 100 + "%;background:color-mix(in srgb," + groupColor(i + 1) + " 55%, var(--panel));display:flex;align-items:center;font-size:.75rem;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:0 4px;min-width:0;transition:width .2s"; seg.title = p.label; seg.textContent = share * 100 >= p.label.length * 1.1 ? p.label : ""; return p.label + ": <strong>" + Math.round(share * total).toLocaleString() + "</strong>" + L.tokens; });
+      const rows = parts.map((p, i) => { const share = raw[i] / sum; const seg = h("div", {}, barWrap); seg.style.cssText = "width:" + share * 100 + "%;background:color-mix(in srgb," + groupColor(i + 1) + " 55%, var(--panel));display:flex;align-items:center;font-size:.75rem;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;padding:0 4px;min-width:0;transition:width .2s"; seg.title = p.label; seg.textContent = share * 100 >= textWidth(p.label) * 1.1 ? p.label : ""; return p.label + L.labelSep + "<strong>" + Math.round(share * total).toLocaleString() + "</strong>" + L.tokens; });
       setCaption(cap, rows.join(" &nbsp; ") + (cfg.note ? "<br>" + cfg.note : ""));
     }
     render();

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Welcome: the map and the toolkit | Graph RAG from Scratch</title>
-<meta name="description" content="What GraphRAG is, where it came from, how this course is organized, the Kestrel Labs running example, and how to set up the minigraphrag reference code.">
+<title>欢迎：路线图与工具箱 | 从零构建 Graph RAG</title>
+<meta name="description" content="GraphRAG 是什么、从何而来，这门课程如何组织，贯穿全课的 Kestrel Labs 示例，以及如何搭建 minigraphrag 参考代码。">
 <meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
@@ -15,44 +15,44 @@
 <link rel="stylesheet" href="../../assets/css/site.css?v=7577c263">
 <script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
 </head>
-<body data-slug="00-welcome" data-root="../.." data-fallback="en">
+<body data-slug="00-welcome" data-root="../.." data-translated="true">
 <main class="chapter" id="main">
 
 <header class="chapter-head">
-  <h1>Welcome: the map and the toolkit</h1>
-  <p class="lede">This course teaches you to build GraphRAG yourself: turning documents into a knowledge graph, summarizing it, searching it and grounding an LLM's answers in it. This first chapter gives you the whole picture, the running example you will use in every chapter, and a working copy of the reference code on your machine.</p>
+  <h1>欢迎：路线图与工具箱</h1>
+  <p class="lede">这门课程带你亲手实现 GraphRAG：把文档变成知识图谱（knowledge graph），为图谱生成摘要，在图谱上检索，并让 LLM 的回答以图谱中的证据为依据。作为开篇，本章先给出全景图，介绍后面每一章都会用到的贯穿示例，并帮你在本机跑通参考代码。</p>
   <div class="objectives">
-    <h2>You will be able to</h2>
+    <h2>你将学会</h2>
     <ul>
-      <li>Describe the GraphRAG pipeline in one picture, from documents to a grounded answer</li>
-      <li>Place GraphRAG in the history of retrieval-augmented generation, from 2020 to 2026</li>
-      <li>Use the course taxonomy (knowledge organization, retrieval, integration) to locate any technique</li>
-      <li>Navigate the Kestrel Labs corpus and trace the paths behind its canonical questions</li>
-      <li>Install <code>minigraphrag</code>, build an index offline with the mock LLM, and switch to a real provider</li>
-      <li>Pick a learning path that fits your background and goals</li>
+      <li>用一张图讲清 GraphRAG 的完整流程：从文档到有事实依据的答案</li>
+      <li>说明 GraphRAG 在检索增强生成 2020 年至 2026 年发展史中的位置</li>
+      <li>借助课程采用的分类框架（知识组织、知识检索、知识融合）为任何一种技术定位</li>
+      <li>熟悉 Kestrel Labs 语料，并追踪几个典型问题背后的推理路径</li>
+      <li>安装 <code>minigraphrag</code>，用模拟 LLM 离线构建索引，再切换到真实的模型服务</li>
+      <li>根据自己的背景和目标选择合适的学习路径</li>
     </ul>
   </div>
 </header>
 
-<h2>GraphRAG in one picture</h2>
-<p><strong>Retrieval-augmented generation</strong> (RAG) answers a question by first retrieving relevant material from your own data and then asking a large language model (LLM) to answer from that material, with citations. Classic RAG retrieves text chunks whose embeddings are similar to the question. That works well for lookups (“Who supplied Kestrel's sonar in 2024?”) and poorly for questions whose evidence is scattered (“Why did Kestrel start Project Tern?”) or spread across the whole collection (“What are the main themes here?”).</p>
-<p><strong>GraphRAG</strong> is the family of methods that put a graph between the documents and the model. At indexing time, an LLM reads the documents and extracts <em>entities</em> (people, organizations, projects) and the <em>relationships</em> between them. Duplicate names are merged, the graph is partitioned into <em>communities</em> of closely connected entities, and each community gets a written summary. At query time, a retriever uses that structure: it starts from the entities a question names and follows edges, or it reads community summaries to answer questions about the whole corpus. The LLM then writes an answer from the retrieved entities, relationships, summaries and source text.</p>
+<h2>一张图看懂 GraphRAG</h2>
+<p><strong>检索增强生成</strong>（retrieval-augmented generation，RAG）回答问题分两步：先从你自己的数据中检索相关材料，再让大语言模型（LLM）依据这些材料作答并给出引用。经典 RAG 检索的是嵌入（embedding）与问题相近的文本分块（chunk）。这种做法擅长查找型问题（“2024 年 Kestrel 的声呐由谁供货？”），但遇到证据分散在各处的问题（“Kestrel 为什么启动 Project Tern？”），或需要纵览整个文档集的问题（“这些文档的主要主题是什么？”），效果就很差。</p>
+<p><strong>GraphRAG</strong> 指的是一类在文档和模型之间加入一张图的方法。建索引时，LLM 通读文档，抽取（extraction）出<em>实体</em>（人物、组织、项目）以及它们之间的<em>关系</em>。随后合并重复的名称，把图划分成由紧密相连的实体组成的<em>社区</em>，并为每个社区撰写一份摘要。查询时，检索器会利用这种结构：要么从问题中提到的实体出发沿边展开，要么读取社区摘要来回答关于整个语料的问题。最后，LLM 依据检索到的实体、关系、摘要和原文写出答案。</p>
 
 <figure>
   <div class="diagram">
     <svg viewBox="0 0 680 300" role="img" aria-labelledby="pic-title">
-      <title id="pic-title">The GraphRAG pipeline: documents become text units, then a graph of entities and relationships, then communities with reports; retrieval uses the graph and reports to build context for a grounded answer</title>
+      <title id="pic-title">GraphRAG 流程：文档先变成文本单元，再变成由实体和关系构成的图，再变成带报告的社区；检索利用图和报告构建上下文，生成有事实依据的答案</title>
       <defs><marker id="pic-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
-      <text class="d-text small" x="12" y="20">Indexing, once per corpus change</text>
+      <text class="d-text small" x="12" y="20">索引：语料变化时执行一次</text>
       <rect class="d-box" x="12" y="34" width="112" height="116" rx="8"/>
-      <text class="d-text bold" x="68" y="56" text-anchor="middle">Documents</text>
+      <text class="d-text bold" x="68" y="56" text-anchor="middle">文档</text>
       <rect class="d-box ghost" x="30" y="68" width="76" height="16" rx="2"/>
       <rect class="d-box ghost" x="30" y="90" width="76" height="16" rx="2"/>
       <rect class="d-box ghost" x="30" y="112" width="76" height="16" rx="2"/>
-      <text class="d-text small" x="68" y="142" text-anchor="middle">12 Kestrel docs</text>
+      <text class="d-text small" x="68" y="142" text-anchor="middle">12 篇 Kestrel 文档</text>
       <line class="d-line" x1="124" y1="92" x2="152" y2="92" marker-end="url(#pic-arr)"/>
       <rect class="d-box node" x="156" y="34" width="150" height="116" rx="8"/>
-      <text class="d-text bold" x="231" y="56" text-anchor="middle">Entity graph</text>
+      <text class="d-text bold" x="231" y="56" text-anchor="middle">实体图</text>
       <line class="d-line" x1="190" y1="84" x2="230" y2="108"/>
       <line class="d-line" x1="230" y1="108" x2="272" y2="80"/>
       <line class="d-line" x1="230" y1="108" x2="214" y2="132"/>
@@ -60,180 +60,180 @@
       <circle class="d-node hot" cx="230" cy="108" r="9"/>
       <circle class="d-node warm" cx="272" cy="80" r="8"/>
       <circle class="d-node alt" cx="214" cy="132" r="7"/>
-      <text class="d-text small" x="231" y="146" text-anchor="middle">extract, resolve</text>
+      <text class="d-text small" x="231" y="146" text-anchor="middle">抽取、消解</text>
       <line class="d-line" x1="306" y1="92" x2="334" y2="92" marker-end="url(#pic-arr)"/>
       <rect class="d-box comm" x="338" y="34" width="150" height="116" rx="8"/>
-      <text class="d-text bold" x="413" y="56" text-anchor="middle">Communities</text>
+      <text class="d-text bold" x="413" y="56" text-anchor="middle">社区</text>
       <ellipse class="d-area" cx="384" cy="96" rx="32" ry="24"/>
       <ellipse class="d-area" cx="448" cy="100" rx="26" ry="20"/>
       <circle class="d-node" cx="374" cy="92" r="6"/>
       <circle class="d-node" cx="394" cy="102" r="6"/>
       <circle class="d-node warm" cx="444" cy="96" r="6"/>
       <circle class="d-node warm" cx="456" cy="106" r="6"/>
-      <text class="d-text small" x="413" y="146" text-anchor="middle">cluster, summarize</text>
+      <text class="d-text small" x="413" y="146" text-anchor="middle">聚类、摘要</text>
       <line class="d-line" x1="488" y1="92" x2="516" y2="92" marker-end="url(#pic-arr)"/>
       <rect class="d-box comm" x="520" y="34" width="148" height="116" rx="8"/>
-      <text class="d-text bold" x="594" y="56" text-anchor="middle">Index</text>
-      <text class="d-text small" x="534" y="80">entities, relations</text>
-      <text class="d-text small" x="534" y="98">community reports</text>
-      <text class="d-text small" x="534" y="116">text units</text>
-      <text class="d-text small" x="534" y="134">embeddings</text>
-      <text class="d-text small" x="12" y="186">Querying, per question</text>
+      <text class="d-text bold" x="594" y="56" text-anchor="middle">索引</text>
+      <text class="d-text small" x="534" y="80">实体、关系</text>
+      <text class="d-text small" x="534" y="98">社区报告</text>
+      <text class="d-text small" x="534" y="116">文本单元</text>
+      <text class="d-text small" x="534" y="134">嵌入</text>
+      <text class="d-text small" x="12" y="186">查询：每个问题执行一次</text>
       <rect class="d-box edge" x="12" y="200" width="150" height="80" rx="8"/>
-      <text class="d-text bold" x="87" y="232" text-anchor="middle">Question</text>
-      <text class="d-text small" x="87" y="254" text-anchor="middle">“Why did Kestrel</text>
-      <text class="d-text small" x="87" y="268" text-anchor="middle">start Project Tern?”</text>
+      <text class="d-text bold" x="87" y="232" text-anchor="middle">问题</text>
+      <text class="d-text small" x="87" y="254" text-anchor="middle">“Kestrel 为什么启动</text>
+      <text class="d-text small" x="87" y="268" text-anchor="middle">Project Tern？”</text>
       <line class="d-line" x1="162" y1="240" x2="190" y2="240" marker-end="url(#pic-arr)"/>
       <rect class="d-box node" x="194" y="200" width="160" height="80" rx="8"/>
-      <text class="d-text bold" x="274" y="228" text-anchor="middle">Graph retrieval</text>
-      <text class="d-text small" x="274" y="250" text-anchor="middle">seed entities, walk edges,</text>
-      <text class="d-text small" x="274" y="266" text-anchor="middle">or read community reports</text>
+      <text class="d-text bold" x="274" y="228" text-anchor="middle">图检索</text>
+      <text class="d-text small" x="274" y="250" text-anchor="middle">从种子实体出发沿边游走，</text>
+      <text class="d-text small" x="274" y="266" text-anchor="middle">或读取社区报告</text>
       <line class="d-line" x1="354" y1="240" x2="382" y2="240" marker-end="url(#pic-arr)"/>
       <rect class="d-box edge" x="386" y="200" width="130" height="80" rx="8"/>
-      <text class="d-text bold" x="451" y="228" text-anchor="middle">Context</text>
-      <text class="d-text small" x="451" y="250" text-anchor="middle">tables with ids,</text>
-      <text class="d-text small" x="451" y="266" text-anchor="middle">within a token budget</text>
+      <text class="d-text bold" x="451" y="228" text-anchor="middle">上下文</text>
+      <text class="d-text small" x="451" y="250" text-anchor="middle">带 id 的表格，</text>
+      <text class="d-text small" x="451" y="266" text-anchor="middle">控制在 token 预算内</text>
       <line class="d-line" x1="516" y1="240" x2="544" y2="240" marker-end="url(#pic-arr)"/>
       <rect class="d-box good" x="548" y="200" width="120" height="80" rx="8"/>
-      <text class="d-text bold" x="608" y="228" text-anchor="middle">Answer</text>
-      <text class="d-text small" x="608" y="250" text-anchor="middle">grounded, with</text>
-      <text class="d-text small" x="608" y="266" text-anchor="middle">citations</text>
+      <text class="d-text bold" x="608" y="228" text-anchor="middle">答案</text>
+      <text class="d-text small" x="608" y="250" text-anchor="middle">有事实依据，</text>
+      <text class="d-text small" x="608" y="266" text-anchor="middle">附带引用</text>
       <line class="d-line dash" x1="594" y1="150" x2="290" y2="196" marker-end="url(#pic-arr)"/>
     </svg>
   </div>
-  <figcaption>The whole course in one figure. Parts 1 and 2 build the top row; Part 3 builds the retrieval box in many variations; Part 4 is about the context and answer boxes; Parts 5 and 6 are about making all of it measurable, affordable and current.</figcaption>
+  <figcaption>整门课程浓缩在这一张图里。第 1、2 部分构建上面一行；第 3 部分用多种方式实现“图检索”这个框；第 4 部分讨论“上下文”和“答案”两个框；第 5、6 部分关注如何让整套系统可度量、成本可控并保持更新。</figcaption>
 </figure>
 
-<p>Applied to Kestrel Labs, the graph lets retrieval answer “Why did Kestrel start Project Tern?” by starting at <em>Project Tern</em>, stepping to <em>Deepcast</em> (whose sonar Tern replaces) and on to <em>Marlow Dynamics</em> (which acquired Deepcast), collecting the three facts that explain the decision. Plain vector search, as you will measure in <a href="03-where-rag-breaks.html">Chapter 3</a>, ranks the article about the acquisition 21st of 24 chunks for that question.</p>
+<p>放到 Kestrel Labs 上看：有了这张图，检索器在回答“Kestrel 为什么启动 Project Tern？”时，可以从 <em>Project Tern</em> 出发，走到 <em>Deepcast</em>（Tern 要替代的正是它的声呐），再走到 <em>Marlow Dynamics</em>（它收购了 Deepcast），一路收集到解释这一决定的三条事实。而纯向量检索呢？你会在<a href="03-where-rag-breaks.html">第 3 章</a>亲自测到：对这个问题，报道那次收购的文章在 24 个分块中只排第 21 位。</p>
 
 <div class="callout note">
-  <span class="callout-title">GraphRAG is a family of methods</span>
-  <p>“GraphRAG” is also the name of Microsoft Research's paper and open-source project, which popularized the approach in 2024. This course uses the word for the whole family: Microsoft-style community summaries, LightRAG's keyword-level retrieval, HippoRAG's Personalized PageRank, path- and subgraph-based retrieval, Text2Cypher over existing knowledge graphs and agentic graph search. You will build a small version of each.</p>
+  <span class="callout-title">GraphRAG 是一类方法</span>
+  <p>“GraphRAG”也是 Microsoft Research 一篇论文及其开源项目的名字，正是它在 2024 年让这类方法流行起来。本课程用这个词泛指整个方法家族：Microsoft 式的社区摘要、LightRAG 的关键词级检索、HippoRAG 的个性化 PageRank、基于路径和子图的检索、在现有知识图谱上做 Text2Cypher，以及智能体式图搜索。每一种你都会亲手实现一个小版本。</p>
 </div>
 
-<h2>A short history</h2>
-<p>You do not need the history to build anything, but it explains why the field looks the way it does and why so many methods have similar names.</p>
+<h2>简史</h2>
+<p>不了解这段历史并不妨碍你动手构建，但它能解释这个领域为何是今天的样子，以及为什么这么多方法的名字如此相似。</p>
 
 <table>
-  <thead><tr><th>When</th><th>Milestone</th><th>Why it matters here</th></tr></thead>
+  <thead><tr><th>时间</th><th>里程碑</th><th>与本课程的关系</th></tr></thead>
   <tbody>
-    <tr><td>2020</td><td>Lewis et al. name <strong>retrieval-augmented generation</strong>: a dense retriever plus a generator. REALM and Dense Passage Retrieval appear the same year.</td><td>The retrieve-then-generate loop every chapter uses (<a href="01-llms-and-context.html">Chapter 1</a>).</td></tr>
-    <tr><td>2022–2023</td><td>Chat models make RAG the default way to answer from private data: chunk, embed, vector search, prompt. Iterative methods such as IRCoT and ReAct interleave retrieval with reasoning. Think-on-Graph (2023) has an LLM explore a knowledge graph step by step.</td><td>The vector baseline (<a href="02-vector-rag.html">Chapter 2</a>) and its multi-hop limits (Chapter 3).</td></tr>
-    <tr><td>Early 2024</td><td>RAPTOR builds a tree of recursive summaries over chunks. G-Retriever retrieves subgraphs for graph question answering. Microsoft Research describes GraphRAG and publishes <em>From Local to Global</em>: LLM-extracted entity graphs, community reports and map-reduce global search.</td><td>Community detection and reports (Chapters 11, 12, 15), subgraph retrieval (19).</td></tr>
-    <tr><td>Mid–late 2024</td><td>Microsoft open-sources GraphRAG. HippoRAG ranks passages with Personalized PageRank over an entity graph. LightRAG proposes dual-level keyword retrieval with incremental updates. The first GraphRAG surveys appear. Microsoft Research announces LazyGraphRAG to cut indexing cost.</td><td>PPR (17), LightRAG (16), cost (26).</td></tr>
-    <tr><td>2025</td><td>A second survey organizes the field into knowledge organization, retrieval and integration. HippoRAG 2 and PathRAG refine graph retrieval. Graph-R1 trains agentic graph retrievers with reinforcement learning, and GraphSearch proposes an agentic deep-search workflow over graphs. Temporal graph memory for agents (Zep, Graphiti) goes into production use.</td><td>Paths and agents (18, 30), training with graphs (24), temporal graphs (27).</td></tr>
-    <tr><td>2026</td><td>Microsoft GraphRAG is in maintenance mode while the ideas spread into many frameworks. Research focuses on cost (for example LiteRAG), bi-temporal graph engines on ordinary databases (post-graph-rag), and careful comparisons of when hybrid GraphRAG beats classic RAG on real domains.</td><td>Frameworks, production and the research map (28, 29, 33).</td></tr>
+    <tr><td>2020</td><td>Lewis 等人提出<strong>检索增强生成</strong>这一名称：一个稠密检索器加一个生成器。同年还出现了 REALM 和 Dense Passage Retrieval。</td><td>每一章都在用的“先检索、后生成”循环（<a href="01-llms-and-context.html">第 1 章</a>）。</td></tr>
+    <tr><td>2022–2023</td><td>对话模型让 RAG 成为基于私有数据问答的默认做法：分块、嵌入、向量检索、写提示词。IRCoT、ReAct 等迭代式方法把检索和推理交替进行。Think-on-Graph（2023）让 LLM 一步步探索知识图谱。</td><td>向量基线（<a href="02-vector-rag.html">第 2 章</a>）及其在多跳问题上的局限（第 3 章）。</td></tr>
+    <tr><td>2024 年初</td><td>RAPTOR 在分块之上递归地构建摘要树。G-Retriever 为图问答检索子图。Microsoft Research 介绍 GraphRAG 并发表 <em>From Local to Global</em>：由 LLM 抽取的实体图、社区报告，以及 map-reduce 式的全局搜索。</td><td>社区发现与社区报告（第 11、12、15 章），子图检索（第 19 章）。</td></tr>
+    <tr><td>2024 年中至年底</td><td>Microsoft 开源 GraphRAG。HippoRAG 在实体图上用个性化 PageRank 为段落排序。LightRAG 提出支持增量更新的双层关键词检索。第一批 GraphRAG 综述问世。Microsoft Research 发布 LazyGraphRAG，以降低索引成本。</td><td>PPR（第 17 章）、LightRAG（第 16 章）、成本（第 26 章）。</td></tr>
+    <tr><td>2025</td><td>又一篇综述把这个领域划分为知识组织、知识检索和知识融合三部分。HippoRAG 2 和 PathRAG 改进了图检索。Graph-R1 用强化学习训练智能体式图检索器，GraphSearch 提出在图上进行智能体式深度搜索的工作流。面向智能体的时序图记忆（Zep、Graphiti）投入生产使用。</td><td>路径与智能体（第 18、30 章）、结合图训练模型（第 24 章）、时序图（第 27 章）。</td></tr>
+    <tr><td>2026</td><td>Microsoft GraphRAG 进入维护模式，而它的思想已扩散到众多框架中。研究重点转向成本（例如 LiteRAG）、构建在普通数据库之上的双时态图引擎（post-graph-rag），以及在真实领域中细致比较混合 GraphRAG 何时胜过经典 RAG。</td><td>框架、生产实践与研究地图（第 28、29、33 章）。</td></tr>
   </tbody>
 </table>
 
-<p>Two threads run through that history. One builds a better <em>index</em> (graphs, trees, communities) so that retrieval has more to work with. The other builds a better <em>retriever</em> (PageRank, paths, agents) that uses structure at query time. Most current systems combine both, plus plain vector and keyword search.</p>
+<p>这段历史中贯穿着两条主线。一条是构建更好的<em>索引</em>（图、树、社区），让检索有更多可用的材料；另一条是构建更好的<em>检索器</em>（PageRank、路径、智能体），在查询时利用结构。如今大多数系统两者兼用，再加上普通的向量检索和关键词检索。</p>
 
-<h2>The taxonomy this course follows</h2>
-<p>With dozens of GraphRAG papers a month, you need a map. This course uses the three-stage structure from the survey by Zhang et al., <em>A Survey of Graph Retrieval-Augmented Generation for Customized Large Language Models</em>, and the curated DEEP-PolyU/Awesome-GraphRAG list organized by it. Every method answers three questions: how is knowledge organized into a graph, how is it retrieved, and how is it integrated into the model's generation?</p>
+<h2>本课程采用的分类框架</h2>
+<p>GraphRAG 论文每月动辄几十篇，你需要一张地图。本课程采用 Zhang 等人的综述 <em>A Survey of Graph Retrieval-Augmented Generation for Customized Large Language Models</em> 中的三阶段结构，以及按这一结构整理的 DEEP-PolyU/Awesome-GraphRAG 论文清单。每种方法都要回答三个问题：知识如何组织成图？如何检索？又如何融入模型的生成过程？</p>
 
 <figure>
   <div class="diagram">
     <svg viewBox="0 0 680 250" role="img" aria-labelledby="tax-title">
-      <title id="tax-title">Three stages of GraphRAG: knowledge organization, knowledge retrieval and knowledge integration, each with its sub-areas and course parts</title>
+      <title id="tax-title">GraphRAG 的三个阶段：知识组织、知识检索和知识融合，以及各自的子方向和对应的课程部分</title>
       <defs><marker id="tax-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
       <rect class="d-box node" x="10" y="14" width="206" height="222" rx="8"/>
-      <text class="d-text bold" x="24" y="40">1. Knowledge organization</text>
-      <text class="d-text small" x="24" y="62">How text becomes a graph</text>
-      <text class="d-text" x="24" y="92">Graphs as an index</text>
-      <text class="d-text" x="24" y="114">Graphs as knowledge carriers</text>
-      <text class="d-text small" x="36" y="132">built from a corpus, or existing KGs</text>
-      <text class="d-text" x="24" y="156">Hybrid designs</text>
-      <text class="d-text small" x="24" y="222">Course Part 2: Chapters 6–13</text>
+      <text class="d-text bold" x="24" y="40">1. 知识组织</text>
+      <text class="d-text small" x="24" y="62">文本如何变成图</text>
+      <text class="d-text" x="24" y="92">图作为索引</text>
+      <text class="d-text" x="24" y="114">图作为知识载体</text>
+      <text class="d-text small" x="36" y="132">从语料构建，或用现有知识图谱</text>
+      <text class="d-text" x="24" y="156">混合设计</text>
+      <text class="d-text small" x="24" y="222">课程第 2 部分：第 6–13 章</text>
       <line class="d-line" x1="216" y1="125" x2="232" y2="125" marker-end="url(#tax-arr)"/>
       <rect class="d-box comm" x="236" y="14" width="206" height="222" rx="8"/>
-      <text class="d-text bold" x="250" y="40">2. Knowledge retrieval</text>
-      <text class="d-text small" x="250" y="62">How evidence is found</text>
-      <text class="d-text" x="250" y="92">Similarity-based</text>
-      <text class="d-text" x="250" y="112">Logical reasoning-based</text>
-      <text class="d-text" x="250" y="132">LLM-based and GNN-based</text>
-      <text class="d-text" x="250" y="152">Multi-round (agentic)</text>
-      <text class="d-text" x="250" y="172">Post-retrieval and hybrid</text>
-      <text class="d-text small" x="250" y="222">Course Part 3: Chapters 14–21</text>
+      <text class="d-text bold" x="250" y="40">2. 知识检索</text>
+      <text class="d-text small" x="250" y="62">如何找到证据</text>
+      <text class="d-text" x="250" y="92">基于相似度</text>
+      <text class="d-text" x="250" y="112">基于逻辑推理</text>
+      <text class="d-text" x="250" y="132">基于 LLM、基于 GNN</text>
+      <text class="d-text" x="250" y="152">多轮（智能体式）</text>
+      <text class="d-text" x="250" y="172">检索后处理与混合检索</text>
+      <text class="d-text small" x="250" y="222">课程第 3 部分：第 14–21 章</text>
       <line class="d-line" x1="442" y1="125" x2="458" y2="125" marker-end="url(#tax-arr)"/>
       <rect class="d-box edge" x="462" y="14" width="208" height="222" rx="8"/>
-      <text class="d-text bold" x="476" y="40">3. Knowledge integration</text>
-      <text class="d-text small" x="476" y="62">How evidence shapes the answer</text>
-      <text class="d-text" x="476" y="92">In-context learning</text>
-      <text class="d-text small" x="488" y="110">prompts, graph chain-of-thought</text>
-      <text class="d-text" x="476" y="138">Fine-tuning</text>
-      <text class="d-text small" x="488" y="156">node, path, subgraph level</text>
-      <text class="d-text small" x="476" y="222">Course Part 4: Chapters 22–24</text>
+      <text class="d-text bold" x="476" y="40">3. 知识融合</text>
+      <text class="d-text small" x="476" y="62">证据如何影响答案</text>
+      <text class="d-text" x="476" y="92">上下文学习</text>
+      <text class="d-text small" x="488" y="110">提示词、图思维链</text>
+      <text class="d-text" x="476" y="138">微调</text>
+      <text class="d-text small" x="488" y="156">节点级、路径级、子图级</text>
+      <text class="d-text small" x="476" y="222">课程第 4 部分：第 22–24 章</text>
     </svg>
   </div>
-  <figcaption>The survey's three stages, with its main sub-areas, mapped to the parts of this course. Part 1 builds the foundations for all three; Parts 5 and 6 cover evaluation, operations and frontier topics that cut across them.</figcaption>
+  <figcaption>综述提出的三个阶段及其主要子方向，与本课程各部分的对应关系。第 1 部分为这三个阶段打基础；第 5、6 部分讨论贯穿其中的评估、运维和前沿话题。</figcaption>
 </figure>
 
-<p>When you read a new paper, place it on this map first. LightRAG, for example, is mostly an organization choice (entities and relations with keyword descriptions) plus a similarity-based dual-level retriever. Think-on-Graph is an LLM-based, multi-round retriever over an existing knowledge graph. <a href="33-research-map.html">Chapter 33</a> returns to this map with the papers you have met along the way.</p>
+<p>读到一篇新论文时，先把它放到这张地图上。以 LightRAG 为例：它主要是一种组织方式上的选择（带关键词描述的实体和关系），再加上一个基于相似度的双层检索器。Think-on-Graph 则是在现有知识图谱上运行的、基于 LLM 的多轮检索器。<a href="33-research-map.html">第 33 章</a>会带着你一路读过的论文回到这张地图。</p>
 
-<h2>How chapters are built</h2>
-<p>Every chapter follows the same structure, so you always know where to find what you need.</p>
+<h2>各章的结构</h2>
+<p>每一章都遵循同样的结构，你总能知道去哪里找需要的内容。</p>
 <table>
-  <thead><tr><th>Element</th><th>What it is for</th><th>How to use it</th></tr></thead>
+  <thead><tr><th>组成部分</th><th>作用</th><th>使用方法</th></tr></thead>
   <tbody>
-    <tr><td>Objectives and lede</td><td>What you will be able to do afterwards</td><td>Read first; check yourself against them at the end</td></tr>
-    <tr><td>Explanations</td><td>Motivation, intuition, mechanism, code and trade-offs, in that order</td><td>Read with the reference code open next to you</td></tr>
-    <tr><td>Interactive visualizations</td><td>Step through algorithms on the Kestrel graph: BFS, PageRank, Louvain, map-reduce</td><td>Press Next slowly and predict the next step before you see it</td></tr>
-    <tr><td>Diagrams</td><td>Static pictures of structures and data flow</td><td>Redraw the important ones from memory</td></tr>
-    <tr><td>Code</td><td>Real <code>minigraphrag</code> code, labeled with its file path</td><td>Run it, change it, break it</td></tr>
-    <tr><td>Exercises</td><td>Warm-up (by hand), core (coding and analysis), stretch (open-ended)</td><td>Attempt before opening the hint; every exercise has a full worked answer</td></tr>
-    <tr><td>Quiz</td><td>Five or more questions that check understanding, not recall</td><td>Wrong answers explain themselves; the score is only for you</td></tr>
-    <tr><td>Questions learners often ask</td><td>The follow-up questions that come up when people learn this</td><td>Skim; open what you were wondering about</td></tr>
-    <tr><td>Project</td><td>A small build with a checklist and a “done when” line</td><td>Do at least the projects on your learning path</td></tr>
-    <tr><td>Capstones</td><td>Four end-to-end builds (MiniGraphRAG, code graph, temporal memory, enterprise KG QA)</td><td>Milestones with starter code, checkpoints and reference solutions</td></tr>
+    <tr><td>学习目标与导语</td><td>学完后你能做到什么</td><td>先读；学完后对照检查自己</td></tr>
+    <tr><td>正文讲解</td><td>依次讲动机、直觉、机制、代码和取舍</td><td>边读边打开参考代码对照</td></tr>
+    <tr><td>交互图</td><td>在 Kestrel 图上逐步演示算法：BFS、PageRank、Louvain、map-reduce</td><td>慢慢点“下一步”，每一步先预测再看结果</td></tr>
+    <tr><td>原理图</td><td>结构和数据流的静态图示</td><td>凭记忆把重要的几张重画一遍</td></tr>
+    <tr><td>代码</td><td>真实的 <code>minigraphrag</code> 代码，并标注文件路径</td><td>运行它、修改它、把它弄坏</td></tr>
+    <tr><td>练习</td><td>热身（手算）、核心（编码与分析）、进阶（开放式）</td><td>先自己做，再看提示；每道练习都有完整的参考解答</td></tr>
+    <tr><td>测验</td><td>至少五道题，考查理解而非记忆</td><td>答错时会看到解释；分数只给你自己看</td></tr>
+    <tr><td>常见问题</td><td>学习这部分内容时经常冒出的追问</td><td>快速浏览，展开你正好想问的那几条</td></tr>
+    <tr><td>项目</td><td>一个小型构建任务，附检查清单和“完成标准”</td><td>至少完成你所选学习路径上的项目</td></tr>
+    <tr><td>综合项目</td><td>四个端到端项目（MiniGraphRAG、代码图谱、时序记忆、企业知识图谱问答）</td><td>按里程碑推进，配有起始代码、检查点和参考实现</td></tr>
   </tbody>
 </table>
 
 <div class="callout tip">
-  <span class="callout-title">Mark chapters complete</span>
-  <p>Each chapter has a “mark complete” button at the bottom, and your progress shows in the sidebar and on the course map. Progress is stored in your browser only.</p>
+  <span class="callout-title">标记章节完成</span>
+  <p>每章底部都有一个“标记完成”按钮，你的进度会显示在侧边栏和课程地图上。进度只保存在你的浏览器里。</p>
 </div>
 
-<h2>Meet Kestrel Labs</h2>
-<p>Every example, exercise and project in the course uses one fictional world, so you can watch the same graph grow from raw text to communities to answers. Because it is fictional, no language model knows anything about it: when a model answers a Kestrel question correctly, your retrieval did the work.</p>
+<h2>认识 Kestrel Labs</h2>
+<p>课程中的每个示例、练习和项目都使用同一个虚构世界，这样你可以看着同一张图从原始文本长成社区，再到回答问题。正因为它是虚构的，没有任何语言模型了解它：当模型答对一个关于 Kestrel 的问题时，功劳在你的检索。</p>
 
-<p><strong>Kestrel Labs</strong> is an ocean-technology startup in the coastal city of Port Avalon, founded in 2021 by Dr. Mira Okafor (CEO, formerly a researcher at Tidewater Institute) and Jonas Vehl (CTO until March 2026, then Chief Scientist). It builds autonomous underwater drones. Its reef-monitoring program, <strong>Project Sentinel</strong>, runs with Tidewater Institute as research partner, and in August 2024 its drones detected a mass bleaching event at Halden Reef before divers saw it. Kestrel bought all its sonar from <strong>Deepcast</strong> until competitor <strong>Marlow Dynamics</strong> acquired Deepcast in April 2025 and ended outside supply. Kestrel responded with <strong>Project Tern</strong>, an in-house sonar module co-led by Vehl and Priya Nair, a former Marlow engineer who became CTO in March 2026. Brightwater Capital led Kestrel's Series A ($12M, 2022) and Series B ($40M, 2025); its partner Lena Park sits on Kestrel's board. The regional <strong>Ocean Health Act</strong> (2025) requires quarterly reef monitoring, which led the Port Avalon City Council to contract Kestrel in November 2025.</p>
+<p><strong>Kestrel Labs</strong> 是位于沿海城市 Port Avalon 的一家海洋科技初创公司，2021 年由 Dr. Mira Okafor（CEO，曾是 Tidewater Institute 的研究员）和 Jonas Vehl（任 CTO 至 2026 年 3 月，之后任首席科学家）共同创立，主要研发自主水下无人机。公司的珊瑚礁监测项目 <strong>Project Sentinel</strong> 以 Tidewater Institute 为研究合作方；2024 年 8 月，它的无人机先于潜水员发现了 Halden Reef 的大规模白化事件。Kestrel 的声呐原本全部采购自 <strong>Deepcast</strong>，直到 2025 年 4 月竞争对手 <strong>Marlow Dynamics</strong> 收购了 Deepcast 并停止对外供货。Kestrel 的应对是启动 <strong>Project Tern</strong>，自研声呐模块，由 Vehl 和 Priya Nair 共同负责；Priya Nair 此前是 Marlow 的工程师，2026 年 3 月出任 CTO。Brightwater Capital 领投了 Kestrel 的 A 轮（1200 万美元，2022 年）和 B 轮（4000 万美元，2025 年），其合伙人 Lena Park 是 Kestrel 的董事会成员。地区性法规 <strong>Ocean Health Act</strong>（2025 年）要求每季度开展珊瑚礁监测，Port Avalon City Council 因此于 2025 年 11 月与 Kestrel 签约。</p>
 
-<h3>The twelve documents</h3>
+<h3>十二篇文档</h3>
 <table>
-  <thead><tr><th>File</th><th>Kind</th><th>Date</th><th>Main facts</th></tr></thead>
+  <thead><tr><th>文件</th><th>类型</th><th>日期</th><th>主要事实</th></tr></thead>
   <tbody>
-    <tr><td><code>01_herald_kestrel_founding</code></td><td>Newspaper article</td><td>Oct 2021</td><td>Founding by Okafor and Vehl; Okafor's Tidewater past</td></tr>
-    <tr><td><code>02_brightwater_series_a</code></td><td>Press release</td><td>Mar 2022</td><td>$12M Series A; Lena Park joins the board</td></tr>
-    <tr><td><code>03_deepcast_supply_agreement</code></td><td>Trade press</td><td>Aug 2022</td><td>Deepcast to supply sonar; single-supplier risk</td></tr>
-    <tr><td><code>04_twi_sentinel_launch</code></td><td>Institute blog</td><td>Feb 2023</td><td>Project Sentinel launched; Ana Ruiz leads the science</td></tr>
-    <tr><td><code>05_kestrel_blog_priya_nair</code></td><td>Company blog</td><td>Sep 2023</td><td>Priya Nair joins from Marlow Dynamics</td></tr>
-    <tr><td><code>06_twi_bleaching_research_note</code></td><td>Research note</td><td>Sep 2024</td><td>Sentinel drones detect the 2024 bleaching</td></tr>
-    <tr><td><code>07_marlow_acquires_deepcast</code></td><td>Trade press</td><td>Apr 2025</td><td>Marlow buys Deepcast; outside contracts end</td></tr>
-    <tr><td><code>08_kestrel_board_memo_supply</code></td><td>Confidential memo</td><td>May 2025</td><td>Supply disruption; proposal to build in-house sonar</td></tr>
-    <tr><td><code>09_kestrel_eng_blog_project_tern</code></td><td>Engineering blog</td><td>Jun 2025</td><td>Project Tern kicks off to replace Deepcast sonar</td></tr>
-    <tr><td><code>10_brightwater_series_b</code></td><td>Press release</td><td>Sep 2025</td><td>$40M Series B; Ocean Health Act creates demand</td></tr>
-    <tr><td><code>11_city_council_minutes</code></td><td>Meeting minutes</td><td>Nov 2025</td><td>Council contracts Kestrel for Act compliance</td></tr>
-    <tr><td><code>12_interview_leadership_change_2026</code></td><td>Podcast transcript</td><td>Mar 2026</td><td>Priya Nair becomes CTO; risks the company faces</td></tr>
+    <tr><td><code>01_herald_kestrel_founding</code></td><td>新闻报道</td><td>2021 年 10 月</td><td>Okafor 与 Vehl 创立公司；Okafor 曾在 Tidewater 任职</td></tr>
+    <tr><td><code>02_brightwater_series_a</code></td><td>新闻稿</td><td>2022 年 3 月</td><td>1200 万美元 A 轮；Lena Park 加入董事会</td></tr>
+    <tr><td><code>03_deepcast_supply_agreement</code></td><td>行业媒体</td><td>2022 年 8 月</td><td>Deepcast 将供应声呐；单一供应商风险</td></tr>
+    <tr><td><code>04_twi_sentinel_launch</code></td><td>研究所博客</td><td>2023 年 2 月</td><td>Project Sentinel 启动；Ana Ruiz 主导科研工作</td></tr>
+    <tr><td><code>05_kestrel_blog_priya_nair</code></td><td>公司博客</td><td>2023 年 9 月</td><td>Priya Nair 从 Marlow Dynamics 加入</td></tr>
+    <tr><td><code>06_twi_bleaching_research_note</code></td><td>研究简报</td><td>2024 年 9 月</td><td>Sentinel 无人机发现 2024 年白化事件</td></tr>
+    <tr><td><code>07_marlow_acquires_deepcast</code></td><td>行业媒体</td><td>2025 年 4 月</td><td>Marlow 收购 Deepcast；对外供货合同终止</td></tr>
+    <tr><td><code>08_kestrel_board_memo_supply</code></td><td>机密备忘录</td><td>2025 年 5 月</td><td>供应中断；提议自研声呐</td></tr>
+    <tr><td><code>09_kestrel_eng_blog_project_tern</code></td><td>工程博客</td><td>2025 年 6 月</td><td>Project Tern 启动，用于替代 Deepcast 声呐</td></tr>
+    <tr><td><code>10_brightwater_series_b</code></td><td>新闻稿</td><td>2025 年 9 月</td><td>4000 万美元 B 轮；Ocean Health Act 带来需求</td></tr>
+    <tr><td><code>11_city_council_minutes</code></td><td>会议纪要</td><td>2025 年 11 月</td><td>市议会与 Kestrel 签约，确保符合该法规要求</td></tr>
+    <tr><td><code>12_interview_leadership_change_2026</code></td><td>播客文字稿</td><td>2026 年 3 月</td><td>Priya Nair 出任 CTO；公司面临的风险</td></tr>
   </tbody>
 </table>
 
-<p>The corpus is small (5,427 words) on purpose: you can read all of it in twenty minutes, check every answer by hand, and run the whole pipeline offline in well under a second. It is also written so that facts are spread realistically: the board memo never names Marlow Dynamics, the bleaching note never names Kestrel Labs, and names appear under aliases such as “TWI”, “Okafor” and “Tern”.</p>
+<p>这份语料刻意做得很小（5,427 个英文单词）：二十分钟就能读完，每个答案都能手工核对，整条流程离线运行远不到一秒。同时，事实的分布方式也贴近现实：董事会备忘录从未提到 Marlow Dynamics，白化研究简报从未提到 Kestrel Labs，很多名称还以别名出现，比如“TWI”“Okafor”和“Tern”。</p>
 
-<h3>The canonical questions</h3>
-<p>Seven questions recur throughout the course. <code>data/questions.jsonl</code> contains them and sixteen more, each with a reference answer and supporting documents.</p>
+<h3>典型问题</h3>
+<p>有七个问题会在整门课程中反复出现。<code>data/questions.jsonl</code> 收录了这七个问题以及另外十六个问题，每个都附有参考答案和支撑文档。</p>
 <ul>
-  <li><strong>Multi-hop</strong>: (1) Why did Kestrel Labs start Project Tern? (2) Which investor's board member oversees the company whose drones detected the Halden Reef bleaching? (3) What connects Priya Nair to Deepcast?</li>
-  <li><strong>Global</strong>: (4) What are the main themes in this corpus? (5) What risks does Kestrel Labs face?</li>
-  <li><strong>Temporal</strong>: (6) Who is the CTO of Kestrel Labs? (7) Who supplied Kestrel's sonar in 2024?</li>
+  <li><strong>多跳</strong>：(1) Kestrel Labs 为什么启动 Project Tern？(2) 旗下无人机发现了 Halden Reef 白化事件的那家公司，由哪家投资机构的董事会成员监督？(3) Priya Nair 与 Deepcast 之间有什么联系？</li>
+  <li><strong>全局</strong>：(4) 这份语料的主要主题是什么？(5) Kestrel Labs 面临哪些风险？</li>
+  <li><strong>时间</strong>：(6) Kestrel Labs 的 CTO 是谁？(7) 2024 年 Kestrel 的声呐由谁供货？</li>
 </ul>
 
-<p>Step through the graph below to see the path each question needs. This is the hand-drawn “ideal” graph from the running-example specification; the graph your code extracts will be close to it but not identical, and comparing the two is part of the fun.</p>
+<p>在下面的图中逐步点击，看看每个问题需要走哪条路径。这是按贯穿示例规格手工绘制的“理想”图；你的代码抽取出的图会与它相近但不完全相同，比较两者的差异正是乐趣之一。</p>
 
 <div class="viz" data-viz="graph-steps">
 <script type="application/json">
 {
-  "title": "The Kestrel Labs knowledge graph",
-  "subtitle": "Step through the canonical questions",
+  "title": "Kestrel Labs 知识图谱",
+  "subtitle": "逐步查看各个典型问题",
   "height": 460,
   "directed": false,
   "nodes": [
@@ -256,73 +256,73 @@
     {"id": "oha", "label": "Ocean Health Act", "group": 7, "x": 10, "y": 88}
   ],
   "edges": [
-    {"source": "okafor", "target": "kestrel", "label": "CEO, co-founded"},
+    {"source": "okafor", "target": "kestrel", "label": "CEO，联合创始人"},
     {"source": "vehl", "target": "kestrel", "label": "CTO 2021–2026-03"},
-    {"source": "nair", "target": "kestrel", "label": "CTO since 2026-03"},
-    {"source": "okafor", "target": "twi", "label": "formerly at"},
-    {"source": "nair", "target": "marlow", "label": "formerly at"},
-    {"source": "ruiz", "target": "twi", "label": "directs"},
-    {"source": "kestrel", "target": "sentinel", "label": "runs"},
-    {"source": "twi", "target": "sentinel", "label": "partners on"},
-    {"source": "nair", "target": "sentinel", "label": "leads"},
-    {"source": "sentinel", "target": "halden", "label": "monitors"},
-    {"source": "sentinel", "target": "bleach", "label": "detected 2024-08"},
-    {"source": "bleach", "target": "halden", "label": "occurred at"},
-    {"source": "ruiz", "target": "halden", "label": "leads survey"},
-    {"source": "brightwater", "target": "kestrel", "label": "invested in"},
-    {"source": "lena", "target": "brightwater", "label": "partner at"},
-    {"source": "lena", "target": "kestrel", "label": "board member"},
-    {"source": "deepcast", "target": "kestrel", "label": "supplied 2022–2025"},
-    {"source": "marlow", "target": "deepcast", "label": "acquired 2025-04"},
-    {"source": "marlow", "target": "kestrel", "label": "competes with"},
-    {"source": "kestrel", "target": "tern", "label": "runs"},
-    {"source": "vehl", "target": "tern", "label": "co-leads"},
-    {"source": "nair", "target": "tern", "label": "co-leads"},
-    {"source": "tern", "target": "deepcast", "label": "replaces sonar"},
-    {"source": "oha", "target": "sentinel", "label": "drives demand"},
-    {"source": "council", "target": "kestrel", "label": "contracted 2025-11"},
-    {"source": "council", "target": "oha", "label": "complies with"},
-    {"source": "kestrel", "target": "avalon", "label": "located in"},
-    {"source": "twi", "target": "avalon", "label": "located in"},
-    {"source": "council", "target": "avalon", "label": "located in"}
+    {"source": "nair", "target": "kestrel", "label": "CTO，2026-03 起"},
+    {"source": "okafor", "target": "twi", "label": "曾任职于"},
+    {"source": "nair", "target": "marlow", "label": "曾任职于"},
+    {"source": "ruiz", "target": "twi", "label": "领导"},
+    {"source": "kestrel", "target": "sentinel", "label": "运营"},
+    {"source": "twi", "target": "sentinel", "label": "合作"},
+    {"source": "nair", "target": "sentinel", "label": "负责"},
+    {"source": "sentinel", "target": "halden", "label": "监测"},
+    {"source": "sentinel", "target": "bleach", "label": "发现 2024-08"},
+    {"source": "bleach", "target": "halden", "label": "发生于"},
+    {"source": "ruiz", "target": "halden", "label": "主持调查"},
+    {"source": "brightwater", "target": "kestrel", "label": "投资"},
+    {"source": "lena", "target": "brightwater", "label": "合伙人"},
+    {"source": "lena", "target": "kestrel", "label": "董事会成员"},
+    {"source": "deepcast", "target": "kestrel", "label": "供货 2022–2025"},
+    {"source": "marlow", "target": "deepcast", "label": "收购 2025-04"},
+    {"source": "marlow", "target": "kestrel", "label": "竞争"},
+    {"source": "kestrel", "target": "tern", "label": "运营"},
+    {"source": "vehl", "target": "tern", "label": "共同负责"},
+    {"source": "nair", "target": "tern", "label": "共同负责"},
+    {"source": "tern", "target": "deepcast", "label": "替代其声呐"},
+    {"source": "oha", "target": "sentinel", "label": "带动需求"},
+    {"source": "council", "target": "kestrel", "label": "签约 2025-11"},
+    {"source": "council", "target": "oha", "label": "遵守"},
+    {"source": "kestrel", "target": "avalon", "label": "位于"},
+    {"source": "twi", "target": "avalon", "label": "位于"},
+    {"source": "council", "target": "avalon", "label": "位于"}
   ],
-  "legend": {"2": "Organization", "3": "Person", "4": "Project", "5": "Event", "6": "Location", "7": "Law"},
+  "legend": {"2": "组织", "3": "人物", "4": "项目", "5": "事件", "6": "地点", "7": "法规"},
   "steps": [
-    {"caption": "Seventeen entities and the relationships the canonical questions depend on. Kestrel Labs is the hub; notice the looser clusters around reef science (bottom right), supply chain (top right), funding (top left) and regulation (bottom left). Those clusters become communities in Chapter 11."},
-    {"caption": "<strong>Q1. Why did Kestrel Labs start Project Tern?</strong> Marlow Dynamics <em>acquired</em> Deepcast, which had <em>supplied</em> Kestrel Labs; Kestrel <em>runs</em> Project Tern, which <em>replaces</em> the Deepcast sonar. The evidence sits in three different documents.", "active": ["tern", "marlow"], "visited": ["deepcast", "kestrel"], "edges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>tern", "tern>deepcast"]},
-    {"caption": "<strong>Q2. Which investor's board member oversees the company whose drones detected the bleaching?</strong> The 2024 bleaching was <em>detected</em> by Project Sentinel, which Kestrel Labs <em>runs</em>; Lena Park is a <em>board member</em> of Kestrel and a <em>partner at</em> Brightwater Capital.", "active": ["bleach", "brightwater"], "visited": ["sentinel", "kestrel", "lena"], "edges": ["bleach>sentinel", "sentinel>kestrel", "kestrel>lena", "lena>brightwater"]},
-    {"caption": "<strong>Q3. What connects Priya Nair to Deepcast?</strong> Two paths: she was <em>formerly at</em> Marlow Dynamics, which <em>acquired</em> Deepcast; and she <em>co-leads</em> Project Tern, which <em>replaces</em> Deepcast's sonar.", "active": ["nair", "deepcast"], "visited": ["marlow", "tern"], "edges": ["nair>marlow", "marlow>deepcast", "nair>tern", "tern>deepcast"]},
-    {"caption": "<strong>Q4. What are the main themes?</strong> No path answers this. The answer summarizes clusters: reef science and monitoring, supply-chain risk and vertical integration, funding and growth, and regulation creating demand. That is what community reports (Chapter 12) and global search (Chapter 15) are for.", "active": ["sentinel", "deepcast", "brightwater", "oha"], "visited": ["twi", "ruiz", "halden", "bleach", "marlow", "tern", "lena", "council"], "showAllLabels": false},
-    {"caption": "<strong>Q5. What risks does Kestrel Labs face?</strong> Also global: dependence on a single supplier and the Tern replacement (supply chain), competition from Marlow, dependence on the Ocean Health Act, and concentration on one reef and one scientific partner.", "active": ["kestrel"], "visited": ["deepcast", "tern", "marlow", "oha", "halden", "twi"], "edges": ["deepcast>kestrel", "kestrel>tern", "marlow>kestrel", "oha>sentinel", "sentinel>halden", "twi>sentinel"]},
-    {"caption": "<strong>Q6. Who is the CTO of Kestrel Labs?</strong> Two edges with different validity periods: Jonas Vehl from 2021 to March 2026, Priya Nair since March 2026. A graph without time attached would return both. Temporal facts arrive in Chapter 10.", "active": ["nair", "kestrel"], "visited": ["vehl"], "edges": ["nair>kestrel"], "visitedEdges": ["vehl>kestrel"]},
-    {"caption": "<strong>Q7. Who supplied Kestrel's sonar in 2024?</strong> One edge, Deepcast <em>supplied</em> Kestrel Labs, valid 2022–2025, so 2024 falls inside it. The only simple question of the seven, and the one where plain vector RAG already does well.", "active": ["deepcast", "kestrel"], "edges": ["deepcast>kestrel"]}
+    {"caption": "十七个实体，以及典型问题所依赖的关系。Kestrel Labs 是枢纽；注意周围几个较松散的簇：珊瑚礁科研（右下）、供应链（右上）、融资（左上）和监管（左下）。这些簇会在第 11 章成为社区。"},
+    {"caption": "<strong>Q1. Kestrel Labs 为什么启动 Project Tern？</strong>Marlow Dynamics <em>收购</em>了 Deepcast，而 Deepcast 曾为 Kestrel Labs <em>供货</em>；Kestrel <em>运营</em> Project Tern，Tern 用来<em>替代</em> Deepcast 的声呐。这些证据分布在三篇不同的文档里。", "active": ["tern", "marlow"], "visited": ["deepcast", "kestrel"], "edges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>tern", "tern>deepcast"]},
+    {"caption": "<strong>Q2. 旗下无人机发现白化事件的那家公司，由哪家投资机构的董事会成员监督？</strong>2024 年白化事件由 Project Sentinel <em>发现</em>，Sentinel 由 Kestrel Labs <em>运营</em>；Lena Park 是 Kestrel 的<em>董事会成员</em>，同时是 Brightwater Capital 的<em>合伙人</em>。", "active": ["bleach", "brightwater"], "visited": ["sentinel", "kestrel", "lena"], "edges": ["bleach>sentinel", "sentinel>kestrel", "kestrel>lena", "lena>brightwater"]},
+    {"caption": "<strong>Q3. Priya Nair 与 Deepcast 之间有什么联系？</strong>有两条路径：她<em>曾任职于</em> Marlow Dynamics，而 Marlow <em>收购</em>了 Deepcast；她还<em>共同负责</em> Project Tern，而 Tern 用来<em>替代</em> Deepcast 的声呐。", "active": ["nair", "deepcast"], "visited": ["marlow", "tern"], "edges": ["nair>marlow", "marlow>deepcast", "nair>tern", "tern>deepcast"]},
+    {"caption": "<strong>Q4. 主要主题是什么？</strong>没有哪条路径能回答这个问题。答案是对各个簇的归纳：珊瑚礁科研与监测、供应链风险与垂直整合、融资与增长，以及监管带来的需求。这正是社区报告（第 12 章）和全局搜索（第 15 章）要解决的问题。", "active": ["sentinel", "deepcast", "brightwater", "oha"], "visited": ["twi", "ruiz", "halden", "bleach", "marlow", "tern", "lena", "council"], "showAllLabels": false},
+    {"caption": "<strong>Q5. Kestrel Labs 面临哪些风险？</strong>这同样是全局问题：依赖单一供应商以及 Tern 替代方案本身（供应链）、来自 Marlow 的竞争、对 Ocean Health Act 的依赖，以及过度集中于一片珊瑚礁和一家科研合作方。", "active": ["kestrel"], "visited": ["deepcast", "tern", "marlow", "oha", "halden", "twi"], "edges": ["deepcast>kestrel", "kestrel>tern", "marlow>kestrel", "oha>sentinel", "sentinel>halden", "twi>sentinel"]},
+    {"caption": "<strong>Q6. Kestrel Labs 的 CTO 是谁？</strong>两条边的有效期不同：Jonas Vehl 从 2021 年到 2026 年 3 月，Priya Nair 从 2026 年 3 月起。如果图中不带时间信息，两个人都会被返回。时间型事实将在第 10 章引入。", "active": ["nair", "kestrel"], "visited": ["vehl"], "edges": ["nair>kestrel"], "visitedEdges": ["vehl>kestrel"]},
+    {"caption": "<strong>Q7. 2024 年 Kestrel 的声呐由谁供货？</strong>只需一条边：Deepcast <em>供货</em>给 Kestrel Labs，有效期 2022–2025，2024 年正好落在其中。这是七个问题中唯一简单的一个，纯向量 RAG 在这里已经表现不错。", "active": ["deepcast", "kestrel"], "edges": ["deepcast>kestrel"]}
   ]
 }
 </script>
 </div>
 
-<h2>Set up the reference code</h2>
-<p><code>minigraphrag</code> is a small, readable GraphRAG written for this course: chunking, extraction with gleaning, entity resolution, communities, community reports, eight retrieval methods, Text2Cypher, a bi-temporal graph and evaluation. Chapters show its real code. It depends only on <code>networkx</code> and <code>numpy</code> by default and runs fully offline.</p>
+<h2>搭建参考代码</h2>
+<p><code>minigraphrag</code> 是专为本课程编写的一个小巧易读的 GraphRAG 实现，涵盖分块、带补漏抽取（gleaning）的抽取、实体消解（entity resolution）、社区、社区报告、八种检索方法、Text2Cypher、双时态图以及评估。各章展示的都是它的真实代码。默认情况下它只依赖 <code>networkx</code> 和 <code>numpy</code>，可以完全离线运行。</p>
 
-<h3>Install</h3>
-<p>You need Python 3.10 or newer. From the repository root:</p>
+<h3>安装</h3>
+<p>你需要 Python 3.10 或更高版本。在仓库根目录下执行：</p>
 <pre data-file="terminal"><code class="language-bash">cd code
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q</code></pre>
-<p><code>-e</code> installs the package in editable mode, so changes you make to <code>minigraphrag/</code> take effect without reinstalling; several exercises have you edit it. <code>[dev]</code> adds pytest. The test suite should pass in well under a second.</p>
+<p><code>-e</code> 以可编辑模式安装这个包，你对 <code>minigraphrag/</code> 的修改无需重新安装即可生效；有好几道练习需要你改动它。<code>[dev]</code> 会额外安装 pytest。整套测试应当远不到一秒就能跑完。</p>
 
-<h3>Build an index offline</h3>
-<pre data-file="terminal"><code class="language-bash"># mock LLM + hashing embedder: no network, no API key, about a second
+<h3>离线构建索引</h3>
+<pre data-file="terminal"><code class="language-bash"># 模拟 LLM + 哈希嵌入器：无需联网，无需 API key，大约一秒
 python -m minigraphrag index --input data/corpus --output .index
 
-# ask questions with different retrieval methods
+# 用不同的检索方法提问
 python -m minigraphrag query --method basic  "Who supplied Kestrel's sonar in 2024?"
 python -m minigraphrag query --method local  "Why did Kestrel Labs start Project Tern?"
 python -m minigraphrag query --method global "What are the main themes in this corpus?"
 python -m minigraphrag query --method hybrid --show-context "Who supplied Kestrel's sonar in 2024?"</code></pre>
 
-<p>Indexing prints one line per stage. On the Kestrel corpus with the defaults you should see:</p>
+<p>建索引时每个阶段输出一行。在 Kestrel 语料上使用默认设置，你应当看到：</p>
 <pre data-file="output"><code>chunked 12 documents into 24 text units
 extracted 194 entity mentions, 154 relationship mentions
 graph: 17 entities, 54 relationships
@@ -332,36 +332,36 @@ saved index to .index</code></pre>
 <div class="viz" data-viz="flow">
 <script type="application/json">
 {
-  "title": "What python -m minigraphrag index just did",
+  "title": "python -m minigraphrag index 刚才做了什么",
   "perRow": 3,
   "stages": [
-    {"label": "Chunk", "detail": "12 documents into 24 text units of 300 words with 50 words of overlap (<code>chunking.py</code>, Chapters 2 and 7)."},
-    {"label": "Extract", "detail": "The LLM, here <code>MockLLM</code>, reads each unit and emits entities and relationships, with one gleaning round: 194 entity mentions and 154 relationship mentions (<code>extraction.py</code>, Chapter 8)."},
-    {"label": "Resolve and build", "detail": "Aliases such as “Okafor” and “Dr. Mira Okafor” merge; duplicate edges combine; descriptions are summarized: 17 entities, 54 relationships (<code>resolution.py</code>, <code>graph_build.py</code>, Chapter 9)."},
-    {"label": "Communities", "detail": "The graph is partitioned into 4 communities of closely connected entities (<code>communities.py</code>, Chapter 11)."},
-    {"label": "Reports", "detail": "Each community gets a JSON report: title, summary, findings and a rating (<code>reports.py</code>, Chapter 12)."},
-    {"label": "Embed and save", "detail": "Entities, relationships, text units and reports are embedded and everything is written as plain files in <code>.index/</code> (<code>indexer.py</code>, Chapter 13)."}
+    {"label": "分块", "detail": "把 12 篇文档切成 24 个文本单元，每个 300 词，相邻单元重叠 50 词（<code>chunking.py</code>，第 2 章和第 7 章）。"},
+    {"label": "抽取", "detail": "LLM（这里是 <code>MockLLM</code>）读取每个文本单元，输出实体和关系，并做一轮补漏抽取：共得到 194 次实体提及和 154 次关系提及（<code>extraction.py</code>，第 8 章）。"},
+    {"label": "消解与构图", "detail": "“Okafor”和“Dr. Mira Okafor”这样的别名被合并，重复的边被合并，描述被汇总成摘要：得到 17 个实体、54 条关系（<code>resolution.py</code>、<code>graph_build.py</code>，第 9 章）。"},
+    {"label": "社区", "detail": "把图划分为 4 个由紧密相连的实体组成的社区（<code>communities.py</code>，第 11 章）。"},
+    {"label": "报告", "detail": "为每个社区生成一份 JSON 报告：标题、摘要、发现和评分（<code>reports.py</code>，第 12 章）。"},
+    {"label": "嵌入与保存", "detail": "为实体、关系、文本单元和报告计算嵌入，所有结果以普通文件形式写入 <code>.index/</code>（<code>indexer.py</code>，第 13 章）。"}
   ]
 }
 </script>
 </div>
 
-<p>The index folder contains plain artifacts you can open in an editor: <code>text_units.json</code>, <code>entities.json</code>, <code>relationships.json</code>, <code>graph.graphml</code> (opens in Gephi or yEd), <code>communities.json</code>, <code>community_reports.json</code>, <code>claims.json</code>, the <code>*_embeddings.npz</code>/<code>.json</code> pairs and <code>config.json</code>.</p>
+<p>索引目录里都是可以直接用编辑器打开的普通文件：<code>text_units.json</code>、<code>entities.json</code>、<code>relationships.json</code>、<code>graph.graphml</code>（可用 Gephi 或 yEd 打开）、<code>communities.json</code>、<code>community_reports.json</code>、<code>claims.json</code>、成对的 <code>*_embeddings.npz</code>/<code>.json</code> 文件，以及 <code>config.json</code>。</p>
 
 <div class="callout warn">
-  <span class="callout-title">The mock is a teaching device</span>
-  <p><code>MockLLM</code> recognizes each course prompt by a marker phrase and answers with deterministic heuristics: a small gazetteer of Kestrel names for extraction, co-occurrence for relationships, and extractive answers that return context sentences with <code>[Data: ...]</code> citations. It shows you <em>what each retriever put into the context</em>, reproducibly and for free. To judge how well a method actually answers, switch to a real LLM.</p>
+  <span class="callout-title">模拟 LLM 只是教学工具</span>
+  <p><code>MockLLM</code> 通过标记短语识别课程中的每个提示词，并用确定性的启发式规则作答：抽取时查一张小型的 Kestrel 实体词表（gazetteer），关系靠共现判断，回答则是抽取式的，直接返回上下文中的句子并附上 <code>[Data: ...]</code> 引用。它能让你以可复现、零成本的方式看到<em>每个检索器往上下文里放了什么</em>。要评判一种方法实际答得好不好，请切换到真实的 LLM。</p>
 </div>
 
-<h3>Switch to a real LLM</h3>
-<p>The <code>--llm</code> flag picks a provider; environment variables configure it.</p>
+<h3>切换到真实的 LLM</h3>
+<p><code>--llm</code> 参数用于选择模型服务，具体配置通过环境变量完成。</p>
 <table>
-  <thead><tr><th><code>--llm</code></th><th>Install</th><th>Environment variables</th><th>Default model</th></tr></thead>
+  <thead><tr><th><code>--llm</code></th><th>安装</th><th>环境变量</th><th>默认模型</th></tr></thead>
   <tbody>
-    <tr><td><code>mock</code></td><td>nothing</td><td>none</td><td>none</td></tr>
-    <tr><td><code>openai</code></td><td><code>pip install -e ".[openai]"</code></td><td><code>OPENAI_API_KEY</code>; optional <code>OPENAI_MODEL</code>, <code>OPENAI_BASE_URL</code></td><td><code>gpt-4o-mini</code></td></tr>
-    <tr><td><code>anthropic</code></td><td><code>pip install -e ".[anthropic]"</code></td><td><code>ANTHROPIC_API_KEY</code>; optional <code>ANTHROPIC_MODEL</code></td><td><code>claude-sonnet-5</code></td></tr>
-    <tr><td><code>ollama</code></td><td><code>pip install -e ".[openai]"</code> (Ollama speaks the OpenAI API)</td><td>optional <code>OLLAMA_BASE_URL</code> (default <code>http://localhost:11434/v1</code>), <code>OLLAMA_MODEL</code></td><td><code>llama3.1</code></td></tr>
+    <tr><td><code>mock</code></td><td>无需安装</td><td>无</td><td>无</td></tr>
+    <tr><td><code>openai</code></td><td><code>pip install -e ".[openai]"</code></td><td><code>OPENAI_API_KEY</code>；可选 <code>OPENAI_MODEL</code>、<code>OPENAI_BASE_URL</code></td><td><code>gpt-4o-mini</code></td></tr>
+    <tr><td><code>anthropic</code></td><td><code>pip install -e ".[anthropic]"</code></td><td><code>ANTHROPIC_API_KEY</code>；可选 <code>ANTHROPIC_MODEL</code></td><td><code>claude-sonnet-5</code></td></tr>
+    <tr><td><code>ollama</code></td><td><code>pip install -e ".[openai]"</code>（Ollama 兼容 OpenAI API）</td><td>可选 <code>OLLAMA_BASE_URL</code>（默认 <code>http://localhost:11434/v1</code>）、<code>OLLAMA_MODEL</code></td><td><code>llama3.1</code></td></tr>
   </tbody>
 </table>
 
@@ -370,16 +370,16 @@ export ANTHROPIC_API_KEY=...
 python -m minigraphrag index --llm anthropic --cache-dir .cache/llm --output .index-claude
 python -m minigraphrag query --llm anthropic --index .index-claude --method local "Who is the CTO of Kestrel Labs?"</code></pre>
 
-<p><code>--cache-dir</code> wraps the LLM in <code>CachedLLM</code>, a disk cache keyed by a hash of the model, system prompt, prompt and JSON flag, so rerunning indexing after a code change does not pay for identical calls again. vLLM, LM Studio and other OpenAI-compatible servers work through <code>OPENAI_BASE_URL</code>. For neural embeddings, pass <code>--embedder openai</code> or <code>--embedder st:all-MiniLM-L6-v2</code> (after installing the <code>st</code> extra); the embedder name is saved in <code>config.json</code> and reused at query time.</p>
+<p><code>--cache-dir</code> 会用 <code>CachedLLM</code> 包装 LLM。这是一个磁盘缓存，键是模型、系统提示词、提示词和 JSON 标志四者的哈希，因此改完代码重新建索引时，完全相同的调用不会再付一次费。vLLM、LM Studio 以及其他兼容 OpenAI 的服务都可以通过 <code>OPENAI_BASE_URL</code> 接入。如果想用神经网络嵌入，传入 <code>--embedder openai</code>，或者在安装 <code>st</code> 扩展后传入 <code>--embedder st:all-MiniLM-L6-v2</code>；嵌入器名称会保存在 <code>config.json</code> 中，查询时自动沿用。</p>
 
-<h3>The same thing from Python</h3>
-<p>Most exercises use the Python API directly:</p>
+<h3>用 Python 做同样的事</h3>
+<p>大多数练习直接使用 Python API：</p>
 <pre data-file="examples/ch00_first_index.py"><code class="language-python">from minigraphrag import HashingEmbedder, IndexConfig, build_index, load_index
 from minigraphrag.llm import get_llm
 from minigraphrag.search.basic import basic_search
 from minigraphrag.search.local import local_search
 
-llm = get_llm("mock")                        # "openai", "anthropic" or "ollama", configured by env vars
+llm = get_llm("mock")                        # 也可以是 "openai"、"anthropic" 或 "ollama"，通过环境变量配置
 build_index("data/corpus", ".index", llm, HashingEmbedder(), IndexConfig(max_gleanings=1), log=print)
 
 index = load_index(".index")
@@ -389,101 +389,101 @@ for search in (basic_search, local_search):
     result = search(index, "Why did Kestrel Labs start Project Tern?", llm)
     print(result.method, result.llm_calls, result.sources)
     print(result.answer[:300], "\n")</code></pre>
-<p>Every search method returns a <code>SearchResult</code> with the <code>answer</code>, the <code>method</code> name, the <code>context_text</code> the model saw, structured <code>context_data</code>, the <code>sources</code> (document ids that reached the context) and the number of <code>llm_calls</code>. Comparing <code>sources</code> across methods is the quickest way to see what a retriever found.</p>
+<p>每种检索方法都返回一个 <code>SearchResult</code>，其中包括 <code>answer</code>（答案）、<code>method</code>（方法名）、<code>context_text</code>（模型看到的上下文）、结构化的 <code>context_data</code>、<code>sources</code>（进入上下文的文档 id）以及 <code>llm_calls</code>（LLM 调用次数）。比较不同方法的 <code>sources</code>，是了解检索器找到了什么的最快途径。</p>
 
-<h2>Suggested learning paths</h2>
-<p>The course map on the home page shows chapter prerequisites. Three paths through it:</p>
+<h2>推荐的学习路径</h2>
+<p>首页的课程地图标出了各章的前置章节。下面是三条参考路径：</p>
 <table>
-  <thead><tr><th>Path</th><th>For</th><th>Chapters</th><th>Rough time</th></tr></thead>
+  <thead><tr><th>路径</th><th>适合谁</th><th>章节</th><th>大致用时</th></tr></thead>
   <tbody>
-    <tr><td><strong>Full path</strong></td><td>Engineers new to RAG or graphs who want to understand everything from first principles</td><td>All chapters in order, every core exercise, all projects, then Capstone 1 and one more capstone</td><td>Around 30 hours of reading plus projects and capstones</td></tr>
-    <tr><td><strong>“I already know RAG”</strong></td><td>You have built vector RAG and want the graph part fast</td><td><a href="03-where-rag-breaks.html">3</a> (skim), <a href="04-graph-fundamentals.html">4</a>, <a href="06-graph-shapes.html">6</a>, <a href="08-entity-relation-extraction.html">8</a>, <a href="09-entity-resolution.html">9</a>, <a href="11-community-detection.html">11</a>, <a href="12-community-reports.html">12</a>, <a href="14-local-search.html">14</a>, <a href="15-global-search.html">15</a>, <a href="17-ppr-hipporag.html">17</a>, <a href="21-hybrid-design-patterns.html">21</a>, <a href="22-context-construction.html">22</a>, <a href="25-evaluation.html">25</a>, then <a href="c1-minigraphrag.html">Capstone 1</a></td><td>About half of the full path</td></tr>
-    <tr><td><strong>“I need production”</strong></td><td>You will ship or run a GraphRAG system and need to decide what to build</td><td><a href="03-where-rag-breaks.html">3</a>, <a href="06-graph-shapes.html">6</a>, <a href="13-storage-indexing.html">13</a>, <a href="14-local-search.html">14</a>, <a href="15-global-search.html">15</a>, <a href="20-text2cypher.html">20</a>, <a href="21-hybrid-design-patterns.html">21</a>, <a href="25-evaluation.html">25</a>–<a href="29-production-ops.html">29</a>, then <a href="c4-enterprise-kgqa.html">Capstone 4</a></td><td>Similar to the fast path, weighted toward Part 5</td></tr>
+    <tr><td><strong>完整路径</strong></td><td>刚接触 RAG 或图、希望从第一性原理弄懂一切的工程师</td><td>按顺序学完所有章节，完成每道核心练习和所有项目，然后完成综合项目 1 和另外一个综合项目</td><td>阅读约 30 小时，另加项目和综合项目的时间</td></tr>
+    <tr><td><strong>“我已经会 RAG”</strong></td><td>你做过向量 RAG，想尽快掌握图的部分</td><td><a href="03-where-rag-breaks.html">3</a>（略读）、<a href="04-graph-fundamentals.html">4</a>、<a href="06-graph-shapes.html">6</a>、<a href="08-entity-relation-extraction.html">8</a>、<a href="09-entity-resolution.html">9</a>、<a href="11-community-detection.html">11</a>、<a href="12-community-reports.html">12</a>、<a href="14-local-search.html">14</a>、<a href="15-global-search.html">15</a>、<a href="17-ppr-hipporag.html">17</a>、<a href="21-hybrid-design-patterns.html">21</a>、<a href="22-context-construction.html">22</a>、<a href="25-evaluation.html">25</a>，然后是<a href="c1-minigraphrag.html">综合项目 1</a></td><td>约为完整路径的一半</td></tr>
+    <tr><td><strong>“我要上生产”</strong></td><td>你要交付或运维一套 GraphRAG 系统，需要决定构建什么</td><td><a href="03-where-rag-breaks.html">3</a>、<a href="06-graph-shapes.html">6</a>、<a href="13-storage-indexing.html">13</a>、<a href="14-local-search.html">14</a>、<a href="15-global-search.html">15</a>、<a href="20-text2cypher.html">20</a>、<a href="21-hybrid-design-patterns.html">21</a>、<a href="25-evaluation.html">25</a>–<a href="29-production-ops.html">29</a>，然后是<a href="c4-enterprise-kgqa.html">综合项目 4</a></td><td>与快速路径相当，但更侧重第 5 部分</td></tr>
   </tbody>
 </table>
-<p>Whatever path you choose, do not skip <a href="03-where-rag-breaks.html">Chapter 3</a>. Once you know which failures your questions hit, you can choose techniques instead of collecting them.</p>
+<p>无论选择哪条路径，都不要跳过<a href="03-where-rag-breaks.html">第 3 章</a>。只有先弄清你的问题会遇到哪些失败，你才能有针对性地选择技术，而不是把技术一样样收集起来。</p>
 
-<h2>Exercises</h2>
+<h2>练习</h2>
 
 <section class="exercise" data-level="warmup">
-  <h4>Exercise 0.1 <span class="level">Warm-up</span></h4>
-  <p>Set up your environment and run the offline pipeline: create the virtual environment, install with the <code>dev</code> extra, run the tests, build an index with the mock LLM, and ask the <code>basic</code> method “Who supplied Kestrel's sonar in 2024?”. Record the five log lines from indexing and the list of sources the query reports.</p>
-  <details class="hint"><summary>Hint</summary><p>If <code>python -m minigraphrag</code> says “No module named minigraphrag”, your virtual environment is not active in this shell, or you ran <code>pip install</code> outside <code>code/</code>.</p></details>
+  <h4>练习 0.1 <span class="level">热身</span></h4>
+  <p>搭建环境并跑通离线流程：创建虚拟环境，带 <code>dev</code> 扩展安装，运行测试，用模拟 LLM 构建索引，然后用 <code>basic</code> 方法提问 “Who supplied Kestrel's sonar in 2024?”（2024 年 Kestrel 的声呐由谁供货？）。记下建索引时输出的五行日志，以及查询报告的来源列表。</p>
+  <details class="hint"><summary>提示</summary><p>如果 <code>python -m minigraphrag</code> 报错 “No module named minigraphrag”，说明当前 shell 中没有激活虚拟环境，或者你是在 <code>code/</code> 目录之外执行的 <code>pip install</code>。</p></details>
   <details class="answer">
-    <summary>Show answer</summary>
+    <summary>查看解答</summary>
     <pre><code class="language-bash">cd code
 python3 -m venv .venv &amp;&amp; source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -q
 python -m minigraphrag index --input data/corpus --output .index
 python -m minigraphrag query --method basic "Who supplied Kestrel's sonar in 2024?"</code></pre>
-    <p>Indexing prints:</p>
+    <p>建索引时输出：</p>
     <pre><code>chunked 12 documents into 24 text units
 extracted 194 entity mentions, 154 relationship mentions
 graph: 17 entities, 54 relationships
 4 communities, 4 reports
 saved index to .index</code></pre>
-    <p>The query prints an extractive answer whose first sentence is “Deepcast has supplied every sonar module in our fleet since 2022. [Data: Sources (08_kestrel_board_memo_supply-000)]”, followed by a status line <code>[method=basic llm_calls=1 sources=08_kestrel_board_memo_supply, 10_brightwater_series_b, 03_deepcast_supply_agreement]</code>.</p>
-    <p>If your counts differ slightly, check <code>git status</code> in <code>code/</code>: the reference code evolves, and any local edits to extraction or resolution change entity counts. The first line depends only on chunking and should always read 24 text units with default settings. Common setup problems: Python older than 3.10 (the code uses <code>str | None</code> annotations), or <code>pip</code> pointing to a different interpreter (use <code>python -m pip</code>).</p>
+    <p>查询会输出一个抽取式答案，第一句是 “Deepcast has supplied every sonar module in our fleet since 2022. [Data: Sources (08_kestrel_board_memo_supply-000)]”（自 2022 年以来，我们机队的每个声呐模块都由 Deepcast 供货），随后是一行状态信息 <code>[method=basic llm_calls=1 sources=08_kestrel_board_memo_supply, 10_brightwater_series_b, 03_deepcast_supply_agreement]</code>。</p>
+    <p>如果你得到的数字略有出入，请在 <code>code/</code> 中执行 <code>git status</code> 检查：参考代码在持续演进，而且你对抽取或消解代码的任何本地修改都会改变实体数量。第一行只取决于分块，在默认设置下应当始终是 24 个文本单元。常见的环境问题有两个：Python 版本低于 3.10（代码中用到了 <code>str | None</code> 类型注解），或者 <code>pip</code> 指向了另一个解释器（改用 <code>python -m pip</code>）。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="warmup">
-  <h4>Exercise 0.2 <span class="level">Warm-up</span></h4>
-  <p>Without looking at the visualization, read documents 02, 04 and 06 and sketch by hand the smallest graph that answers canonical question 2: “Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?” List nodes with types, edges with labels and the document each edge comes from, then write the path.</p>
+  <h4>练习 0.2 <span class="level">热身</span></h4>
+  <p>不要看交互图，先读 02、04、06 三篇文档，然后手绘能回答典型问题 2 的最小图：“旗下无人机发现了 Halden Reef 白化事件的那家公司，由哪家投资机构的董事会成员监督？”列出节点及其类型、边及其标签，以及每条边出自哪篇文档，最后写出推理路径。</p>
   <details class="answer">
-    <summary>Show answer</summary>
+    <summary>查看解答</summary>
     <table>
-      <thead><tr><th>Edge</th><th>Source document</th><th>Supporting text</th></tr></thead>
+      <thead><tr><th>边</th><th>来源文档</th><th>支撑原文</th></tr></thead>
       <tbody>
-        <tr><td>Project Sentinel (PROJECT) —detected→ 2024 Halden Reef bleaching event (EVENT)</td><td>06 research note</td><td>“autonomous drones operating under the Sentinel program recorded the onset of a mass coral bleaching event at Halden Reef”</td></tr>
-        <tr><td>2024 Halden Reef bleaching event —occurred at→ Halden Reef (LOCATION)</td><td>06</td><td>same sentence</td></tr>
-        <tr><td>Kestrel Labs (ORGANIZATION) —runs→ Project Sentinel</td><td>04 Sentinel launch</td><td>“Kestrel Labs runs Project Sentinel”</td></tr>
-        <tr><td>Lena Park (PERSON) —board member of→ Kestrel Labs</td><td>02 Series A</td><td>“Lena Park, a partner at Brightwater Capital, will join the Kestrel Labs board of directors”</td></tr>
-        <tr><td>Lena Park —partner at→ Brightwater Capital (ORGANIZATION)</td><td>02</td><td>same sentence</td></tr>
+        <tr><td>Project Sentinel (PROJECT) —发现→ 2024 Halden Reef bleaching event (EVENT)</td><td>06 研究简报</td><td>“autonomous drones operating under the Sentinel program recorded the onset of a mass coral bleaching event at Halden Reef”</td></tr>
+        <tr><td>2024 Halden Reef bleaching event —发生于→ Halden Reef (LOCATION)</td><td>06</td><td>同一句</td></tr>
+        <tr><td>Kestrel Labs (ORGANIZATION) —运营→ Project Sentinel</td><td>04 Sentinel 启动</td><td>“Kestrel Labs runs Project Sentinel”</td></tr>
+        <tr><td>Lena Park (PERSON) —董事会成员→ Kestrel Labs</td><td>02 A 轮</td><td>“Lena Park, a partner at Brightwater Capital, will join the Kestrel Labs board of directors”</td></tr>
+        <tr><td>Lena Park —合伙人→ Brightwater Capital (ORGANIZATION)</td><td>02</td><td>同一句</td></tr>
       </tbody>
     </table>
-    <p>Path: 2024 bleaching event ← detected ← Project Sentinel ← runs ← Kestrel Labs ← board member of ← Lena Park → partner at → Brightwater Capital. Answer: Brightwater Capital, through Lena Park.</p>
-    <p>Two things to notice. First, you had to decide that “the Sentinel program” in document 06 is the same entity as “Project Sentinel” in document 04; that is entity resolution, Chapter 9. Second, Halden Reef is not needed for the answer but is a natural node to extract; real graphs always contain more than any one question needs.</p>
+    <p>路径：2024 年白化事件 ← 发现 ← Project Sentinel ← 运营 ← Kestrel Labs ← 董事会成员 ← Lena Park → 合伙人 → Brightwater Capital。答案：Brightwater Capital，经由 Lena Park。</p>
+    <p>有两点值得注意。第一，你必须判断文档 06 中的 “the Sentinel program” 与文档 04 中的 “Project Sentinel” 是同一个实体，这就是实体消解，见第 9 章。第二，回答这个问题并不需要 Halden Reef，但它是一个很自然会被抽取出来的节点；真实的图总是包含比任何单个问题所需更多的内容。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="core">
-  <h4>Exercise 0.3 <span class="level">Core</span></h4>
-  <p>Classify each question as <em>local</em> (answerable from a few connected facts), <em>global</em> (needs a summary across much of the corpus) or <em>temporal</em> (the answer depends on time), and say whether it is also multi-hop. Then check your labels against the <code>type</code> field in <code>data/questions.jsonl</code> and explain any disagreement.</p>
+  <h4>练习 0.3 <span class="level">核心</span></h4>
+  <p>把下面每个问题归为<em>局部</em>（凭几条相互关联的事实即可回答）、<em>全局</em>（需要对语料的大部分内容做归纳）或<em>时间</em>（答案取决于时间）类，并判断它是否同时是多跳问题。然后对照 <code>data/questions.jsonl</code> 中的 <code>type</code> 字段检查你的分类，并解释有分歧的地方。</p>
   <ol>
-    <li>How much did Kestrel Labs raise in its Series A and who led it?</li>
-    <li>Who was the CTO of Kestrel Labs when the Halden Reef bleaching event was detected?</li>
-    <li>How has Kestrel Labs' leadership evolved since its founding?</li>
-    <li>Where did the CEO of Kestrel Labs work before founding the company, and how is that organization involved with Project Sentinel?</li>
-    <li>What role does regulation play in Kestrel Labs' business?</li>
-    <li>When did Marlow Dynamics acquire Deepcast?</li>
+    <li>Kestrel Labs 的 A 轮融资了多少钱？由谁领投？</li>
+    <li>发现 Halden Reef 白化事件时，Kestrel Labs 的 CTO 是谁？</li>
+    <li>Kestrel Labs 自创立以来，领导层经历了怎样的变化？</li>
+    <li>Kestrel Labs 的 CEO 创业之前在哪里工作？那家机构与 Project Sentinel 有什么关系？</li>
+    <li>监管在 Kestrel Labs 的业务中扮演什么角色？</li>
+    <li>Marlow Dynamics 是什么时候收购 Deepcast 的？</li>
   </ol>
   <details class="answer">
-    <summary>Show answer</summary>
+    <summary>查看解答</summary>
     <pre><code class="language-python">import json
 for q in map(json.loads, open("data/questions.jsonl")):
     print(q["id"], q["type"], q["question"])</code></pre>
     <table>
-      <thead><tr><th>#</th><th>Your label</th><th>Multi-hop?</th><th>Dataset type (id)</th><th>Comment</th></tr></thead>
+      <thead><tr><th>#</th><th>你的分类</th><th>是否多跳</th><th>数据集类型（id）</th><th>说明</th></tr></thead>
       <tbody>
-        <tr><td>1</td><td>Local</td><td>No</td><td>single-hop (q09)</td><td>One press release states both facts.</td></tr>
-        <tr><td>2</td><td>Temporal</td><td>Yes</td><td>temporal (q15)</td><td>Find the detection date (Aug 2024), then the CTO valid at that date (Jonas Vehl). Both labels are defensible; the dataset files it under its harder aspect.</td></tr>
-        <tr><td>3</td><td>Global (and temporal)</td><td>Yes</td><td>global (q21)</td><td>A narrative across four documents and five years. “Evolved” signals change over time, but the task is summarization.</td></tr>
-        <tr><td>4</td><td>Local</td><td>Yes, two hops</td><td>multi-hop (q16)</td><td>Okafor → formerly at → Tidewater Institute → partners on → Project Sentinel.</td></tr>
-        <tr><td>5</td><td>Global</td><td>Partly</td><td>global (q22)</td><td>Evidence spans the Series B release, council minutes and interview. Could be answered locally from the Ocean Health Act's neighborhood, which is why local search does reasonably on some “global” questions.</td></tr>
-        <tr><td>6</td><td>Local</td><td>No</td><td>temporal (q13)</td><td>The dataset calls it temporal because the answer is a date. Retrieval-wise it is a simple lookup. Question type labels describe the answer, not necessarily the retrieval difficulty.</td></tr>
+        <tr><td>1</td><td>局部</td><td>否</td><td>single-hop（q09）</td><td>一篇新闻稿就同时给出了这两个事实。</td></tr>
+        <tr><td>2</td><td>时间</td><td>是</td><td>temporal（q15）</td><td>先找到发现日期（2024 年 8 月），再找出在该日期任职的 CTO（Jonas Vehl）。两种分类都说得通；数据集按其中更难的那个方面归类。</td></tr>
+        <tr><td>3</td><td>全局（兼具时间）</td><td>是</td><td>global（q21）</td><td>这是一段横跨四篇文档、五年时间的叙述。“变化”暗示随时间演变，但任务本质是归纳总结。</td></tr>
+        <tr><td>4</td><td>局部</td><td>是，两跳</td><td>multi-hop（q16）</td><td>Okafor → 曾任职于 → Tidewater Institute → 合作 → Project Sentinel。</td></tr>
+        <tr><td>5</td><td>全局</td><td>部分是</td><td>global（q22）</td><td>证据分布在 B 轮新闻稿、市议会会议纪要和访谈中。它也可以从 Ocean Health Act 的邻域局部地回答，这正是局部搜索在某些“全局”问题上也能表现尚可的原因。</td></tr>
+        <tr><td>6</td><td>局部</td><td>否</td><td>temporal（q13）</td><td>数据集把它归为时间类，是因为答案是一个日期。从检索角度看，这只是一次简单查找。问题类型标签描述的是答案，未必反映检索难度。</td></tr>
       </tbody>
     </table>
-    <p>The disagreements are the lesson: real questions mix types, and a system that routes each question to exactly one retrieval method will sometimes route wrongly. Chapter 21 discusses routers and hybrids for this reason.</p>
+    <p>这些分歧本身就是要学的东西：真实问题往往混合多种类型，一个把每个问题只路由到一种检索方法的系统，难免会有路由错的时候。正因如此，第 21 章会讨论路由器和混合方案。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="core">
-  <h4>Exercise 0.4 <span class="level">Core</span></h4>
-  <p>Open the index you built. Using <code>load_index</code>, print each community's members, find the relationship between MARLOW DYNAMICS and DEEPCAST with its description and weight, and list the neighbors of PROJECT TERN. Compare the communities with the “expected communities” in the running example. Where do they differ, and why might a mock extractor produce that?</p>
+  <h4>练习 0.4 <span class="level">核心</span></h4>
+  <p>打开你构建的索引。用 <code>load_index</code> 打印每个社区的成员，找出 MARLOW DYNAMICS 与 DEEPCAST 之间的关系及其描述和权重，并列出 PROJECT TERN 的邻居。把得到的社区与贯穿示例中的“预期社区”比较：哪里不同？模拟抽取器为什么会产生这样的结果？</p>
   <details class="answer">
-    <summary>Show answer</summary>
+    <summary>查看解答</summary>
     <pre><code class="language-python">from minigraphrag import load_index
 
 index = load_index(".index")
@@ -494,24 +494,24 @@ for c in index.communities:
 edge = G.edges["MARLOW DYNAMICS", "DEEPCAST"]
 print(edge.get("weight"), edge.get("description", "")[:200])
 print(sorted(G.neighbors("PROJECT TERN")))</code></pre>
-    <p>With the mock and default settings, the four level-0 communities are:</p>
+    <p>使用模拟 LLM 和默认设置时，第 0 层的四个社区是：</p>
     <ul>
-      <li>2024 bleaching event, Ana Ruiz, Halden Reef, Port Avalon, Project Sentinel, Project Tern, Tidewater Institute</li>
-      <li>Mira Okafor, Jonas Vehl, Kestrel Labs, Port Avalon City Council, Priya Nair</li>
-      <li>Brightwater Capital, Lena Park, Ocean Health Act</li>
-      <li>Deepcast, Marlow Dynamics</li>
+      <li>2024 年白化事件、Ana Ruiz、Halden Reef、Port Avalon、Project Sentinel、Project Tern、Tidewater Institute</li>
+      <li>Mira Okafor、Jonas Vehl、Kestrel Labs、Port Avalon City Council、Priya Nair</li>
+      <li>Brightwater Capital、Lena Park、Ocean Health Act</li>
+      <li>Deepcast、Marlow Dynamics</li>
     </ul>
-    <p>The running example expects five: a Kestrel core that includes Project Tern; reef science around Sentinel; Marlow and Deepcast; Brightwater and Lena Park; and regulation (Ocean Health Act, City Council, Port Avalon). Differences: Project Tern lands with the reef-science group, because the mock links entities that co-occur in a sentence and Tern is mentioned alongside Sentinel and Halden Reef in the engineering blog; the regulation community dissolves, with the Ocean Health Act joining Brightwater (the Series B release discusses both) and the City Council joining the Kestrel core. Marlow–Deepcast comes out as expected because those two co-occur heavily in one article.</p>
-    <p>Community detection reflects the graph it is given, and a co-occurrence extractor produces co-occurrence graphs. A real LLM extractor writes more specific relationships and usually gets closer to the expected grouping. You will measure that difference yourself in Chapters 8 and 11. Exact community membership can also change if the reference code's extraction or clustering is updated, so rely on your own output.</p>
+    <p>贯穿示例预期的是五个社区：包含 Project Tern 的 Kestrel 核心团队；围绕 Sentinel 的珊瑚礁科研；Marlow 与 Deepcast；Brightwater 与 Lena Park；以及监管（Ocean Health Act、City Council、Port Avalon）。差异在于：Project Tern 落入了珊瑚礁科研组，因为模拟 LLM 会把同一句中共现的实体连起来，而工程博客里提到 Tern 时恰好同时提到了 Sentinel 和 Halden Reef；监管社区则解体了，Ocean Health Act 并入 Brightwater 一组（B 轮新闻稿同时讨论了两者），City Council 则并入 Kestrel 核心团队。Marlow–Deepcast 符合预期，因为这两者在同一篇文章中大量共现。</p>
+    <p>社区发现只能反映它拿到的图，而基于共现的抽取器产出的就是共现图。真实的 LLM 抽取器会写出更具体的关系，通常更接近预期的分组。你会在第 8 章和第 11 章亲自测量这一差异。如果参考代码的抽取或聚类逻辑有所更新，具体的社区成员也可能变化，所以请以你自己的输出为准。</p>
   </details>
 </section>
 
 <section class="exercise" data-level="stretch">
-  <h4>Exercise 0.5 <span class="level">Stretch</span></h4>
-  <p>Build a second index with a real LLM (OpenAI, Anthropic or a local Ollama model) using a cache directory. Compare the two indexes: number of entities and relationships, the entity names that appear in only one of them, and the <code>local</code> answer to “Why did Kestrel Labs start Project Tern?”. Estimate how many LLM calls indexing made.</p>
+  <h4>练习 0.5 <span class="level">进阶</span></h4>
+  <p>使用真实的 LLM（OpenAI、Anthropic 或本地 Ollama 模型）并指定缓存目录，构建第二个索引。比较两个索引：实体数和关系数、只在其中一个索引里出现的实体名，以及 <code>local</code> 方法对 “Why did Kestrel Labs start Project Tern?” 的回答。再估算一下建索引过程调用了多少次 LLM。</p>
   <details class="answer">
-    <summary>Show answer</summary>
-    <pre><code class="language-bash">pip install -e ".[openai]"          # or [anthropic]; Ollama also uses the openai extra
+    <summary>查看解答</summary>
+    <pre><code class="language-bash">pip install -e ".[openai]"          # 或 [anthropic]；Ollama 同样使用 openai 扩展
 export OPENAI_API_KEY=...
 python -m minigraphrag index --llm openai --cache-dir .cache/llm --output .index-real
 python -m minigraphrag query --llm openai --index .index-real --method local "Why did Kestrel Labs start Project Tern?"</code></pre>
@@ -524,133 +524,133 @@ only_mock = set(mock.graph) - set(real.graph)
 only_real = set(real.graph) - set(mock.graph)
 print("only in mock:", sorted(only_mock))
 print("only in real:", sorted(only_real))</code></pre>
-    <p>Counting calls: the pipeline calls the LLM once per text unit for extraction, plus one “continue extracting” call per unit and gleaning round (with <code>max_gleanings=1</code> there is no follow-up “anything left?” check, since nothing would be done with the answer), once per unit for claims, once per merged description that needs summarizing, and once per community report. With 24 units that is at least 24 × 3 = 72 calls before summaries and reports. The offline mock run made 122 calls in total. The files in <code>.cache/llm</code> give you the exact number of distinct calls for the real run: one file per call.</p>
-    <p>What to expect: a real model typically extracts more entities than the mock's gazetteer allows, including things such as the Series A and Series B rounds, the Sentinel sonar array, or the harbour survey firms quoted in articles, and it writes relationship descriptions in its own words rather than copying sentences. Some names will differ in form (“MIRA OKAFOR” vs. “DR. MIRA OKAFOR”), which is why resolution matters. The <code>local</code> answer from a real model should mention the Marlow acquisition if local search pulled in Deepcast's relationships. Rerunning the same command is nearly free thanks to the cache, which is worth verifying: the second run should be fast and make no API calls.</p>
+    <p>统计调用次数：抽取时每个文本单元调用一次 LLM；每个文本单元在每轮补漏抽取中再调用一次“继续抽取”（<code>max_gleanings=1</code> 时不会再追问“还有遗漏吗？”，因为追问的结果也不会被使用）；每个文本单元为声明（claim）调用一次；每条需要汇总的合并描述调用一次；每份社区报告调用一次。24 个文本单元意味着，在描述摘要和社区报告之前就至少有 24 × 3 = 72 次调用。离线的模拟运行总共调用了 122 次。对于真实模型的运行，<code>.cache/llm</code> 中的文件数就是不同调用的确切次数：每次调用对应一个文件。</p>
+    <p>预期结果：真实模型抽取的实体通常比模拟 LLM 的实体词表所允许的更多，比如 A 轮和 B 轮融资、Sentinel 声呐阵列，或文章中引述的港口勘测公司；它还会用自己的话描述关系，而不是照抄原句。有些名称的形式会不同（“MIRA OKAFOR”与 “DR. MIRA OKAFOR”），这正是实体消解重要的原因。如果局部搜索把 Deepcast 的关系拉进了上下文，真实模型给出的 <code>local</code> 答案应当会提到 Marlow 的收购。借助缓存，重新运行同一条命令几乎不花钱，这一点值得验证：第二次运行应当很快，而且不产生任何 API 调用。</p>
   </details>
 </section>
 
-<h2>Check your understanding</h2>
+<h2>检验理解</h2>
 <p class="quiz-score"></p>
 
 <div class="quiz">
-  <p class="q">What distinguishes GraphRAG from classic vector RAG?</p>
+  <p class="q">GraphRAG 与经典向量 RAG 的区别是什么？</p>
   <ol>
-    <li>GraphRAG does not use an LLM at query time</li>
-    <li data-correct>GraphRAG builds an index of entities, relationships and often community summaries, and retrieval uses that structure</li>
-    <li>GraphRAG only works with graph databases such as Neo4j</li>
-    <li>GraphRAG replaces embeddings entirely</li>
+    <li>GraphRAG 在查询时不使用 LLM</li>
+    <li data-correct>GraphRAG 会为实体、关系（通常还有社区摘要）建立索引，检索时利用这种结构</li>
+    <li>GraphRAG 只能搭配 Neo4j 这类图数据库使用</li>
+    <li>GraphRAG 完全取代了嵌入</li>
   </ol>
-  <div class="explain">The loop is still retrieve-then-generate. What changes is what is indexed and how retrieval navigates it. Most GraphRAG systems still use embeddings, for example to find seed entities.</div>
+  <div class="explain">循环依然是“先检索、后生成”。变化在于索引了什么，以及检索如何在其中导航。大多数 GraphRAG 系统仍然使用嵌入，例如用来查找种子实体。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">In the survey taxonomy, where does Personalized PageRank retrieval over an entity graph (HippoRAG) belong?</p>
+  <p class="q">在综述的分类框架中，基于实体图的个性化 PageRank 检索（HippoRAG）属于哪个阶段？</p>
   <ol>
-    <li>Knowledge organization</li>
-    <li>Knowledge integration</li>
-    <li data-correct>Knowledge retrieval</li>
-    <li>Evaluation</li>
+    <li>知识组织</li>
+    <li>知识融合</li>
+    <li data-correct>知识检索</li>
+    <li>评估</li>
   </ol>
-  <div class="explain">PPR is a way of finding evidence in a graph that already exists. How the graph was built is organization; how the evidence reaches the model's answer is integration.</div>
+  <div class="explain">PPR 是在已有的图中寻找证据的一种方法。图如何构建属于组织；证据如何进入模型的回答属于融合。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">Why is the Kestrel Labs corpus fictional?</p>
+  <p class="q">为什么 Kestrel Labs 语料是虚构的？</p>
   <ol>
-    <li>Real documents would be too long to index</li>
-    <li>Licensing prevents using real news articles</li>
-    <li>Graph algorithms only work on synthetic data</li>
-    <li data-correct>No model has parametric knowledge of it, so correct answers must come from retrieval</li>
+    <li>真实文档太长，无法建索引</li>
+    <li>许可限制不允许使用真实的新闻报道</li>
+    <li>图算法只适用于合成数据</li>
+    <li data-correct>没有任何模型具备关于它的参数化知识，所以正确答案只能来自检索</li>
   </ol>
-  <div class="explain">With a real company, a model might answer from memory and hide retrieval failures. The fictional world makes every success and failure attributable.</div>
+  <div class="explain">如果用真实公司，模型可能凭记忆作答，从而掩盖检索的失败。虚构世界让每一次成功和失败都能归因。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">Canonical question 6, “Who is the CTO of Kestrel Labs?”, is filed as temporal. What makes it hard even with a perfect graph?</p>
+  <p class="q">典型问题 6“Kestrel Labs 的 CTO 是谁？”被归为时间类。即使图是完美的，它难在哪里？</p>
   <ol>
-    <li>The CTO is never named in the corpus</li>
-    <li data-correct>Two people held the role at different times, so the graph needs validity periods to return the current one</li>
-    <li>CTO is an alias that cannot be resolved</li>
-    <li>It requires a global summary of the corpus</li>
+    <li>语料中从未提到 CTO 的名字</li>
+    <li data-correct>先后有两个人担任过这一职位，图需要记录有效期才能返回现任者</li>
+    <li>CTO 是一个无法消解的别名</li>
+    <li>它需要对整个语料做全局归纳</li>
   </ol>
-  <div class="explain">Jonas Vehl was CTO until March 2026 and Priya Nair since then. Without time on edges, both are “the CTO”.</div>
+  <div class="explain">Jonas Vehl 担任 CTO 至 2026 年 3 月，此后由 Priya Nair 担任。边上如果没有时间信息，两个人都会是“CTO”。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">You run <code>python -m minigraphrag index</code> with no <code>--llm</code> flag and no API keys. What happens?</p>
+  <p class="q">你在没有 <code>--llm</code> 参数、也没有任何 API key 的情况下运行 <code>python -m minigraphrag index</code>，会发生什么？</p>
   <ol>
-    <li>It fails asking for <code>OPENAI_API_KEY</code></li>
-    <li>It downloads a small local model</li>
-    <li data-correct>It runs offline with <code>MockLLM</code> and <code>HashingEmbedder</code>, producing a deterministic index in about a second</li>
-    <li>It skips extraction and builds only a vector index</li>
+    <li>报错并要求提供 <code>OPENAI_API_KEY</code></li>
+    <li>下载一个小型本地模型</li>
+    <li data-correct>使用 <code>MockLLM</code> 和 <code>HashingEmbedder</code> 离线运行，大约一秒生成一个确定性的索引</li>
+    <li>跳过抽取，只构建向量索引</li>
   </ol>
-  <div class="explain">The mock is the default so the whole course runs offline and in CI. Use <code>--llm openai|anthropic|ollama</code> for real answers.</div>
+  <div class="explain">模拟 LLM 是默认选项，这样整门课程都能离线运行，也能在 CI 中运行。要获得真实的回答，请使用 <code>--llm openai|anthropic|ollama</code>。</div>
 </div>
 
 <div class="quiz">
-  <p class="q">What does <code>--cache-dir .cache/llm</code> do?</p>
+  <p class="q"><code>--cache-dir .cache/llm</code> 的作用是什么？</p>
   <ol>
-    <li>Stores the index artifacts</li>
-    <li>Caches embeddings for faster search</li>
-    <li>Saves query answers for the evaluation harness</li>
-    <li data-correct>Wraps the LLM in <code>CachedLLM</code>, so identical calls (same model, system, prompt, JSON flag) are read from disk instead of paid for again</li>
+    <li>存放索引产物</li>
+    <li>缓存嵌入以加快搜索</li>
+    <li>为评估框架保存查询答案</li>
+    <li data-correct>用 <code>CachedLLM</code> 包装 LLM，完全相同的调用（模型、系统提示词、提示词、JSON 标志都相同）直接从磁盘读取，不必再次付费</li>
   </ol>
-  <div class="explain">Indexing makes many calls. Deterministic prompts plus a hash-keyed cache make reruns after code changes cheap.</div>
+  <div class="explain">建索引会产生大量调用。确定性的提示词加上以哈希为键的缓存，让改代码后的重跑成本很低。</div>
 </div>
 
-<h2>Questions learners often ask</h2>
+<h2>常见问题</h2>
 
 <details class="qa">
-  <summary>Do I need to know graph theory or machine learning before starting?</summary>
-  <div><p>No. You need to be comfortable with Python and with reading short formulas. <a href="04-graph-fundamentals.html">Chapter 4</a> teaches the graph ideas you need (adjacency, traversal, shortest paths, PageRank, modularity) from scratch, and <a href="02-vector-rag.html">Chapter 2</a> covers embeddings. Chapter 24, on training models with graphs, is the only one that assumes some familiarity with model training, and it is optional on every path except the full one.</p></div>
+  <summary>开始学习之前，需要懂图论或机器学习吗？</summary>
+  <div><p>不需要。你只需熟悉 Python，能看懂简短的公式。<a href="04-graph-fundamentals.html">第 4 章</a>会从零讲解你需要的图论知识（邻接、遍历、最短路径、PageRank、模块度），<a href="02-vector-rag.html">第 2 章</a>讲解嵌入。只有讲结合图训练模型的第 24 章默认你对模型训练有一定了解，而且除完整路径外，它在其他路径上都是选修。</p></div>
 </details>
 
 <details class="qa">
-  <summary>Why build from scratch instead of using Microsoft GraphRAG, LightRAG or LlamaIndex?</summary>
-  <div><p>Because configuration without understanding fails in production: you cannot tune extraction prompts, pick a community level, or explain a bad answer if the pipeline is a black box. The frameworks are good, and <a href="28-frameworks-in-practice.html">Chapter 28</a> teaches them. After building <code>minigraphrag</code>, you will read their configuration files and source code as variations on things you have already written.</p></div>
+  <summary>为什么要从零构建，而不直接用 Microsoft GraphRAG、LightRAG 或 LlamaIndex？</summary>
+  <div><p>因为只会配置、不懂原理，到了生产环境就会出问题：如果整条流程是个黑盒，你就没法调优抽取提示词、选择社区层级，也没法解释一个糟糕的答案从何而来。这些框架都很好，<a href="28-frameworks-in-practice.html">第 28 章</a>会专门讲。亲手构建过 <code>minigraphrag</code> 之后，你再读它们的配置文件和源代码，看到的将是你已经写过的东西的各种变体。</p></div>
 </details>
 
 <details class="qa">
-  <summary>How much will a real LLM cost for the exercises?</summary>
-  <div><p>For the Kestrel corpus, very little: indexing makes about 120 LLM calls over roughly 5,400 words of source text (122 with the mock and default settings), and a query makes between one and a few dozen calls depending on the method. With a small hosted model this is typically cents to low dollars across the whole course, and <code>--cache-dir</code> means you pay for each distinct call once. A local model through Ollama costs nothing but time. Chapter 26 does the cost math for large corpora, where it matters.</p></div>
+  <summary>用真实 LLM 做练习要花多少钱？</summary>
+  <div><p>对 Kestrel 语料来说非常少：建索引要对大约 5,400 个英文单词的原文进行约 120 次 LLM 调用（使用模拟 LLM 和默认设置时为 122 次），一次查询则视方法不同需要一次到几十次调用。用小型托管模型的话，整门课程下来通常只需几美分到几美元，而且有了 <code>--cache-dir</code>，每个不同的调用只付一次钱。通过 Ollama 使用本地模型不花钱，只花时间。第 26 章会针对成本真正要紧的大规模语料算这笔账。</p></div>
 </details>
 
 <details class="qa">
-  <summary>The mock's answers look like copied sentences. Is something broken?</summary>
-  <div><p>No. The mock answers extractively on purpose: it returns the context sentences that best match the question, each with a <code>[Data: ...]</code> citation. That makes it a window into what the retriever found. If the right sentences appear, retrieval worked; turning them into a well-written answer is the real model's job.</p></div>
+  <summary>模拟 LLM 的答案看起来像是照抄的句子，是哪里出问题了吗？</summary>
+  <div><p>没有。模拟 LLM 是刻意采用抽取式回答的：它返回上下文中与问题最匹配的句子，每句都带 <code>[Data: ...]</code> 引用。这让它成了一扇窗口，透过它可以看到检索器找到了什么。只要正确的句子出现了，就说明检索成功；把它们写成一个通顺的答案，是真实模型的工作。</p></div>
 </details>
 
 <details class="qa">
-  <summary>Can I use my own documents instead of Kestrel?</summary>
-  <div><p>Yes: <code>--input</code> takes any folder of <code>.md</code> files. Do the chapters on Kestrel first, because the exercises and answers refer to it, then rerun your favorite exercises on your own data. You will need a real LLM for that, since the mock's gazetteer only knows Kestrel names.</p></div>
+  <summary>可以用我自己的文档代替 Kestrel 吗？</summary>
+  <div><p>可以：<code>--input</code> 接受任何包含 <code>.md</code> 文件的文件夹。不过请先用 Kestrel 学完各章，因为练习和解答都以它为准，之后再在你自己的数据上重跑感兴趣的练习。那时你需要真实的 LLM，因为模拟 LLM 的实体词表只认识 Kestrel 中的名字。</p></div>
 </details>
 
 <section class="project">
-  <h3>Project: your workbench and learning journal</h3>
-  <p>Set up the environment you will use for the rest of the course and start a record of the questions you want it to answer.</p>
+  <h3>项目：你的工作台与学习日志</h3>
+  <p>搭建你在后续课程中要用的环境，并开始记录你希望这套系统能回答的问题。</p>
   <ul class="checklist deliverables">
-    <li><input type="checkbox" aria-label="Done"> <span>A working <code>code/.venv</code> with <code>pytest -q</code> passing and a mock index in <code>.index/</code></span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>A real-LLM configuration that works (hosted or Ollama), tested with one <code>query --llm ...</code> command and a cache directory</span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>A <code>journal.md</code> with the seven canonical questions and at least five questions of your own about Kestrel, each labeled local, global or temporal and multi-hop or not</span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>For each journal question, your prediction of whether plain vector RAG will answer it, to check after Chapter 3</span></li>
-    <li><input type="checkbox" aria-label="Done"> <span>If you have a real use case, five questions from it with the same labels, and one sentence on why the answers matter</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>一个可用的 <code>code/.venv</code>，<code>pytest -q</code> 全部通过，并在 <code>.index/</code> 中有一个用模拟 LLM 构建的索引</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>一套可用的真实 LLM 配置（托管服务或 Ollama），已用一条 <code>query --llm ...</code> 命令配合缓存目录测试通过</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>一份 <code>journal.md</code>，记录七个典型问题，以及至少五个你自己想到的关于 Kestrel 的问题，每个都标注为局部、全局或时间类，并注明是否多跳</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>针对日志中的每个问题，预测纯向量 RAG 能否回答，留待学完第 3 章后核对</span></li>
+    <li><input type="checkbox" aria-label="已完成"> <span>如果你有真实的应用场景，从中选五个问题并做同样的标注，再用一句话说明这些答案为什么重要</span></li>
   </ul>
-  <p><strong>Done when</strong> you can build and query an index with both the mock and a real LLM, and your journal has at least twelve labeled questions with predictions.</p>
+  <p><strong>完成标准：</strong>你能分别用模拟 LLM 和真实 LLM 构建并查询索引，并且日志中至少有十二个带标注和预测的问题。</p>
 </section>
 
 <div class="keypoints">
-  <h2>Key takeaways</h2>
+  <h2>本章要点</h2>
   <ul>
-    <li>GraphRAG keeps retrieve-then-generate and adds a graph of entities, relationships and community summaries between documents and the model.</li>
-    <li>The field grew from RAG (2020) through Microsoft's GraphRAG, HippoRAG and LightRAG (2024) to agentic and temporal graph retrieval (2025–2026).</li>
-    <li>Place every method on the map: knowledge organization, knowledge retrieval, knowledge integration.</li>
-    <li>Kestrel Labs is fictional so that every correct answer is earned by retrieval; its seven canonical questions cover multi-hop, global and temporal needs.</li>
-    <li><code>minigraphrag</code> runs offline with a mock LLM and switches to OpenAI, Anthropic or Ollama with one flag.</li>
-    <li>Choose a learning path, but do not skip Chapter 3.</li>
+    <li>GraphRAG 保留了“先检索、后生成”的循环，并在文档和模型之间加入一张由实体、关系和社区摘要构成的图。</li>
+    <li>这个领域从 RAG（2020）起步，经过 Microsoft 的 GraphRAG、HippoRAG 和 LightRAG（2024），发展到智能体式和时序图检索（2025–2026）。</li>
+    <li>把每种方法放到这张地图上：知识组织、知识检索、知识融合。</li>
+    <li>Kestrel Labs 是虚构的，因此每个正确答案都要靠检索挣来；它的七个典型问题覆盖了多跳、全局和时间三类需求。</li>
+    <li><code>minigraphrag</code> 可以用模拟 LLM 离线运行，只需一个参数即可切换到 OpenAI、Anthropic 或 Ollama。</li>
+    <li>选一条学习路径，但不要跳过第 3 章。</li>
   </ul>
 </div>
 
-<h2>References</h2>
+<h2>参考文献</h2>
 <ul class="refs">
   <li>Lewis et al. <a href="https://arxiv.org/abs/2005.11401">Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</a>. <span class="venue">NeurIPS 2020; arXiv 2005.11401</span></li>
   <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
@@ -674,8 +674,8 @@ print("only in real:", sorted(only_real))</code></pre>
 
 </main>
 <script src="../../assets/js/curriculum.js?v=9c5827a0"></script>
-<script src="../../assets/js/curriculum.zh.js?v=96084897"></script>
+<script src="../../assets/js/curriculum.zh.js?v=b04137e8"></script>
 <script src="../../assets/js/site.js?v=fe74656c"></script>
-<script src="../../assets/js/viz.js?v=8af8cc70"></script>
+<script src="../../assets/js/viz.js?v=e8a5746b"></script>
 </body>
 </html>

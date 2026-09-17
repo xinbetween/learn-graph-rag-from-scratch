@@ -12,6 +12,7 @@ Read the diagram → step through the figure → run the code → take the quiz.
 [![Dependencies: networkx, numpy](https://img.shields.io/badge/dependencies-networkx%20·%20numpy-16a34a.svg?style=flat-square)](code/)
 [![API key required: none](https://img.shields.io/badge/API_key_required-none-16a34a.svg?style=flat-square)](code/)
 [![Site build: none](https://img.shields.io/badge/site_build_step-none-16a34a.svg?style=flat-square)](site/)
+[![Languages: EN · 中文](https://img.shields.io/badge/languages-EN%20·%20中文-f59e0b.svg?style=flat-square)](#-translating)
 
 [**Read it →**](https://graphrag.xinbetween.com/) &nbsp;·&nbsp;
 [**Star on GitHub**](https://github.com/xinbetween/learn-graph-rag-from-scratch) &nbsp;·&nbsp;
@@ -79,6 +80,7 @@ learning background: Chapter 04 teaches the graph algorithms the course uses.
 | 🧪 **168 exercises with worked answers** | Warm-up, core and stretch. Answers with code run against the reference implementation. |
 | 🟦 **Code that runs** | `minigraphrag` implements every stage the chapters teach. Its test suite runs in CI on every push, offline. |
 | 🔎 **Claims checked against sources** | Numbers attributed to papers were checked against their arXiv abstracts or project docs; numbers attributed to the code were reproduced by running it. |
+| 🌏 **English and 中文** | Navigation, search, quizzes, figure controls, the home page and glossary in Chinese, with chapters translated progressively; untranslated chapters fall back to English with an honest banner. |
 | 🗺 **One running example** | Every chapter uses the same fictional corpus about Kestrel Labs, so you watch one graph grow from raw text to answers. |
 
 ---
@@ -216,6 +218,9 @@ site/                        the published website; no build step
   assets/js/site.js          top bar, search, chapter rail, quizzes, progress, code blocks
   assets/js/viz.js           the interactive figure library
   assets/css/site.css        design tokens and components
+  assets/js/curriculum.zh.js Chinese part and chapter text
+  zh/index.html              the home page in Chinese
+  zh/chapters/*.html         Chinese chapters: translated, or generated English fallbacks
   CNAME                      graphrag.xinbetween.com
 code/                        minigraphrag, the reference implementation
   minigraphrag/              chunking, extraction, resolution, communities, reports, indexer
@@ -227,9 +232,11 @@ docs/
   running-example.md         the Kestrel Labs world: entities, relationships, canonical questions
   AUTHORING.md               chapter markup, figure configs, style and accuracy rules
   REVIEW.md                  the editorial and technical review brief
+  TRANSLATING.md             Chinese translation workflow, terminology and style
 tools/
   serve.py                   no-cache local preview server
   check_site.py              structure, figure JSON, quiz and link checks
+  build_zh.py                regenerates the Chinese mirror and hreflang alternates
   stamp_assets.py            adds ?v=<content hash> to CSS/JS links
   render_check.py            renders every page in Chromium and clicks through every figure
 ```
@@ -245,8 +252,43 @@ base path or site URL to configure. The domain lives in `site/CNAME` so it survi
 every deploy. [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs the tests,
 site checks, stamp check and render check on pushes and pull requests.
 
-After editing anything in `site/assets/`, run `python3 tools/stamp_assets.py`, or CI
-will fail on stale version stamps.
+After editing an English chapter or anything in `site/assets/`, run `python3 tools/build_zh.py` and
+`python3 tools/stamp_assets.py`, or CI will fail on a stale Chinese mirror or stale version stamps.
+
+---
+
+## 🌏 Translating
+
+Translation is **partial by design**. Every English page has a Chinese counterpart under
+[`/zh/`](https://graphrag.xinbetween.com/zh/). A chapter that has not been translated shows its English
+body with a banner saying so, while the navigation, search, quizzes and figure controls around it are
+already Chinese. `/zh/` stays complete and navigable at every point instead of shipping a half-built second
+site.
+
+| Where | What it holds |
+| --- | --- |
+| `site/assets/js/site.js` → `STRINGS` | Top bar, search, chapter rail, pager, quiz UI, footer, the fallback banner |
+| `site/assets/js/viz.js` → `L` | Figure controls and the built-in captions of every figure type |
+| `site/assets/js/curriculum.zh.js` | Part titles, blurbs and bridges; chapter titles and summaries |
+| `site/zh/index.html` | The home page, written by hand |
+| `site/zh/chapters/<slug>.html` | Chapters: generated English fallbacks until translated |
+
+**To translate a chapter:** open its generated page under `site/zh/chapters/`, change `data-fallback="en"`
+to `data-translated="true"` on `<body>`, and translate everything inside `<main>`, including figure captions
+and diagram text. Then run:
+
+```bash
+python3 tools/build_zh.py && python3 tools/stamp_assets.py && python3 tools/check_site.py
+```
+
+`build_zh.py` regenerates every untranslated page from its English source and leaves translated pages alone.
+`check_site.py` compares each translated page with the chapter it mirrors: the same figures in the same
+order, the same number of diagrams, exercises, answers, Q&A items and references, and the same correct
+option in every quiz, so a translation cannot silently drift. CI runs both and fails on any difference.
+
+**Conventions.** Code, identifiers, model and framework names, paper titles and the Kestrel Labs names stay
+in English; everything else is translated. The terminology table and style rules are in
+[`docs/TRANSLATING.md`](docs/TRANSLATING.md).
 
 ---
 
@@ -258,6 +300,7 @@ Issues and PRs welcome. Particularly useful:
   most valuable contribution there is.
 - **Stale numbers.** If a chapter's quoted output no longer matches what `minigraphrag`
   prints, report the chapter and the command.
+- **Translations.** See above: the build tells you exactly what is missing.
 - **Quiz questions and exercises.** More good ones are always welcome.
 - **A chapter this course is missing.** GraphRAG over streaming data, cross-lingual
   entity resolution, and graph retrieval evaluated with real users are all absent

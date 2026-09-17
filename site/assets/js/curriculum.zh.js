@@ -33,7 +33,7 @@ window.CURRICULUM_ZH = {
     "05-knowledge-graphs": { title: "知识图谱、模式与查询语言",
       summary: "三元组与属性图、本体、Cypher 与 SPARQL 基础。" },
     "06-graph-shapes": { title: "面向检索的图结构",
-      summary: "词法图、领域图、树状索引（RAPTOR）、混合结构与超图，以及各自的适用场景。" },
+      summary: "词汇图、领域图、树状索引（RAPTOR）、混合结构与超图，以及各自的适用场景。" },
     "07-chunking-text-units": { title: "文本单元与文档结构",
       summary: "面向抽取的分块大小权衡、重叠、结构感知切分与溯源 ID。" },
     "08-entity-relation-extraction": { title: "用 LLM 抽取实体和关系",
