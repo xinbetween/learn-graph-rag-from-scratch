@@ -1,0 +1,1122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capstone 1: ship MiniGraphRAG end to end | Graph RAG from Scratch</title>
+<meta name="description" content="Index a corpus with minigraphrag, serve local, global, PPR and hybrid search behind a streaming FastAPI endpoint with a router and citations, and prove with an evaluation and cost report that it beats vector RAG where it should.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="c1-minigraphrag" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Capstone 1: ship MiniGraphRAG end to end</h1>
+  <p class="lede">You have built every stage of GraphRAG in isolation. In this capstone you ship them as one service: index a corpus, answer questions through a router over five retrieval methods behind a streaming API with citations, and write the evaluation and cost report that shows where the graph earns its keep and where it does not.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Run the full minigraphrag indexing pipeline on Kestrel and on a corpus you choose, and inspect every artifact it writes</li>
+      <li>Serve basic, local, global, PPR and hybrid search behind one FastAPI service with server-sent events and resolvable citations</li>
+      <li>Build and measure a query router that sends each question to the cheapest method likely to answer it</li>
+      <li>Produce an evaluation report with context recall, token F1 and order-swapped pairwise judging, sliced by question type with intervals</li>
+      <li>Produce a cost report that attributes every token to an indexing stage or query method</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Overview and architecture</h2>
+<p>A GraphRAG demo answers one question well. A GraphRAG <em>service</em> answers every question it is asked, says where its answer came from, costs a known amount, and comes with evidence that it is better than the simpler thing it replaces. That last part is what most projects skip, and it is what this capstone is graded on.</p>
+<p>The architecture has two halves. Offline, <code>build_index</code> from <a href="13-storage-indexing.html">Chapter 13</a> turns Markdown documents into plain artifacts in an <code>out/</code> folder. Online, a small application package, <code>mgr_app</code>, loads those artifacts once and exposes them over HTTP. Everything that talks to a model goes through a metering wrapper, so the cost report and the evaluation read from the same ledger the service writes to.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 390" role="img" aria-labelledby="c1-arch-title">
+      <title id="c1-arch-title">Architecture: offline indexing writes artifacts; the online service routes questions to five search methods and streams cited answers; evaluation and cost reports read the same ledger</title>
+      <defs><marker id="c1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <text class="d-text bold" x="12" y="22">Offline</text>
+      <rect class="d-box ghost" x="10" y="32" width="120" height="50" rx="6"/>
+      <text class="d-text" x="22" y="54">data/corpus/*.md</text>
+      <text class="d-text small" x="22" y="72">12 Kestrel docs</text>
+      <line class="d-line" x1="130" y1="57" x2="160" y2="57" marker-end="url(#c1a)"/>
+      <rect class="d-box node" x="162" y="32" width="250" height="50" rx="6"/>
+      <text class="d-text bold" x="174" y="52">build_index</text>
+      <text class="d-text small" x="174" y="70">chunk, extract, resolve, cluster, report</text>
+      <line class="d-line" x1="412" y1="57" x2="442" y2="57" marker-end="url(#c1a)"/>
+      <rect class="d-box node" x="444" y="32" width="226" height="50" rx="6"/>
+      <text class="d-text bold" x="456" y="52">out/ artifacts</text>
+      <text class="d-text small mono" x="456" y="70">entities.json, graph.graphml</text>
+
+      <text class="d-text bold" x="12" y="118">Online (mgr_app)</text>
+      <rect class="d-box" x="10" y="130" width="110" height="60" rx="6"/>
+      <text class="d-text bold" x="22" y="154">Client</text>
+      <text class="d-text small" x="22" y="172">POST /query/stream</text>
+      <line class="d-line" x1="120" y1="160" x2="150" y2="160" marker-end="url(#c1a)"/>
+      <rect class="d-box edge" x="152" y="130" width="120" height="60" rx="6"/>
+      <text class="d-text bold" x="164" y="154">api.py</text>
+      <text class="d-text small" x="164" y="172">FastAPI, SSE events</text>
+      <line class="d-line" x1="272" y1="160" x2="302" y2="160" marker-end="url(#c1a)"/>
+      <rect class="d-box edge" x="304" y="130" width="112" height="60" rx="6"/>
+      <text class="d-text bold" x="316" y="154">router.py</text>
+      <text class="d-text small" x="316" y="172">rules, then LLM</text>
+      <line class="d-line" x1="416" y1="160" x2="444" y2="160" marker-end="url(#c1a)"/>
+      <rect class="d-box comm" x="446" y="100" width="224" height="150" rx="6"/>
+      <text class="d-text bold" x="458" y="122">service.py: five methods</text>
+      <text class="d-text small mono" x="458" y="144">basic_search</text>
+      <text class="d-text small mono" x="458" y="162">local_search</text>
+      <text class="d-text small mono" x="458" y="180">global_search (map-reduce)</text>
+      <text class="d-text small mono" x="458" y="198">hipporag_search (PPR)</text>
+      <text class="d-text small mono" x="458" y="216">hybrid_search (RRF)</text>
+      <text class="d-text small" x="458" y="238">all from minigraphrag.search</text>
+      <line class="d-line dash" x1="557" y1="82" x2="557" y2="98" marker-end="url(#c1a)"/>
+      <line class="d-line" x1="446" y1="230" x2="300" y2="262" marker-end="url(#c1a)"/>
+      <rect class="d-box edge" x="152" y="250" width="146" height="54" rx="6"/>
+      <text class="d-text bold" x="164" y="272">citations.py</text>
+      <text class="d-text small" x="164" y="290">[Data: ...] to doc spans</text>
+      <line class="d-line" x1="152" y1="277" x2="80" y2="192" marker-end="url(#c1a)"/>
+
+      <rect class="d-box good" x="10" y="326" width="200" height="54" rx="6"/>
+      <text class="d-text bold" x="22" y="348">metering.py ledger</text>
+      <text class="d-text small" x="22" y="366">calls and tokens per stage</text>
+      <rect class="d-box good" x="240" y="326" width="200" height="54" rx="6"/>
+      <text class="d-text bold" x="252" y="348">evaluate.py</text>
+      <text class="d-text small" x="252" y="366">recall, F1, judge win rates</text>
+      <rect class="d-box good" x="470" y="326" width="200" height="54" rx="6"/>
+      <text class="d-text bold" x="482" y="348">cost_report.py</text>
+      <text class="d-text small" x="482" y="366">$ per stage, per query</text>
+      <line class="d-line dash" x1="210" y1="353" x2="238" y2="353"/>
+      <line class="d-line dash" x1="440" y1="353" x2="468" y2="353"/>
+      <line class="d-line dash" x1="557" y1="250" x2="557" y2="324" marker-end="url(#c1a)"/>
+    </svg>
+  </div>
+  <figcaption>The service layer is deliberately thin: every retrieval method is minigraphrag's own function. The new code is the router, the citation resolver, the HTTP layer, the measurement tools and two small scripts: about 450 lines across the eight reference modules in <code>mgr_app</code>.</figcaption>
+</figure>
+
+<h3>Repository layout</h3>
+<pre data-file="capstone1/"><code class="language-bash">capstone1/
+  data -&gt; ../code/data          # symlink: corpus/ and questions.jsonl
+  mgr_app/
+    build.py                    # M1: index and inspect
+    citations.py                # M2: resolve [Data: ...] markers
+    service.py                  # M3: one entry point for five methods
+    router.py                   # M4: pick a method per question
+    api.py                      # M5: FastAPI + server-sent events
+    evaluate.py                 # M6: evaluation report
+    metering.py, cost_report.py # M7: cost report
+    prepare_corpus.py           # M8: your own corpus
+  tests/
+  out/                          # index artifacts (gitignored)</code></pre>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "Eight milestones",
+  "subtitle": "Each ends with a checkpoint you can verify offline with MockLLM",
+  "perRow": 4,
+  "stages": [
+    {"label": "M1 Index", "detail": "Run build_index on Kestrel through a cache and a meter. Checkpoint: 17 entities and a handful of communities with MockLLM, all artifacts on disk."},
+    {"label": "M2 Citations", "detail": "Basic and local search with citations resolved to documents and character spans. Checkpoint: every marker in an answer maps to a real document."},
+    {"label": "M3 Methods", "detail": "Global, PPR and hybrid behind one answer() function. Checkpoint: all five methods answer all 23 questions without errors."},
+    {"label": "M4 Router", "detail": "Rules first, LLM fallback. Checkpoint: routing accuracy on the labelled questions, measured, and a held-out set of your own."},
+    {"label": "M5 API", "detail": "FastAPI with JSON and server-sent events. Checkpoint: route, sources, token, citations and done events arrive in order."},
+    {"label": "M6 Evaluation", "detail": "Recall, F1 and order-swapped judge win rates by question type with bootstrap intervals."},
+    {"label": "M7 Cost", "detail": "Ledger by stage and method, priced. Checkpoint: indexing and per-query dollars for every method."},
+    {"label": "M8 Your corpus", "detail": "Repeat on documents you choose, write new questions, and publish the report."}
+  ]
+}
+</script>
+</div>
+
+<h2>Requirements</h2>
+<h3>Functional</h3>
+<ul>
+  <li>Index the Kestrel corpus (<code>code/data/corpus</code>) and one corpus of your choice of at least 50 documents or 50,000 words.</li>
+  <li><code>POST /query</code> accepts <code>{"question", "method"}</code> where method is <code>auto</code>, <code>basic</code>, <code>local</code>, <code>global</code>, <code>ppr</code> or <code>hybrid</code>, and returns the answer, the method used, the router's reason, citations and source documents.</li>
+  <li><code>POST /query/stream</code> returns the same information as server-sent events: <code>route</code>, <code>sources</code>, a sequence of <code>token</code> events, <code>citations</code>, <code>done</code>.</li>
+  <li>Every citation resolves to a document id and a character span in that document; markers that resolve to nothing are dropped and counted.</li>
+  <li><code>GET /health</code> reports entity, relationship, community and text unit counts.</li>
+</ul>
+<h3>Evidence</h3>
+<ul>
+  <li>An evaluation report comparing all methods and <code>auto</code> against basic vector RAG, by question type, with context recall, token F1 and pairwise judge win rates with 95% intervals, following <a href="25-evaluation.html">Chapter 25</a>: swapped order, inconsistent verdicts counted as ties, answer length reported.</li>
+  <li>A claim you can defend: graph methods beat basic RAG on multi-hop and global questions (or an honest report that they do not on your corpus, with the reason).</li>
+  <li>A cost report: indexing tokens and dollars by stage, and per-query dollars and latency by method.</li>
+</ul>
+<h3>Constraints</h3>
+<ul>
+  <li>Everything runs offline with <code>MockLLM</code> and <code>HashingEmbedder</code>, so tests pass in CI with no keys. Real providers are a configuration change (<code>MGR_LLM=openai</code>).</li>
+  <li>Use minigraphrag's functions for indexing and retrieval; do not fork them. New behavior goes in <code>mgr_app</code>.</li>
+  <li>The judge model must not be the model that generated the answers when you run the real evaluation.</li>
+</ul>
+
+<div class="callout warn">
+  <span class="callout-title">MockLLM numbers prove plumbing, not quality</span>
+  <p>MockLLM answers by copying sentences that overlap the question, and its judge scores answers with simple counts. Use it to check that every milestone runs end to end and that numbers are computed correctly. Every claim about which method is better must come from a run with real models.</p>
+</div>
+
+<h2>Milestones</h2>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C1.1 <span class="level">Index and inspect</span></h4>
+  <p>Get a reproducible index of the Kestrel corpus and learn to read its artifacts before you build anything on top of them.</p>
+  <ol>
+    <li>Install minigraphrag in editable mode (<code>pip install -e code</code>) and create <code>capstone1/</code> with a <code>data</code> symlink to <code>code/data</code>.</li>
+    <li>Build the index through a disk cache so that re-running after a crash or a code change costs nothing.</li>
+    <li>Print entity types, the highest-degree entities and one line per community with its report title.</li>
+    <li>Open <code>out/entities.json</code>, <code>out/communities.json</code> and <code>out/community_reports.json</code> and find Project Tern's node, its community and the report that mentions it.</li>
+  </ol>
+  <p>Starter code:</p>
+  <pre data-file="capstone1/mgr_app/build.py (starter)"><code class="language-python">from minigraphrag.indexer import IndexConfig, build_index
+from minigraphrag.llm import get_llm
+
+
+def main(docs_dir="data/corpus", out_dir="out", llm_name="mock"):
+    llm = get_llm(llm_name)            # TODO: add a disk cache
+    index = build_index(docs_dir, out_dir, llm, config=IndexConfig(), log=print)
+    # TODO: print entity type counts, top-5 entities by degree, one line per community</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>With MockLLM the log reads 12 documents, 24 text units, 17 entities and 4 communities with 4 reports. With a real LLM expect more entities and relationships, and more communities.</li>
+    <li>A second run prints zero provider calls: every response comes from the cache.</li>
+    <li>You can name the community that contains PROJECT TERN and explain from its edges why it landed there.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <p>The metering wrapper (built fully in M7) goes <em>inside</em> the cache, so the ledger only counts calls that actually reach the provider.</p>
+    <pre data-file="capstone1/mgr_app/build.py"><code class="language-python">"""Milestone 1: index a folder of Markdown documents and print what each stage produced."""
+from __future__ import annotations
+
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+from minigraphrag.embeddings import get_embedder
+from minigraphrag.indexer import IndexConfig, build_index
+from minigraphrag.llm import CachedLLM, get_llm
+
+from .metering import MeteredLLM
+
+
+def main(docs_dir: str = "data/corpus", out_dir: str = "out", llm_name: str = "mock", embedder: str = "hashing"):
+    metered = MeteredLLM(get_llm(llm_name))             # counts only calls that reach the provider
+    llm = CachedLLM(metered, ".cache/llm")              # re-runs after a crash or code change are free
+    index = build_index(docs_dir, out_dir, llm, get_embedder(embedder), IndexConfig(), log=print)
+    G = index.graph
+    print("entity types:", Counter(d.get("type", "") for _, d in G.nodes(data=True)).most_common())
+    print("top entities by degree:", sorted(G.degree, key=lambda x: -x[1])[:5])
+    for c in index.communities:
+        report = index.report(c.id)
+        print(f"community {c.id} (level {c.level}, {len(c.nodes)} nodes): {report.title if report else '-'}")
+    print(f"cache hits {llm.hits}, provider calls {llm.misses}")
+    Path(out_dir, "build_ledger.json").write_text(json.dumps(metered.snapshot(), indent=1))
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:])</code></pre>
+    <p>Output with MockLLM (abridged):</p>
+    <pre><code class="language-bash">$ python -m mgr_app.build data/corpus out mock
+chunked 12 documents into 24 text units
+extracted 194 entity mentions, 154 relationship mentions
+graph: 17 entities, 54 relationships
+4 communities, 4 reports
+entity types: [('ORGANIZATION', 6), ('PERSON', 5), ('LOCATION', 2), ('PROJECT', 2), ('EVENT', 1), ('LAW', 1)]
+top entities by degree: [('KESTREL LABS', 15), ('PROJECT SENTINEL', 10), ('PORT AVALON', 9), ...]
+community 0 (level 0, 7 nodes): Project Sentinel and Port Avalon
+community 1 (level 0, 5 nodes): Kestrel Labs and Dr. Mira Okafor
+community 2 (level 0, 3 nodes): Ocean Health Act and Lena Park
+community 3 (level 0, 2 nodes): Deepcast and Marlow Dynamics
+cache hits 0, provider calls 122</code></pre>
+    <p>Compare with the expected communities in the running example: the mock graph groups PROJECT TERN with Sentinel and Tidewater rather than with Kestrel's leadership, because MockLLM links entities that co-occur in a sentence and Tern is mostly discussed alongside Sentinel. That is a useful first lesson: communities reflect the extractor's edges, not the ground truth in your head. Rerun with a real LLM and compare.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C1.2 <span class="level">Answers with resolvable citations</span></h4>
+  <p>Answers from <code>local_search</code> cite records such as <code>[Data: Entities (11); Sources (09_kestrel_eng_blog_project_tern-000)]</code>. A UI needs documents and spans, not table row ids. Write the resolver.</p>
+  <ol>
+    <li>Parse every <code>[Data: ...]</code> marker, including several tables in one marker and comma-separated ids.</li>
+    <li>Map <code>Sources</code> ids to text units, <code>Entities</code> and <code>Relationships</code> human ids to their <code>source_ids</code>, and <code>Reports</code> to the text units of their community's members.</li>
+    <li>Return document ids, the first unit's character span (<code>TextUnit.start</code>, <code>end</code>) and a snippet.</li>
+    <li>Drop markers that resolve to nothing, and keep a count: invented ids are a hallucination signal.</li>
+  </ol>
+  <pre data-file="capstone1/mgr_app/citations.py (starter)"><code class="language-python">import re
+
+MARKER = re.compile(r"\[Data:([^\]]+)\]")
+
+
+def extract_citations(index, answer: str) -&gt; list[dict]:
+    out = []
+    for marker in MARKER.finditer(answer):
+        # TODO: split "Sources (a, b); Entities (3)" into (table, id) pairs
+        # TODO: map each to text units, then to doc ids and a character span
+        pass
+    return out</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>For “Why did Kestrel Labs start Project Tern?” with <code>local_search</code>, every citation has at least one document id, and every document id exists in <code>data/corpus</code>.</li>
+    <li>A synthetic answer containing <code>[Data: Entities (999)]</code> yields no citation for that marker.</li>
+    <li><code>document_text[start:end]</code> equals the cited text unit's text for every citation.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="capstone1/mgr_app/citations.py"><code class="language-python">"""Turn [Data: Sources (a, b); Entities (3)] markers into citations a UI can link."""
+from __future__ import annotations
+
+import re
+
+MARKER = re.compile(r"\[Data:([^\]]+)\]")
+PART = re.compile(r"(Sources|Entities|Relationships|Reports)\s*\(([^)]*)\)")
+
+
+def extract_citations(index, answer: str) -&gt; list[dict]:
+    G = index.graph
+    by_human_node = {d["human_id"]: n for n, d in G.nodes(data=True)}
+    by_human_edge = {d["human_id"]: (u, v) for u, v, d in G.edges(data=True)}
+    out, seen = [], set()
+    for marker in MARKER.finditer(answer):
+        for table, ids in PART.findall(marker.group(1)):
+            for raw in [i.strip() for i in ids.split(",") if i.strip() and i.strip() != "+more"]:
+                key = (table, raw)
+                if key in seen:
+                    continue
+                seen.add(key)
+                units = []
+                if table == "Sources":
+                    units = [raw]
+                elif table == "Entities" and raw.isdigit() and int(raw) in by_human_node:
+                    units = G.nodes[by_human_node[int(raw)]].get("source_ids", [])
+                elif table == "Relationships" and raw.isdigit() and int(raw) in by_human_edge:
+                    units = G.edges[by_human_edge[int(raw)]].get("source_ids", [])
+                elif table == "Reports" and raw.isdigit():
+                    comm = next((c for c in index.communities if c.id == int(raw)), None)
+                    units = [u for n in (comm.nodes if comm else []) for u in G.nodes[n].get("source_ids", [])]
+                docs = list(dict.fromkeys(index.text_units[u].doc_id for u in units if u in index.text_units))
+                if not docs:
+                    continue  # a marker that points at nothing is dropped, and counted by the eval
+                first = index.text_units.get(units[0]) if units else None
+                out.append({"table": table, "id": raw, "doc_ids": docs[:5],
+                            "snippet": first.text[:200] if first else "",
+                            "span": [first.start, first.end] if first else None})
+    return out</code></pre>
+    <p>A test that pins the span property, which is what a front end relies on to highlight text:</p>
+    <pre data-file="capstone1/tests/test_citations.py"><code class="language-python">from minigraphrag.chunking import load_documents
+from minigraphrag.indexer import load_index
+from minigraphrag.llm import MockLLM
+from minigraphrag.search.local import local_search
+from mgr_app.citations import extract_citations
+
+
+def test_citations_resolve_to_real_spans():
+    index, docs = load_index("out"), load_documents("data/corpus")
+    answer = local_search(index, "Why did Kestrel Labs start Project Tern?", MockLLM()).answer
+    cites = extract_citations(index, answer + " [Data: Entities (999)]")
+    assert cites, "expected at least one citation"
+    for c in cites:
+        assert all(d in docs for d in c["doc_ids"])
+        start, end = c["span"]
+        assert docs[c["doc_ids"][0]][start:end].startswith(c["snippet"][:50])</code></pre>
+    <p>Why the first document of a Report citation is only an approximation: a community report summarizes many units, so any single span is a pointer, not proof. Show report citations differently in the UI (“summary of 7 entities”) and prefer answers whose key claims cite Sources directly.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C1.3 <span class="level">Five methods, one entry point</span></h4>
+  <p>The API, the evaluator and the cost report must all call retrieval the same way, or their numbers will not agree. Wrap minigraphrag's five search functions in one <code>answer()</code> that returns a plain dict.</p>
+  <ol>
+    <li>Map method names to <code>basic_search</code>, <code>local_search</code>, <code>global_search</code>, <code>hipporag_search</code> and <code>hybrid_search</code>.</li>
+    <li>Tag each call with the method name when the LLM supports it, so the ledger splits cost by method.</li>
+    <li>Return method, router reason, answer, citations, source documents, LLM calls and latency.</li>
+  </ol>
+  <pre data-file="capstone1/mgr_app/service.py (starter)"><code class="language-python">from minigraphrag.search.basic import basic_search
+from minigraphrag.search.local import local_search
+# TODO: import global_search, hipporag_search, hybrid_search
+
+METHODS = {"basic": ..., "local": ...}
+
+
+def answer(index, llm, question, method="auto"):
+    ...</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>A loop over the 23 questions and the five methods finishes without exceptions (115 answers).</li>
+    <li><code>global</code> reports two LLM calls per question on the mock index (one map batch, one reduce); <code>ppr</code> reports two (keyword extraction and answer).</li>
+    <li>Sources for <code>global</code> cover many documents; sources for <code>basic</code> are at most five.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="capstone1/mgr_app/service.py"><code class="language-python">"""One entry point for every method, used by the API, the evaluator and the cost report."""
+from __future__ import annotations
+
+import time
+from contextlib import nullcontext
+
+from minigraphrag.search.basic import basic_search
+from minigraphrag.search.global_ import global_search
+from minigraphrag.search.hybrid import hybrid_search
+from minigraphrag.search.local import local_search
+from minigraphrag.search.ppr import hipporag_search
+
+from .citations import extract_citations
+from .router import route
+
+METHODS = {
+    "basic": lambda index, q, llm: basic_search(index, q, llm),
+    "local": lambda index, q, llm: local_search(index, q, llm),
+    "global": lambda index, q, llm: global_search(index, q, llm, dynamic=False),
+    "ppr": lambda index, q, llm: hipporag_search(index, q, llm),
+    "hybrid": lambda index, q, llm: hybrid_search(index, q, llm),
+}
+
+
+def run_method(index, llm, question: str, method: str):
+    tag = llm.tagged(f"query:{method}") if hasattr(llm, "tagged") else nullcontext()
+    with tag:
+        return METHODS[method](index, question, llm)
+
+
+def answer(index, llm, question: str, method: str = "auto") -&gt; dict:
+    t0 = time.perf_counter()
+    decision = route(index, question, llm) if method == "auto" else None
+    chosen = decision.method if decision else method
+    result = run_method(index, llm, question, chosen)
+    return {"question": question, "method": chosen,
+            "route_reason": decision.reason if decision else "forced",
+            "answer": result.answer, "citations": extract_citations(index, result.answer),
+            "sources": result.sources, "llm_calls": result.llm_calls,
+            "latency_ms": round(1000 * (time.perf_counter() - t0), 1)}</code></pre>
+    <p>Two design decisions to notice. The router runs inside <code>answer()</code> so that <code>auto</code> is evaluated exactly as it is served. And global search is called with <code>dynamic=False</code> because the Kestrel hierarchy has one level; on a larger corpus, try <code>dynamic=True</code> (dynamic community selection from <a href="15-global-search.html">Chapter 15</a>) and record the call counts in M7.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C1.4 <span class="level">The query router</span></h4>
+  <p>Global search costs a map call per batch of reports and is poor at “Who directs Tidewater Institute?”. Basic search is cheap and poor at “What are the main themes?”. A router picks per question. Build the cheapest one that works and measure it.</p>
+  <ol>
+    <li>Find named entities in the question with <code>map_query_to_entities</code> and keep only those whose name actually appears.</li>
+    <li>Rules: sensemaking cues with at most one named entity go to <code>global</code>; multi-hop cues or three or more entities go to <code>ppr</code>; one or two named entities go to <code>local</code>.</li>
+    <li>If no rule fires, ask the LLM for a JSON route; if that fails, use <code>hybrid</code>.</li>
+    <li>Measure routing accuracy against the <code>type</code> labels in <code>questions.jsonl</code>, then write 15 new questions and measure again.</li>
+  </ol>
+  <pre data-file="capstone1/mgr_app/router.py (starter)"><code class="language-python">from dataclasses import dataclass
+
+
+@dataclass
+class Route:
+    method: str
+    reason: str
+    entities: list[str]
+
+
+def route(index, question: str, llm=None) -&gt; Route:
+    # TODO: named entities, cue regexes, LLM fallback, default
+    return Route("hybrid", "not implemented", [])</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>Routing accuracy on the 23 labelled questions, where global questions must go to <code>global</code>, multi-hop to <code>ppr</code> or <code>hybrid</code>, single-hop to <code>local</code> or <code>basic</code>, temporal to <code>local</code> or <code>hybrid</code>.</li>
+    <li>Accuracy on your own held-out questions, reported separately.</li>
+    <li>Every route carries a human-readable reason that the API returns.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="capstone1/mgr_app/router.py"><code class="language-python">"""Pick a retrieval method per question: cheap rules first, an LLM only when the rules are unsure."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from minigraphrag.llm import parse_json_response
+from minigraphrag.search.local import map_query_to_entities
+
+GLOBAL_CUES = re.compile(r"\b(main themes?|overall|summari[sz]e|trends?|risks?|landscape|evolved|big picture|role does)\b", re.I)
+MULTIHOP_CUES = re.compile(r"\b(why|connect(s|ed|ion)?|relat(e|ed)|whose|path|link(ed)?|previously|used by|"
+                           r"the company that|both|and how)\b", re.I)
+TEMPORAL_CUES = re.compile(r"\b(19|20)\d\d\b|\b(as of|when|currently|now|before|after|since)\b", re.I)
+
+ROUTER_PROMPT = """Classify the question for a GraphRAG system. Routes:
+- "global": asks about themes, trends or a summary across the whole corpus
+- "ppr": needs a chain of facts across several entities (multi-hop)
+- "local": about one or two named entities and their direct facts
+- "basic": a narrow factual lookup likely answered by one passage
+Return JSON {{"route": "...", "reason": "..."}}.
+Question: {question}"""
+
+
+@dataclass
+class Route:
+    method: str
+    reason: str
+    entities: list[str]
+
+
+def route(index, question: str, llm=None) -&gt; Route:
+    named = [e for e in map_query_to_entities(index, question, top_k=5, include_name_matches=True)
+             if re.search(re.escape(e.split()[-1]), question.upper())]
+    if GLOBAL_CUES.search(question) and (len(named) &lt;= 1 or question.lower().startswith("summari")):
+        return Route("global", "sensemaking cue with at most one named entity", named)
+    if MULTIHOP_CUES.search(question) or len(named) &gt;= 3:
+        return Route("ppr", f"multi-hop cue or {len(named)} named entities", named)
+    if named:
+        why = "temporal lookup on a named entity" if TEMPORAL_CUES.search(question) else "named-entity lookup"
+        return Route("local", why, named)
+    if llm is not None:
+        choice = parse_json_response(llm.complete(ROUTER_PROMPT.format(question=question), json=True))
+        if choice.get("route") in {"global", "ppr", "local", "basic"}:
+            return Route(choice["route"], "llm: " + str(choice.get("reason", "")), named)
+    return Route("hybrid", "no confident signal; fuse everything", named)</code></pre>
+    <pre data-file="capstone1/tests/test_router.py"><code class="language-python">from minigraphrag.indexer import load_index
+from mgr_app.router import route
+from mgr_app.evaluate import load_questions
+EXPECTED = {"global": {"global"}, "multi-hop": {"ppr", "hybrid"}, "single-hop": {"local", "basic"}, "temporal": {"local", "hybrid"}}
+index = load_index("out")
+qs = load_questions("data/questions.jsonl")
+ok = 0
+for q in qs:
+    r = route(index, q["question"])
+    hit = r.method in EXPECTED[q["type"]]
+    ok += hit
+    if not hit: print("MISS", q["id"], q["type"], "-&gt;", r.method, "|", q["question"])
+print(f"routing accuracy {ok}/{len(qs)}")</code></pre>
+    <pre><code class="language-bash">$ python test_router.py
+MISS q15 temporal -&gt; ppr | Who was the CTO of Kestrel Labs when the Halden Reef bleaching event was detected?
+routing accuracy 22/23</code></pre>
+    <p>Be suspicious of that 22/23. Cues such as “previously”, “used by” and “role does” are in the lists because someone read the misses on these same 23 questions and added words until they routed correctly. That is tuning on the test set. The number that belongs in your report is accuracy on questions written <em>after</em> the rules were frozen. The remaining miss is instructive too: q15 is temporal <em>and</em> multi-hop (who held a role at the time of an event), and PPR is a defensible route for it, which says the label set itself is coarse.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C1.5 <span class="level">A streaming API</span></h4>
+  <p>Global search can take many seconds with a real model. Users tolerate waiting when they see progress, so stream it. Server-sent events (SSE) are plain HTTP: the response is <code>text/event-stream</code> and each event is an <code>event:</code> line, a <code>data:</code> line and a blank line.</p>
+  <ol>
+    <li>Load the index and the metered LLM once at startup from environment variables.</li>
+    <li>Implement <code>GET /health</code>, <code>POST /query</code> and <code>POST /query/stream</code> with a Pydantic request model that restricts <code>method</code> to known values.</li>
+    <li>Emit events in order: <code>route</code> (as soon as the router decides), <code>sources</code>, <code>token</code> chunks, <code>citations</code>, <code>done</code> with call count and cost.</li>
+  </ol>
+  <pre data-file="capstone1/mgr_app/api.py (starter)"><code class="language-python">from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+app = FastAPI(title="MiniGraphRAG")
+
+
+class Query(BaseModel):
+    question: str
+    method: str = "auto"      # TODO: restrict to known methods
+
+
+@app.post("/query/stream")
+def query_stream(q: Query):
+    def events():
+        yield "event: route\ndata: {}\n\n"   # TODO
+    return StreamingResponse(events(), media_type="text/event-stream")</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li><code>curl -N -X POST localhost:8000/query/stream -H 'content-type: application/json' -d '{"question":"What connects Priya Nair to Deepcast?"}'</code> prints a <code>route</code> event before any <code>token</code> event.</li>
+    <li>An unknown method returns HTTP 422, not a stack trace.</li>
+    <li>The concatenated <code>token</code> texts equal the <code>answer</code> field from <code>POST /query</code> for the same question.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="capstone1/mgr_app/api.py"><code class="language-python">"""FastAPI service: POST /query for JSON, POST /query/stream for server-sent events."""
+from __future__ import annotations
+
+import json
+import os
+from typing import Literal
+
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from minigraphrag.indexer import load_index
+from minigraphrag.llm import get_llm
+
+from .metering import MeteredLLM
+from .service import answer, run_method
+from .router import route
+from .citations import extract_citations
+
+INDEX_DIR = os.getenv("MGR_INDEX", "out")
+index = load_index(INDEX_DIR)
+# No response cache here: identical questions should still reach the model, and the meter must see real spend.
+llm = MeteredLLM(get_llm(os.getenv("MGR_LLM", "mock")), price_key=os.getenv("MGR_PRICE", "mock"))
+app = FastAPI(title="MiniGraphRAG")
+
+
+class Query(BaseModel):
+    question: str
+    method: Literal["auto", "basic", "local", "global", "ppr", "hybrid"] = "auto"
+
+
+@app.get("/health")
+def health():
+    G = index.graph
+    return {"entities": G.number_of_nodes(), "relationships": G.number_of_edges(),
+            "communities": len(index.communities), "text_units": len(index.text_units)}
+
+
+@app.post("/query")
+def query(q: Query):
+    return answer(index, llm, q.question, q.method)
+
+
+def _sse(event: str, data) -&gt; str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _stream_text(text: str, size: int = 24):
+    # minigraphrag's LLM interface returns whole strings. If your client supports token
+    # streaming, yield its deltas here instead; the event protocol stays the same.
+    for i in range(0, len(text), size):
+        yield text[i:i + size]
+
+
+@app.post("/query/stream")
+def query_stream(q: Query):
+    def events():
+        decision = route(index, q.question, llm) if q.method == "auto" else None
+        method = decision.method if decision else q.method
+        yield _sse("route", {"method": method, "reason": decision.reason if decision else "forced"})
+        result = run_method(index, llm, q.question, method)
+        yield _sse("sources", {"doc_ids": result.sources})
+        for delta in _stream_text(result.answer):
+            yield _sse("token", {"text": delta})
+        yield _sse("citations", extract_citations(index, result.answer))
+        yield _sse("done", {"llm_calls": result.llm_calls, "cost_usd": round(llm.cost(), 6)})
+    return StreamingResponse(events(), media_type="text/event-stream")</code></pre>
+    <p>Run it with <code>MGR_INDEX=out uvicorn mgr_app.api:app --reload</code>. The stream for the Priya Nair question begins like this with MockLLM:</p>
+    <pre><code class="language-bash">event: route
+data: {"method": "ppr", "reason": "multi-hop cue or 2 named entities"}
+
+event: sources
+data: {"doc_ids": ["12_interview_leadership_change_2026", "09_kestrel_eng_blog_project_tern", ...]}
+
+event: token
+data: {"text": "HOST: Mira Okafor, Priya"}
+...
+event: done
+data: {"llm_calls": 2, "cost_usd": 0.0}</code></pre>
+    <p>A test with FastAPI's <code>TestClient</code> keeps this honest in CI:</p>
+    <pre data-file="capstone1/tests/test_api.py"><code class="language-python">import json
+import os
+
+os.environ.setdefault("MGR_INDEX", "out")
+from fastapi.testclient import TestClient
+from mgr_app.api import app
+
+client = TestClient(app)
+
+
+def parse_sse(body: str) -&gt; list[tuple[str, dict]]:
+    events = []
+    for block in body.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.splitlines())
+        events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
+def test_stream_matches_json_answer():
+    q = {"question": "What connects Priya Nair to Deepcast?", "method": "ppr"}
+    with client.stream("POST", "/query/stream", json=q) as r:
+        events = parse_sse("".join(r.iter_text()))
+    names = [e for e, _ in events]
+    assert names[0] == "route" and names[-1] == "done" and "citations" in names
+    streamed = "".join(d["text"] for e, d in events if e == "token")
+    assert streamed == client.post("/query", json=q).json()["answer"]
+
+
+def test_unknown_method_is_rejected():
+    assert client.post("/query", json={"question": "x", "method": "magic"}).status_code == 422</code></pre>
+    <p>The reference streams the finished answer in chunks because minigraphrag's <code>LLM.complete</code> returns a whole string. The events that matter most for perceived latency, <code>route</code> and <code>sources</code>, already arrive before generation starts. To stream real tokens, add a <code>stream(prompt, system)</code> generator to your provider client and yield its deltas in <code>_stream_text</code>; the event protocol does not change.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C1.6 <span class="level">The evaluation report</span></h4>
+  <p>This is the milestone that turns a demo into an argument. Follow the methodology from <a href="25-evaluation.html">Chapter 25</a>.</p>
+  <ol>
+    <li>For each of the 23 questions, run <code>basic</code>, <code>local</code>, <code>global</code>, <code>ppr</code>, <code>hybrid</code> and <code>auto</code>.</li>
+    <li>Compute context recall against <code>supporting_docs</code> and token F1 against the gold answer with minigraphrag's <code>context_recall</code> and <code>token_f1</code>.</li>
+    <li>For every non-basic answer, run <code>llm_judge_pairwise</code> against the basic answer on the four criteria. It asks twice with the order swapped and keeps a winner only when both orders agree. Score a win 1, a tie or inconsistent pair 0.5, a loss 0.</li>
+    <li>Report the mean win rate per method and question type with a 95% bootstrap interval over questions, next to recall, F1 and calls.</li>
+    <li>With real models: use a different, stronger judge than the generator, cache judge calls, and report mean answer length per method, since comprehensiveness and diversity reward longer answers.</li>
+  </ol>
+  <pre data-file="capstone1/mgr_app/evaluate.py (starter)"><code class="language-python">from minigraphrag.evaluation import context_recall, llm_judge_pairwise, load_questions, token_f1
+
+
+def run(index, llm, judge, questions, methods=("basic", "local", "global", "ppr", "hybrid", "auto")):
+    rows = []
+    # TODO: answer every question with every method; score recall and F1;
+    # TODO: judge each non-basic answer against basic on four criteria
+    return rows
+
+
+def report(rows) -&gt; str:
+    # TODO: group by (type, method), bootstrap the per-question win rate
+    ...</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>The report has one row per question type and method, 24 rows in all, and basic is marked as the baseline.</li>
+    <li>Win rates lie in [0, 1]; a method judged against itself scores exactly 0.5.</li>
+    <li>With real models, your report states whether the lower bound of the interval for <code>global</code> on global questions and for <code>ppr</code> or <code>hybrid</code> on multi-hop questions is above 0.5.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="capstone1/mgr_app/evaluate.py"><code class="language-python">"""Evaluation report: context recall and token F1 per method, pairwise judge win rates against basic RAG."""
+from __future__ import annotations
+
+import json
+import random
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+from minigraphrag.evaluation import context_recall, llm_judge_pairwise, load_questions, token_f1
+
+from .service import answer
+
+CRITERIA = ("comprehensiveness", "diversity", "empowerment", "directness")
+POINTS = {"A": 1.0, "TIE": 0.5, "B": 0.0}
+
+
+def bootstrap_ci(values: list[float], n: int = 2000, seed: int = 0) -&gt; tuple[float, float]:
+    """95% percentile bootstrap interval of the mean (resampling questions)."""
+    rng = random.Random(seed)
+    means = sorted(sum(rng.choice(values) for _ in values) / len(values) for _ in range(n))
+    return means[int(0.025 * n)], means[int(0.975 * n) - 1]
+
+
+def run(index, llm, judge, questions, methods=("basic", "local", "global", "ppr", "hybrid", "auto")) -&gt; list[dict]:
+    rows = []
+    for q in questions:
+        results = {m: answer(index, llm, q["question"], m) for m in methods}
+        baseline = results["basic"]["answer"]
+        for m, r in results.items():
+            row = {"id": q["id"], "type": q["type"], "method": m, "routed_to": r["method"],
+                   "recall": context_recall(r["sources"], q.get("supporting_docs", [])),
+                   "f1": token_f1(r["answer"], q["answer"]),
+                   "citations": len(r["citations"]), "llm_calls": r["llm_calls"]}
+            if m != "basic":
+                # The candidate is always answer A; llm_judge_pairwise asks again with the order
+                # swapped and only keeps a winner both orders agree on.
+                verdicts = llm_judge_pairwise(judge, q["question"], r["answer"], baseline, CRITERIA)
+                row.update({c: POINTS[verdicts[c]["winner"]] for c in CRITERIA})
+            rows.append(row)
+    return rows
+
+
+def report(rows: list[dict]) -&gt; str:
+    groups = defaultdict(list)
+    for r in rows:
+        groups[(r["type"], r["method"])].append(r)
+    out = ["| question type | method | n | context recall | token F1 | win rate vs basic [95% CI] |",
+           "|---|---|---|---|---|---|"]
+    for (qtype, method), rs in sorted(groups.items()):
+        recall = sum(r["recall"] for r in rs) / len(rs)
+        f1 = sum(r["f1"] for r in rs) / len(rs)
+        if method == "basic":
+            win = "(baseline)"
+        else:
+            per_q = [sum(r[c] for c in CRITERIA) / len(CRITERIA) for r in rs]
+            lo, hi = bootstrap_ci(per_q)
+            win = f"{sum(per_q) / len(per_q):.2f} [{lo:.2f}, {hi:.2f}]"
+        out.append(f"| {qtype} | {method} | {len(rs)} | {recall:.2f} | {f1:.2f} | {win} |")
+    return "\n".join(out)
+
+
+if __name__ == "__main__":
+    from minigraphrag.indexer import load_index
+    from minigraphrag.llm import get_llm
+    index_dir, llm_name, judge_name = (sys.argv[1:] + ["out", "mock", "mock"][len(sys.argv) - 1:])[:3]
+    index = load_index(index_dir)
+    llm = get_llm(llm_name, cache_dir=".cache/llm")          # cached: re-running the report is free; cost lives in M7
+    judge = get_llm(judge_name, cache_dir=".cache/judge")   # use a different, stronger model than llm
+    rows = run(index, llm, judge, load_questions("data/questions.jsonl"))
+    Path("eval_rows.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
+    Path("eval_report.md").write_text(report(rows))
+    print(report(rows))</code></pre>
+    <p>A MockLLM run prints a table like this (excerpt). Read it only as proof that the harness works:</p>
+    <pre><code class="language-bash">| question type | method | n | context recall | token F1 | win rate vs basic [95% CI] |
+| global | basic | 5 | 0.37 | 0.16 | (baseline) |
+| global | global | 5 | 1.00 | 0.20 | 0.55 [0.50, 0.65] |
+| multi-hop | basic | 8 | 0.60 | 0.19 | (baseline) |
+| multi-hop | hybrid | 8 | 0.73 | 0.18 | 0.50 [0.50, 0.50] |
+| multi-hop | ppr | 8 | 0.50 | 0.16 | 0.58 [0.52, 0.66] |</code></pre>
+    <p>Three things in it will still be true when you swap in real models, so write them down now:</p>
+    <ul>
+      <li><strong>Global recall of 1.00 is flattering.</strong> Global search's sources are the documents behind every community it used, so it “retrieves” nearly the whole corpus. Context recall cannot distinguish reading everything from reading the right thing; this is why global questions are judged pairwise instead.</li>
+      <li><strong>Token F1 is nearly useless for long answers.</strong> Gold answers are one or two sentences; a multi-paragraph answer containing them scores low. Use F1 for single-hop and temporal questions only.</li>
+      <li><strong>Five to eight questions per type give wide intervals.</strong> With real models, a 0.70 win rate on five global questions can still have a lower bound near 0.5. Add questions until the intervals answer your question, 30 per type is a reasonable target, and say how many you have.</li>
+    </ul>
+    <p>A report template that passes the rubric: one paragraph of setup (models, embedder, judge, question counts), the table, one paragraph per question type stating the claim and its interval, a paragraph on cost from M7, and a limitations paragraph (judge bias controls used, questions written by you, small n).</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Milestone C1.7 <span class="level">The cost report</span></h4>
+  <p>“GraphRAG is expensive” is not a number. Attribute every token to an indexing stage or a query method, then price it.</p>
+  <ol>
+    <li>Write <code>MeteredLLM</code>: same <code>complete()</code> signature, counts calls, input and output tokens with <code>count_tokens</code>, and seconds, keyed by stage.</li>
+    <li>Name indexing stages automatically from each prompt's marker in <code>prompts.MARKERS</code> (extraction, continue, claims, summarize, report), and query stages from a <code>tagged()</code> context manager.</li>
+    <li>Put the meter inside <code>CachedLLM</code> so cache hits cost nothing.</li>
+    <li>Report indexing cost per stage and per million corpus tokens, and mean dollars, p50 and p95 latency and calls per query for each method.</li>
+  </ol>
+  <pre data-file="capstone1/mgr_app/metering.py (starter)"><code class="language-python">from minigraphrag.tokens import count_tokens
+
+PRICES = {"mock": (0.0, 0.0)}   # USD per million (input, output) tokens
+
+
+class MeteredLLM:
+    def __init__(self, llm, price_key="mock"):
+        self.llm, self.price_key, self.ledger = llm, price_key, {}
+
+    def complete(self, prompt, system=None, json=False):
+        out = self.llm.complete(prompt, system=system, json=json)
+        # TODO: stage name, calls, tokens in/out, seconds
+        return out</code></pre>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>The indexing ledger has rows for extraction, continue (gleaning), claims, summarize and report, and its call total equals the provider calls printed by M1.</li>
+    <li>Run the cost report twice. With a fresh cache directory the indexing ledger matches the first run; with the warm cache it records zero indexing calls and zero indexing cost.</li>
+    <li>Per-query cost is reported for every method including <code>auto</code>.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="capstone1/mgr_app/metering.py"><code class="language-python">"""Count every LLM call, its tokens and its cost, tagged with the pipeline stage."""
+from __future__ import annotations
+
+import time
+from collections import defaultdict
+from contextlib import contextmanager
+
+from minigraphrag import prompts as P
+from minigraphrag.tokens import count_tokens
+
+# USD per million tokens. Placeholders: copy your provider's current price sheet.
+PRICES = {"mock": (0.0, 0.0), "gpt-4o-mini": (0.15, 0.60), "local": (0.0, 0.0)}
+
+
+class MeteredLLM:
+    """Wraps any minigraphrag LLM. Same complete() signature, plus a ledger."""
+
+    def __init__(self, llm, price_key: str = "mock"):
+        self.llm, self.price_key = llm, price_key
+        self.name = getattr(llm, "name", type(llm).__name__)
+        self.stage = "unlabelled"
+        self.ledger = defaultdict(lambda: {"calls": 0, "in": 0, "out": 0, "seconds": 0.0})
+
+    @contextmanager
+    def tagged(self, stage: str):
+        previous, self.stage = self.stage, stage
+        try:
+            yield self
+        finally:
+            self.stage = previous
+
+    def complete(self, prompt: str, system: str | None = None, json: bool = False) -&gt; str:
+        t0 = time.perf_counter()
+        out = self.llm.complete(prompt, system=system, json=json)
+        stage = self.stage
+        if stage == "unlabelled" or stage.startswith("query:"):
+            # Name the job from the prompt's marker (same trick MockLLM uses): extraction, report, map...
+            task = next((t for t, m in P.MARKERS.items() if m in f"{system or ''}\n{prompt}"), "other")
+            stage = task if stage == "unlabelled" else f"{stage}/{task}"
+        row = self.ledger[stage]
+        row["calls"] += 1
+        row["in"] += count_tokens(prompt) + count_tokens(system or "")
+        row["out"] += count_tokens(out)
+        row["seconds"] += time.perf_counter() - t0
+        return out
+
+    def cost(self, stage: str | None = None) -&gt; float:
+        p_in, p_out = PRICES[self.price_key]
+        rows = [self.ledger[stage]] if stage else self.ledger.values()
+        return sum(r["in"] * p_in + r["out"] * p_out for r in rows) / 1e6
+
+    def snapshot(self) -&gt; dict:
+        return {k: dict(v) for k, v in self.ledger.items()}</code></pre>
+    <pre data-file="capstone1/mgr_app/cost_report.py"><code class="language-python">"""Index a corpus through a metered LLM, run the question set, and write cost_report.md."""
+from __future__ import annotations
+
+import json
+import statistics
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+
+from minigraphrag.chunking import load_documents
+from minigraphrag.indexer import IndexConfig, build_index
+from minigraphrag.llm import CachedLLM, get_llm
+from minigraphrag.tokens import count_tokens
+
+from minigraphrag.evaluation import load_questions
+from .metering import MeteredLLM
+from .service import answer
+
+
+def pct(values, q):
+    values = sorted(values)
+    return values[min(len(values) - 1, int(q * len(values)))]
+
+
+def main(docs_dir: str, out_dir: str, llm_name: str = "mock", price_key: str = "mock"):
+    # Meter *inside* the cache: cache hits cost nothing, so the ledger shows real provider spend.
+    llm = MeteredLLM(get_llm(llm_name), price_key)
+    corpus_tokens = sum(count_tokens(t) for t in load_documents(docs_dir).values())
+    t0 = time.perf_counter()
+    index = build_index(docs_dir, out_dir, CachedLLM(llm, ".cache/llm"), config=IndexConfig())
+    index_seconds = time.perf_counter() - t0
+    index_ledger = llm.snapshot()
+    index_cost = llm.cost()
+
+    per_method = defaultdict(list)
+    for q in load_questions("data/questions.jsonl"):
+        for method in ("basic", "local", "global", "ppr", "hybrid", "auto"):
+            before = llm.cost()
+            r = answer(index, llm, q["question"], method)
+            per_method[method].append((llm.cost() - before, r["latency_ms"], r["llm_calls"]))
+
+    lines = [f"# Cost report ({llm.name}, prices: {price_key})", "",
+             f"Corpus: {corpus_tokens:,} tokens, {len(index.text_units)} text units. "
+             f"Indexing took {index_seconds:.1f}s and cost ${index_cost:.4f} "
+             f"(${1e6 * index_cost / max(corpus_tokens, 1):.2f} per million corpus tokens).", "",
+             "| indexing stage | calls | input tokens | output tokens |", "|---|---|---|---|"]
+    for stage, row in sorted(index_ledger.items(), key=lambda x: -x[1]["in"]):
+        lines.append(f"| {stage} | {row['calls']} | {row['in']:,} | {row['out']:,} |")
+    lines += ["", "| query method | mean $/query | p50 ms | p95 ms | LLM calls/query |", "|---|---|---|---|---|"]
+    for method, xs in per_method.items():
+        costs, lat, calls = zip(*xs)
+        lines.append(f"| {method} | {statistics.mean(costs):.5f} | {pct(lat, .5):.0f} | {pct(lat, .95):.0f} | "
+                     f"{statistics.mean(calls):.1f} |")
+    Path("cost_report.md").write_text("\n".join(lines))
+    Path("cost_ledger.json").write_text(json.dumps(llm.snapshot(), indent=1))
+    print("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main(*sys.argv[1:])</code></pre>
+    <p>Running it with MockLLM's outputs priced at the placeholder rates in <code>PRICES["gpt-4o-mini"]</code>:</p>
+    <pre><code class="language-bash">$ python -m mgr_app.cost_report data/corpus out2 mock gpt-4o-mini
+Corpus: 7,241 tokens, 24 text units. Indexing took 0.2s and cost $0.0241 ($3.33 per million corpus tokens).
+| indexing stage | calls | input tokens | output tokens |
+| continue | 24 | 26,503 | 2,738 |
+| summarize | 46 | 16,159 | 5,364 |
+| extraction | 24 | 16,007 | 9,541 |
+| claims | 24 | 12,647 | 1,599 |
+| report | 4 | 5,794 | 1,634 |</code></pre>
+    <p>The token counts are real counts of the prompts minigraphrag sends; only the outputs are fake. Even so, the shape is informative. Gleaning (<code>continue</code>) is the largest input consumer because each round resends the extraction prompt plus the first answer, the effect <a href="08-entity-relation-extraction.html">Chapter 8</a> warned about. Claims extraction is a third pass over every chunk; if no question in your set is temporal, <code>IndexConfig(extract_claims=False)</code> is the cheapest saving available. Check these conclusions against a real-model run before acting on them: real extraction outputs are longer and summaries run on more merged entities.</p>
+    <p>Projecting to a larger corpus: extraction, gleaning and claims scale linearly with the number of chunks; summarization scales with the number of entities and relationships that appear in more than one chunk; reports scale with communities. Estimate each from a 5% sample of your corpus rather than multiplying the Kestrel numbers.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Milestone C1.8 <span class="level">Your own corpus</span></h4>
+  <p>Kestrel was written to reward graphs. Your corpus was not. Repeat M1 to M7 on documents you choose: product docs, meeting notes, a public-domain book, a set of RFCs, or a wiki export.</p>
+  <ol>
+    <li>Convert sources to Markdown with stable, readable file names; those names become doc ids in every citation.</li>
+    <li>Choose entity types that match your questions and pass them in <code>IndexConfig(entity_types=[...])</code>.</li>
+    <li>Write at least 40 questions with gold answers and <code>supporting_docs</code>: 10 single-hop, 10 multi-hop, 10 global and 10 of a type that matters for your domain.</li>
+    <li>Index with a real LLM on a 10% sample first, read 20 random extracted relationships and fix the prompt before indexing everything.</li>
+    <li>Run the evaluation and cost report and write the final report.</li>
+  </ol>
+  <p><strong>Checkpoints</strong></p>
+  <ul>
+    <li>A spot-check of 20 relationships with a precision estimate (how many are supported by their source text).</li>
+    <li>The evaluation table for your corpus, with the router frozen before you wrote the questions.</li>
+    <li>A cost projection for ten times the corpus size.</li>
+  </ul>
+  <details class="answer">
+    <summary>Show reference solution</summary>
+    <pre data-file="capstone1/mgr_app/prepare_corpus.py"><code class="language-python">"""Milestone 8: turn .txt, .html and .md files into the Markdown folder build_index expects."""
+from __future__ import annotations
+
+import html
+import re
+import sys
+from pathlib import Path
+
+
+def html_to_text(raw: str) -&gt; str:
+    raw = re.sub(r"(?is)&lt;(script|style|nav|footer|header)\b.*?&lt;/\1&gt;", " ", raw)
+    raw = re.sub(r"(?i)&lt;h([1-3])[^&gt;]*&gt;", lambda m: "\n\n" + "#" * int(m.group(1)) + " ", raw)
+    raw = re.sub(r"(?i)&lt;/(p|div|li|h[1-6]|tr)&gt;|&lt;br\s*/?&gt;", "\n", raw)
+    text = html.unescape(re.sub(r"&lt;[^&gt;]+&gt;", " ", raw))
+    return re.sub(r"[ \t]+", " ", re.sub(r"\n\s*\n+", "\n\n", text)).strip()
+
+
+def prepare(src: str, dst: str, min_words: int = 50) -&gt; None:
+    out = Path(dst)
+    out.mkdir(parents=True, exist_ok=True)
+    kept = skipped = 0
+    for path in sorted(Path(src).rglob("*")):
+        if path.suffix.lower() not in {".md", ".txt", ".html", ".htm"}:
+            continue
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        text = html_to_text(raw) if path.suffix.lower() in {".html", ".htm"} else raw
+        if len(text.split()) &lt; min_words:
+            skipped += 1
+            continue
+        # The file stem becomes the doc_id used in every citation, so make it stable and readable.
+        stem = re.sub(r"[^a-z0-9]+", "_", str(path.relative_to(src).with_suffix("")).lower()).strip("_")
+        (out / f"{stem}.md").write_text(f"# {path.stem}\n\n{text}\n", encoding="utf-8")
+        kept += 1
+    print(f"wrote {kept} documents to {out} (skipped {skipped} shorter than {min_words} words)")
+
+
+if __name__ == "__main__":
+    prepare(*sys.argv[1:3])</code></pre>
+    <pre data-file="capstone1/run_my_corpus.sh"><code class="language-bash"># 1. Convert and sample
+python -m mgr_app.prepare_corpus ~/my-sources data/mine
+python -c "import random, shutil, pathlib as p; fs = sorted(p.Path('data/mine').glob('*.md')); d = p.Path('data/mine_sample'); d.mkdir(exist_ok=True); [shutil.copy(f, d) for f in random.Random(0).sample(fs, max(1, len(fs) // 10))]"
+
+# 2. Index the sample with a real model through the cache, then spot-check relationships
+python -m mgr_app.build data/mine_sample out_sample openai
+python - &lt;&lt;'PY'
+import json, random
+rels = json.load(open("out_sample/relationships.json"))
+for r in random.Random(0).sample(rels, min(20, len(rels))):
+    print(f"{r['source']} -- {r['target']}: {r['description'][:160]}  {r['source_ids'][:2]}")
+PY
+
+# 3. Full index, evaluation with a different judge model, cost report
+python -m mgr_app.build data/mine out_mine openai
+python -m mgr_app.evaluate out_mine openai anthropic     # generator openai, judge anthropic
+python -m mgr_app.cost_report data/mine out_mine_cost openai gpt-4o-mini</code></pre>
+    <p>The evaluator reads <code>data/questions.jsonl</code>; point it at your file (copy it there or add a path argument). For entity types, start from your 40 questions: underline every noun phrase a question asks about, group them, and keep five to eight types. A corpus of meeting notes might use PERSON, TEAM, PROJECT, DECISION, RISK, SYSTEM.</p>
+    <p>What to expect, and to report honestly: on corpora without many cross-document relationships, local and PPR search often tie with basic search on multi-hop questions, while global search still tends to win on themes and summaries. If that is what you find, the useful conclusion is a routing policy (basic by default, global for sensemaking), and the cost report tells you whether the index is worth building for global questions alone. A result where the graph does not help, measured carefully, passes this capstone.</p>
+  </details>
+</section>
+
+<h2>Evaluation rubric</h2>
+<table>
+  <thead><tr><th>Area</th><th>Weight</th><th>Meets expectations</th><th>Exceeds expectations</th></tr></thead>
+  <tbody>
+    <tr><td>Indexing</td><td>10%</td><td>Kestrel and own corpus indexed through a cache; artifacts inspected</td><td>Relationship precision spot-check with prompt changes justified by it</td></tr>
+    <tr><td>Retrieval service</td><td>15%</td><td>Five methods and <code>auto</code> behind <code>POST /query</code>; health endpoint</td><td>Dynamic global search and DRIFT added and evaluated</td></tr>
+    <tr><td>Streaming and citations</td><td>15%</td><td>SSE events in order; citations resolve to doc spans; tests pass</td><td>Real token streaming; unresolved-marker rate reported per method</td></tr>
+    <tr><td>Router</td><td>10%</td><td>Rules plus LLM fallback; accuracy on labelled questions</td><td>Accuracy on a held-out set written after freezing; cost-aware routing</td></tr>
+    <tr><td>Evaluation</td><td>25%</td><td>Recall, F1 and order-swapped win rates by type with intervals; separate judge model</td><td>30+ questions per type; answer length reported; judge calibrated against 20 human labels</td></tr>
+    <tr><td>Cost report</td><td>15%</td><td>Indexing by stage and per-query cost and latency by method</td><td>Projection to 10× corpus with a sample-based estimate; one cost reduction implemented and measured</td></tr>
+    <tr><td>Written report</td><td>10%</td><td>Claims match the numbers; limitations stated</td><td>A clear routing recommendation with its evidence and cost</td></tr>
+  </tbody>
+</table>
+
+<h2>Stretch goals</h2>
+<ul>
+  <li><strong>Real token streaming.</strong> Add a <code>stream()</code> method to an OpenAI-compatible client and stream the reduce step of global search.</li>
+  <li><strong>Cost-aware routing.</strong> Give the router a budget per request and fall back from <code>global</code> to <code>hybrid</code> when the estimated map calls exceed it; measure the quality lost.</li>
+  <li><strong>DRIFT and dynamic selection.</strong> Add <code>drift_search</code> and <code>global_search(dynamic=True)</code> as methods, and report how many map calls dynamic selection saves on your corpus.</li>
+  <li><strong>Incremental indexing.</strong> Add a document, rebuild through the cache, and report how many provider calls the rebuild needed compared with a cold build (the update pattern from <a href="27-incremental-temporal.html">Chapter 27</a>, applied to your own index).</li>
+  <li><strong>A small UI.</strong> A single HTML page that consumes the event stream and highlights cited spans in the source document.</li>
+  <li><strong>Judge calibration.</strong> Label 20 pairs yourself, measure agreement with the LLM judge, and report it next to the win rates.</li>
+</ul>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why does the reference put <code>MeteredLLM</code> inside <code>CachedLLM</code> rather than outside it?</p>
+  <ol>
+    <li>The cache needs token counts to build its keys</li>
+    <li data-correct>So the ledger counts only calls that reach the provider, which is what you pay for</li>
+    <li>So that cached responses are re-metered on every run for accuracy</li>
+    <li>MeteredLLM cannot wrap objects that have a <code>hits</code> attribute</li>
+  </ol>
+  <div class="explain">Wrapped outside the cache, the meter would count cache hits as spend, and a re-run would appear to cost as much as the first run.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Global search shows context recall 1.00 on global questions while basic search shows 0.37. What is the right conclusion?</p>
+  <ol>
+    <li>Global search is proven better on global questions</li>
+    <li>Basic search has a bug</li>
+    <li data-correct>Recall is inflated for global search because its sources include documents behind every community used, so judge the answers pairwise instead</li>
+    <li>Context recall should be replaced by exact match</li>
+  </ol>
+  <div class="explain">Retrieving nearly everything guarantees recall. For sensemaking questions, compare answers with order-swapped pairwise judging and report the interval.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">The router scores 22/23 on the labelled questions after its cue lists were extended based on its misses. Which number belongs in the report?</p>
+  <ol>
+    <li>22/23, because it is the latest measurement</li>
+    <li>The score from before the cue lists were extended</li>
+    <li>The average of the two</li>
+    <li data-correct>Accuracy on new questions written after the rules were frozen, alongside 22/23 labelled as a training score</li>
+  </ol>
+  <div class="explain">Rules tuned on the evaluation questions overfit them. Held-out accuracy estimates how the router will behave on real traffic.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In the stream, why does the <code>route</code> event come before generation even though the reference streams the finished answer in chunks?</p>
+  <ol>
+    <li>SSE requires the first event to be metadata</li>
+    <li data-correct>The router decides in milliseconds, so the client can show progress and the chosen method while slow retrieval and generation run</li>
+    <li>FastAPI sends events in alphabetical order</li>
+    <li>The route determines the HTTP status code</li>
+  </ol>
+  <div class="explain">Perceived latency depends on the time to first useful feedback. Route and sources arrive early; token events follow.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Why FastAPI with SSE instead of WebSockets?</summary>
+  <div><p>A question produces one stream of events in one direction, which is exactly what SSE is for. It is plain HTTP, works through most proxies, is trivial to test with <code>curl -N</code>, and browsers reconnect automatically with <code>EventSource</code>. Use WebSockets when the client needs to send messages mid-stream, for example to cancel or refine a query, as a chat agent might in <a href="c3-temporal-memory.html">Capstone 3</a>.</p></div>
+</details>
+
+<details class="qa">
+  <summary>The judge prefers global search on almost everything, including single-hop questions. Is the judge broken?</summary>
+  <div><p>Probably biased rather than broken. Comprehensiveness and diversity reward longer answers, and map-reduce produces longer answers. Check three things: that the order swap is on (inconsistent verdicts become ties), that both systems use the same <code>response_type</code>, and the mean answer length per method. If global still wins on single-hop questions on directness, look at the answers yourself; if it does not deserve to, calibrate the judge on 20 pairs you label by hand and report the agreement.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should the router use an LLM for every question?</summary>
+  <div><p>Not by default. A routing call adds latency and cost to every request, while rules decide most questions correctly for free. Use the LLM only when rules do not fire, and log how often that happens. If the fallback rate is high on real traffic, collect those questions and either add rules or train a small classifier on logged, labelled routes.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I serve an index that is rebuilt while the service is running?</summary>
+  <div><p>Build into a new directory, then switch atomically: point a symlink such as <code>out_current</code> at the new folder and have the service reload on a signal or when a version file changes. Never rebuild in place under a running service; <code>load_index</code> reads several files and a half-written folder produces inconsistent ids between entities and embeddings.</p></div>
+</details>
+
+<details class="qa">
+  <summary>My corpus is private. Can I still use a hosted model for the judge?</summary>
+  <div><p>The judge sees questions and answers, which contain your corpus's content, so the same data policy applies as for generation. If hosted models are not allowed, use a local model through <code>get_llm("ollama")</code> for both, pick the strongest local model you can run as the judge, and calibrate it against your own labels, since smaller judges are noisier.</p></div>
+</details>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Keep the service thin: minigraphrag's search functions do retrieval; your code routes, cites, streams and measures.</li>
+    <li>One <code>answer()</code> function used by the API, the evaluator and the cost report guarantees their numbers agree.</li>
+    <li>Citations must resolve to documents and spans, and unresolved markers are a measurable hallucination signal.</li>
+    <li>Evaluate by question type with order-swapped pairwise judging, intervals and a separate judge; context recall flatters global search.</li>
+    <li>Meter inside the cache and attribute tokens to stages; gleaning and claims are often the largest avoidable indexing costs.</li>
+    <li>An honest report that the graph does not help on your corpus, with numbers, is a successful capstone.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2405.14831">HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models</a>. <span class="venue">arXiv 2405.14831, 2024</span></li>
+  <li>Xiang et al. <a href="https://arxiv.org/abs/2506.05690">When to use Graphs in RAG: A Comprehensive Analysis for Graph Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2506.05690, 2025</span></li>
+  <li>Tang and Yang. <a href="https://arxiv.org/abs/2401.15391">MultiHop-RAG: Benchmarking Retrieval-Augmented Generation for Multi-Hop Queries</a>. <span class="venue">arXiv 2401.15391, 2024</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a> and <a href="https://microsoft.github.io/graphrag/">documentation</a>. <span class="venue">GitHub</span></li>
+  <li>FastAPI. <a href="https://fastapi.tiangolo.com/advanced/custom-response/#streamingresponse">StreamingResponse</a>. <span class="venue">FastAPI documentation</span></li>
+  <li>WHATWG. <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html">Server-sent events</a>. <span class="venue">HTML Living Standard</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

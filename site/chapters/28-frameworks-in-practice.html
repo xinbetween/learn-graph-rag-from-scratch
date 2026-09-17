@@ -1,0 +1,962 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frameworks in practice | Graph RAG from Scratch</title>
+<meta name="description" content="Run Microsoft GraphRAG, LightRAG, nano-graphrag, fast-graphrag, neo4j-graphrag, LlamaIndex PropertyGraphIndex, Graphiti and cognee on the Kestrel corpus, and map each one back to the pipeline you built.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="28-frameworks-in-practice" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Frameworks in practice</h1>
+  <p class="lede">You have built every stage of GraphRAG by hand, so a framework is no longer a black box: it is a bundle of choices you already understand. This chapter runs the main open-source frameworks on the Kestrel Labs corpus, shows where each choice lives in their configuration, and gives you a way to pick one and prove it works on your data.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Index and query the Kestrel corpus with the Microsoft GraphRAG CLI, including prompt tuning and the fast indexing method</li>
+      <li>Read a framework's configuration and map each setting to the <code>minigraphrag</code> module that does the same job</li>
+      <li>Write minimal working setups for LightRAG, nano-graphrag, fast-graphrag, neo4j-graphrag-python, LlamaIndex PropertyGraphIndex, Graphiti and cognee</li>
+      <li>Compare frameworks on extraction approach, retrieval modes, storage, incremental support and maturity</li>
+      <li>Choose a framework for a given workload and check the choice with the evaluation code from Chapter 25</li>
+    </ul>
+  </div>
+</header>
+
+<h2>A framework is a bundle of decisions you have already made</h2>
+<p>Every GraphRAG framework makes the same five decisions, and you have already made each of them yourself in Parts 2 to 4:</p>
+<ol>
+  <li><strong>How is the graph extracted?</strong> An LLM with a tuple or JSON prompt (<a href="08-entity-relation-extraction.html">Chapter 8</a>), a schema-constrained LLM, or classical NLP such as noun phrases and co-occurrence (<a href="26-cost-scaling.html">Chapter 26</a>).</li>
+  <li><strong>What is summarized ahead of time?</strong> Entity descriptions (<a href="09-entity-resolution.html">Chapter 9</a>), community reports (<a href="12-community-reports.html">Chapter 12</a>), or nothing at all.</li>
+  <li><strong>Where does it live?</strong> Files on disk (JSON, Parquet, GraphML), an embedded key-value and vector store, or a graph database such as Neo4j (<a href="13-storage-indexing.html">Chapter 13</a>).</li>
+  <li><strong>How is it searched?</strong> Entity-anchored local search, map-reduce global search, keyword dual-level retrieval, Personalized PageRank, Cypher, or a hybrid (Chapters 14 to 21).</li>
+  <li><strong>How does it change?</strong> Full rebuilds, append-only inserts, deletes by document, or bi-temporal invalidation (<a href="27-incremental-temporal.html">Chapter 27</a>).</li>
+</ol>
+<p>Seen as five answers, a framework becomes much easier to work with. You can read its configuration file and know which settings matter. You can predict its cost before running it, because you know which stages call an LLM. And when it gives a bad answer, you know which stage to open first: the extracted entities, the community reports, or the retrieved context.</p>
+
+<h3>The same pipeline under different names</h3>
+<p>Frameworks rename things. The table below translates between the modules you wrote and the vocabulary in each framework's docs and config files.</p>
+<table>
+  <thead><tr><th>Stage</th><th><code>minigraphrag</code></th><th>Microsoft GraphRAG</th><th>LightRAG / nano-graphrag</th><th>neo4j-graphrag / LlamaIndex</th></tr></thead>
+  <tbody>
+    <tr><td>Chunking</td><td><code>chunking.chunk_documents</code>, <code>TextUnit</code></td><td><code>chunking</code> (size, overlap); output table <code>text_units</code></td><td>chunk token size in the constructor; chunks keyed by content hash</td><td><code>text_splitter</code> / node parsers; <code>Chunk</code> nodes</td></tr>
+    <tr><td>Extraction</td><td><code>extraction.extract_from_unit</code> with <code>max_gleanings</code></td><td><code>extract_graph</code> (<code>entity_types</code>, <code>max_gleanings</code>, <code>prompt</code>) or <code>extract_graph_nlp</code></td><td>built-in entity and relation prompt with gleaning</td><td><code>SimpleKGPipeline</code> with <code>schema</code>; <code>kg_extractors</code></td></tr>
+    <tr><td>Resolution and merge</td><td><code>resolution.resolve_entities</code>, <code>graph_build.build_graph</code></td><td>merge on exact entity title, then <code>summarize_descriptions</code></td><td>name match, description merge and summary</td><td><code>perform_entity_resolution</code> (on by default in <code>SimpleKGPipeline</code>); store-level merges</td></tr>
+    <tr><td>Claims</td><td><code>extraction.extract_claims</code>, <code>Claim</code></td><td><code>extract_claims</code>; output table <code>covariates</code></td><td>none</td><td>none built in</td></tr>
+    <tr><td>Communities</td><td><code>communities.hierarchical_communities</code></td><td><code>cluster_graph</code> (<code>max_cluster_size</code>); table <code>communities</code></td><td>nano-graphrag: Leiden for global mode; LightRAG: none</td><td>none built in</td></tr>
+    <tr><td>Reports</td><td><code>reports.generate_all_reports</code>, <code>CommunityReport</code></td><td><code>community_reports</code>; table <code>community_reports</code></td><td>nano-graphrag: community reports</td><td>none built in</td></tr>
+    <tr><td>Storage</td><td><code>indexer.save_index</code> (JSON, GraphML, <code>.npz</code>), <code>VectorStore</code></td><td><code>output</code> (Parquet), <code>vector_store</code>, <code>cache</code></td><td><code>working_dir</code> plus pluggable KV, vector and graph stores</td><td>Neo4j or another property graph store</td></tr>
+    <tr><td>Search</td><td><code>search/local.py</code>, <code>global_.py</code>, <code>lightrag.py</code>, <code>ppr.py</code>, <code>text2cypher.py</code>, <code>hybrid.py</code></td><td><code>--method local|global|drift|basic</code></td><td><code>QueryParam(mode=...)</code></td><td>retrievers: vector, vector plus Cypher, Text2Cypher, hybrid, synonym</td></tr>
+    <tr><td>Evaluation</td><td><code>evaluation.run_eval</code>, <code>llm_judge_pairwise</code></td><td>not included</td><td>not included</td><td>not included</td></tr>
+  </tbody>
+</table>
+<p>Look at the last row. None of these frameworks evaluates itself on your questions. The evaluation code you wrote in <a href="25-evaluation.html">Chapter 25</a> is what turns “we tried LightRAG and it felt better” into a number.</p>
+
+<h2>Microsoft GraphRAG</h2>
+<p>Microsoft GraphRAG is the reference implementation of the <em>From Local to Global</em> paper. It has the most complete pipeline of the frameworks here: LLM extraction with gleaning, description summarization, optional claims, hierarchical Leiden communities, community reports, and four query methods. It is also the most expensive to index, which is why it also ships a cheaper indexing method that replaces LLM extraction with classical NLP.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Maintenance status and version drift</span>
+  <p>The project's README states that it “is largely in maintenance mode” and no longer accepts new features; it continues to receive bug fixes and dependency updates. Its configuration format has changed across releases, and the README advises running <code>graphrag init --root [path] --force</code> between minor version bumps to get the current config format. The key names below were checked against the documentation and the <code>init</code> template in September 2026. Treat them as a snapshot, and trust the file that <code>init</code> generates for your installed version over any blog post, this chapter included.</p>
+</div>
+
+<h3>The CLI workflow</h3>
+<p>The whole lifecycle takes five commands. Step through it once before running anything: prompt tuning and indexing both spend real money.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "Microsoft GraphRAG from empty folder to answers",
+  "subtitle": "The CLI workflow on the Kestrel corpus",
+  "perRow": 4,
+  "stages": [
+    {"label": "Install", "detail": "<code>python -m pip install graphrag</code> in a fresh virtual environment. The docs list Python 3.10 to 3.12."},
+    {"label": "init", "detail": "<code>graphrag init --root ./kestrel</code> writes <code>settings.yaml</code>, a <code>.env</code> file holding <code>GRAPHRAG_API_KEY</code>, and a <code>prompts/</code> folder with the default prompts. Create <code>input/</code> and copy the 12 Kestrel documents into it."},
+    {"label": "prompt-tune", "detail": "<code>graphrag prompt-tune --root ./kestrel --domain \"ocean technology startups\"</code> samples text units and writes tuned <code>extract_graph.txt</code>, <code>summarize_descriptions.txt</code> and <code>community_report.txt</code> into <code>prompts/</code>. Check that <code>settings.yaml</code> points at them."},
+    {"label": "index", "detail": "<code>graphrag index --root ./kestrel</code> runs the standard pipeline: chunk, extract, summarize, cluster, report, embed. <code>--method fast</code> replaces LLM extraction with noun phrases and co-occurrence."},
+    {"label": "Inspect outputs", "detail": "Parquet tables in <code>output/</code>: <code>documents</code>, <code>text_units</code>, <code>entities</code>, <code>relationships</code>, <code>communities</code>, <code>community_reports</code>, and <code>covariates</code> if claims are on. Read them before you query."},
+    {"label": "query", "detail": "<code>graphrag query \"Why did Kestrel Labs start Project Tern?\" --root ./kestrel --method local</code>. Methods: <code>local</code>, <code>global</code> (the default), <code>drift</code>, <code>basic</code>."},
+    {"label": "Evaluate", "detail": "Run the 23 questions in <code>code/data/questions.jsonl</code> through each method and score them with <code>run_eval</code> from <code>minigraphrag</code>. Slice by question type."},
+    {"label": "update", "detail": "New documents arrive: <code>graphrag update --root ./kestrel</code> (or <code>index --method standard-update</code>) merges them into the existing index instead of rebuilding from scratch."}
+  ]
+}
+</script>
+</div>
+
+<h3>Install, init and add the corpus</h3>
+<pre data-file="shell"><code class="language-bash">python -m venv .venv &amp;&amp; source .venv/bin/activate
+python -m pip install graphrag
+
+graphrag init --root ./kestrel          # settings.yaml, .env, prompts/
+mkdir -p ./kestrel/input
+
+# GraphRAG's default text input reads .txt files, so copy the Markdown corpus with a .txt suffix.
+for f in code/data/corpus/*.md; do
+  cp "$f" "./kestrel/input/$(basename "$f" .md).txt"
+done
+
+echo "GRAPHRAG_API_KEY=sk-..." &gt; ./kestrel/.env</code></pre>
+<p>The documentation says the default file pattern is derived from the input <code>type</code> (for <code>text</code>, files ending in <code>.txt</code>). Copying with a <code>.txt</code> suffix keeps you on that default. If you would rather keep <code>.md</code>, set <code>file_pattern</code> in the <code>input</code> section; that key has moved between releases, so check the reference for your version.</p>
+
+<h3>settings.yaml: the knobs that matter</h3>
+<p>The generated file is long, and almost all of it can stay at its defaults for a first run. These are the sections that correspond to decisions you made in earlier chapters, with values that suit the Kestrel corpus:</p>
+
+<pre data-file="kestrel/settings.yaml"><code class="language-yaml"># Model connections. Names under completion_models / embedding_models are
+# referenced elsewhere in the file; keep the ones init generated.
+completion_models:
+  default_completion_model:         # use the id init generated
+    model_provider: openai
+    model: gpt-4.1                  # the extraction model drives most of the cost
+    auth_method: api_key
+    api_key: ${GRAPHRAG_API_KEY}
+
+embedding_models:
+  default_embedding_model:          # use the id init generated
+    model_provider: openai
+    model: text-embedding-3-large
+    auth_method: api_key
+    api_key: ${GRAPHRAG_API_KEY}
+
+chunking:                           # Chapter 7: minigraphrag IndexConfig.chunk_size / chunk_overlap
+  size: 600                         # tokens per text unit
+  overlap: 100
+
+extract_graph:                      # Chapter 8: extract_from_unit(..., max_gleanings)
+  entity_types: [organization, person, project, location, event, law]
+  max_gleanings: 1
+  prompt: "prompts/extract_graph.txt"
+
+summarize_descriptions:             # Chapter 9: graph_build.summarize_descriptions
+  prompt: "prompts/summarize_descriptions.txt"
+
+extract_claims:                     # Chapter 10: extract_claims; off by default, adds a call per text unit
+  enabled: true
+  prompt: "prompts/extract_claims.txt"
+
+cluster_graph:                      # Chapter 11: hierarchical_communities(G, max_cluster_size)
+  max_cluster_size: 10
+
+community_reports:                  # Chapter 12: generate_all_reports
+  graph_prompt: "prompts/community_report_graph.txt"   # reports built from entities and relationships
+  text_prompt: "prompts/community_report_text.txt"     # reports built from raw text (fast method)
+
+cache:                              # Chapter 26: same idea as minigraphrag CachedLLM
+  # keep the generated file-based cache; re-runs after a crash reuse finished calls</code></pre>
+
+<p>The current template has two community report prompts, <code>graph_prompt</code> and <code>text_prompt</code>, while <code>prompt-tune</code> writes a single <code>community_report.txt</code>. If you tune prompts, point <code>graph_prompt</code> at the tuned file for the standard method; the pairing has changed between releases, so confirm it in the configuration reference.</p>
+<p>The <code>local_search</code>, <code>global_search</code>, <code>drift_search</code> and <code>basic_search</code> sections hold the query-time prompts and budgets: how many tokens go to entities, relationships, text units and community reports. That is the proportional split you implemented in <code>build_local_context</code> with its <code>community_prop</code> and <code>text_unit_prop</code> arguments. Leave these at their defaults until an evaluation shows a context that is starved or flooded.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Why the chunk size above is 600 tokens</span>
+  <p>The GraphRAG paper measured this on HotPotQA: with 600-token chunks, extraction found almost twice as many entity references as with 2,400-token chunks, at the price of roughly four times as many extraction calls (2,400 ÷ 600). On Kestrel the setting matters less than it looks. Each document is 395 to 492 words, roughly 530 to 660 tokens by the course's four-tokens-per-three-words estimate, so 600-token units give one or two text units per document. On a corpus of 30-page reports the same setting decides whether the extractor sees a page or a chapter at a time. It is the same calls-for-recall trade-off you measured for gleaning in Exercise 8.3.</p>
+</div>
+
+<h3>Prompt tuning</h3>
+<p>The default extraction prompt was written for general text. Auto prompt tuning samples your corpus and asks an LLM to write domain-specific prompts: a persona, entity types if you enable discovery, and few-shot examples drawn from your own text units.</p>
+<pre data-file="shell"><code class="language-bash">graphrag prompt-tune --root ./kestrel \
+  --domain "ocean technology startups, reef science and investors" \
+  --selection-method random --limit 15 \
+  --discover-entity-types \
+  --output prompts
+# writes prompts/extract_graph.txt, prompts/summarize_descriptions.txt, prompts/community_report.txt</code></pre>
+<p>Read the generated <code>extract_graph.txt</code> before you index with it. A tuned prompt is a first draft. On a small corpus the discovered types can be too fine (<code>SONAR_SUPPLIER</code>, <code>VENTURE_FIRM</code>), which fragments the graph the same way type drift does. For Kestrel, a reasonable edit is to replace the discovered list with the six canonical types and keep the generated examples. Check the result on your evaluation questions rather than assuming either version is better.</p>
+
+<h3>Index: standard or fast</h3>
+<pre data-file="shell"><code class="language-bash">graphrag index --root ./kestrel --dry-run      # validate the config without running steps
+graphrag index --root ./kestrel                # --method standard is the default
+graphrag index --root ./kestrel --method fast  # NLP extraction; LLM only for community reports
+graphrag update --root ./kestrel               # later: merge new documents into the existing index</code></pre>
+<p>The two methods differ in graph extraction, which is the expensive stage. The documentation describes FastGraphRAG entities as noun phrases “extracted using NLP libraries such as NLTK and spaCy”, and its relationships as text-unit co-occurrence between entity pairs, with no descriptions on either. Community reports are still written by the LLM, but from raw text rather than from entity and relationship descriptions. The same page estimates graph extraction at roughly 75% of indexing cost and warns that the fast graph “tends to be quite a bit noisier”. Its recommendation matches Chapters 14 and 15: use the standard method when high-fidelity entities and graph exploration matter, and the fast method when most questions are summary questions answered by global search.</p>
+
+<h3>What the index contains</h3>
+<p>The output folder is a set of Parquet tables. Every table has an <code>id</code> (a UUID) and a <code>human_readable_id</code> (a short per-run counter). The other key columns map onto the artifacts that <code>save_index</code> in <code>minigraphrag</code> writes.</p>
+<table>
+  <thead><tr><th>GraphRAG table</th><th>Key columns</th><th><code>minigraphrag</code> artifact</th></tr></thead>
+  <tbody>
+    <tr><td><code>documents</code></td><td>title, text, text_unit_ids</td><td>the input folder (doc ids are file stems)</td></tr>
+    <tr><td><code>text_units</code></td><td>text, n_tokens, document_id, entity_ids, relationship_ids</td><td><code>text_units.json</code></td></tr>
+    <tr><td><code>entities</code></td><td>title, type, description, text_unit_ids, frequency, degree</td><td><code>entities.json</code> (name, type, description, source_ids, frequency)</td></tr>
+    <tr><td><code>relationships</code></td><td>source, target, description, weight, combined_degree, text_unit_ids</td><td><code>relationships.json</code></td></tr>
+    <tr><td><code>communities</code></td><td>community, parent, children, level, title, entity_ids, relationship_ids, text_unit_ids</td><td><code>communities.json</code></td></tr>
+    <tr><td><code>community_reports</code></td><td>community, level, title, summary, full_content, rank, findings</td><td><code>community_reports.json</code></td></tr>
+    <tr><td><code>covariates</code></td><td>subject_id, object_id, type, description, status, start_date, end_date, text_unit_id</td><td><code>claims.json</code></td></tr>
+  </tbody>
+</table>
+<p>Older releases prefixed these files with <code>create_final_</code>, so adjust the paths below if yours do. After indexing, look at the tables before you ask a single question:</p>
+<pre data-file="inspect_graphrag.py"><code class="language-python">import pandas as pd
+
+out = "kestrel/output"
+entities = pd.read_parquet(f"{out}/entities.parquet")
+rels = pd.read_parquet(f"{out}/relationships.parquet")
+reports = pd.read_parquet(f"{out}/community_reports.parquet")
+
+print(len(entities), "entities;", len(rels), "relationships;", len(reports), "reports")
+print(entities["type"].value_counts())                    # type drift shows up here
+print(entities.sort_values("degree", ascending=False)[["title", "type", "degree"]].head(10))
+
+# Did resolution merge the aliases? Look for fragments of canonical names.
+for alias in ["SENTINEL", "TERN", "OKAFOR", "TIDEWATER", "TWI"]:
+    print(alias, entities[entities["title"].str.contains(alias, case=False)]["title"].tolist())
+
+# Is the CTO change in the graph at all?
+mask = rels["description"].str.contains("CTO|chief technology", case=False)
+print(rels[mask][["source", "target", "description"]].to_string()[:1500])
+
+for _, r in reports.sort_values("level").iterrows():
+    print(r["level"], r["community"], r["title"])</code></pre>
+<p>On Kestrel you are looking for the failure modes from <a href="09-entity-resolution.html">Chapter 9</a>: “PROJECT SENTINEL” and “SENTINEL” as separate entities (Microsoft GraphRAG merges on exact title, so aliases survive unless the prompt normalizes them), “TWI” left unmerged, and community titles that do not resemble the five expected communities in the running example.</p>
+
+<h3>Query methods</h3>
+<pre data-file="shell"><code class="language-bash">R=./kestrel
+graphrag query "Why did Kestrel Labs start Project Tern?"          --root $R --method local
+graphrag query "What are the main themes in this corpus?"          --root $R --method global
+graphrag query "What risks does Kestrel Labs face?"                --root $R --method drift
+graphrag query "Who is the CTO of Kestrel Labs?"                   --root $R --method basic
+graphrag query "What are the main themes in this corpus?"          --root $R --method global \
+  --community-level 1 --response-type "a bulleted list of at most five themes"</code></pre>
+<p>In the current CLI the question is a positional argument and <code>--method</code> defaults to <code>global</code>; some older releases took the question as <code>--query "..."</code>. <code>--community-level</code> (default 2) picks the level of the Leiden hierarchy whose reports global search maps over; a higher number means smaller, more specific communities. <code>--response-type</code> (default “Multiple Paragraphs”) is inserted into the answer prompt, the job <code>response_type</code> does in <code>generate_answer</code> (<code>search/common.py</code>). There is also <code>--dynamic-community-selection</code>, the top-down rating you built as <code>dynamic_community_selection</code> in <a href="15-global-search.html">Chapter 15</a>.</p>
+<table>
+  <thead><tr><th>GraphRAG method</th><th>What it does</th><th>Your implementation</th><th>Best Kestrel question</th></tr></thead>
+  <tbody>
+    <tr><td><code>local</code></td><td>Entity-anchored context: matched entities, neighbors, relationships, text units, related community reports</td><td><code>search.local.local_search</code></td><td>Q1, Q3: multi-hop around named entities</td></tr>
+    <tr><td><code>global</code></td><td>Map-reduce over community reports at one level</td><td><code>search.global_.global_search</code></td><td>Q4: main themes</td></tr>
+    <tr><td><code>drift</code></td><td>Starts from community reports, generates follow-up questions, answers them with local search</td><td><code>search.global_.drift_search</code></td><td>Q5: risks, which needs both breadth and specifics</td></tr>
+    <tr><td><code>basic</code></td><td>Plain vector RAG over text units</td><td><code>search.basic.basic_search</code></td><td>Single-hop lookups such as Q10; also your baseline</td></tr>
+  </tbody>
+</table>
+<p>Microsoft GraphRAG has no temporal query. “Who is the CTO of Kestrel Labs?” comes out right only if the text unit from the 2026 interview reaches the context and the model reads it correctly; nothing in the index marks Jonas Vehl's CTO edge as ended. Claims carry start and end dates, but no query method filters on them. Graphiti, later in this chapter, is built around exactly that gap.</p>
+
+<h2>Lightweight libraries: nano-graphrag, LightRAG and fast-graphrag</h2>
+<p>These three are Python libraries you embed in an application rather than a CLI pipeline you operate. All three keep state in a working directory by default, insert text with one call, and query with one call. They differ in what they precompute and how they search.</p>
+
+<h3>nano-graphrag: GraphRAG you can read in an afternoon</h3>
+<p>nano-graphrag reimplements the core of Microsoft GraphRAG in about 1,100 lines of code, by its README's count, excluding tests and prompts. It keeps extraction, community detection and community reports, and supports local and global search. Its appeal is the same as <code>minigraphrag</code>'s: you can read all of it. It keys each chunk by the MD5 hash of its content, so inserting the same text twice does not create duplicate chunks.</p>
+<pre data-file="frameworks/nano_kestrel.py"><code class="language-python">from pathlib import Path
+from nano_graphrag import GraphRAG, QueryParam
+
+docs = [p.read_text() for p in sorted(Path("code/data/corpus").glob("*.md"))]
+
+rag = GraphRAG(working_dir="./nano_kestrel")   # OpenAI by default; LLM, embedder and stores are swappable
+rag.insert(docs)                                 # extraction, clustering and reports run here
+
+print(rag.query("Why did Kestrel Labs start Project Tern?", param=QueryParam(mode="local")))
+print(rag.query("What are the main themes in this corpus?", param=QueryParam(mode="global")))</code></pre>
+<p>Async variants (<code>ainsert</code>, <code>aquery</code>) exist for every call, and the README documents swapping the vector store (the default nano-vectordb, or hnswlib, faiss and milvus-lite) and the graph store (the default NetworkX, or Neo4j). If you want to change one stage of the GraphRAG algorithm and run it on real data, forking nano-graphrag is often faster than configuring the Microsoft pipeline.</p>
+
+<h3>LightRAG: dual-level keywords and cheap inserts</h3>
+<p>LightRAG (<a href="16-lightrag.html">Chapter 16</a>) skips communities and reports. At index time it extracts entities and relationships and writes a key-value profile for each. At query time an LLM splits the question into low-level keywords (entities such as “Project Tern”) and high-level keywords (themes such as “supplier loss”), and matches them against entity and relationship embeddings. With no community reports to regenerate, inserting a new document means merging its nodes and edges into the existing graph.</p>
+<pre data-file="frameworks/lightrag_kestrel.py"><code class="language-python">import asyncio
+from pathlib import Path
+
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+
+QUESTIONS = [
+    ("Why did Kestrel Labs start Project Tern?", "local"),
+    ("What are the main themes in this corpus?", "global"),
+    ("What connects Priya Nair to Deepcast?", "hybrid"),
+    ("Who is the CTO of Kestrel Labs?", "mix"),
+]
+
+async def main():
+    rag = LightRAG(
+        working_dir="./lightrag_kestrel",
+        embedding_func=openai_embed,
+        llm_model_func=gpt_4o_mini_complete,
+    )
+    await rag.initialize_storages()   # required; recent releases also set up pipeline status here
+
+    for path in sorted(Path("code/data/corpus").glob("*.md")):
+        await rag.ainsert(path.read_text())
+
+    for question, mode in QUESTIONS:
+        answer = await rag.aquery(question, param=QueryParam(mode=mode))
+        print(f"[{mode}] {question}\n{answer}\n")
+
+    await rag.finalize_storages()
+
+asyncio.run(main())</code></pre>
+<table>
+  <thead><tr><th>LightRAG mode</th><th>Retrieves</th><th>Equivalent in <code>minigraphrag</code></th></tr></thead>
+  <tbody>
+    <tr><td><code>naive</code></td><td>Chunks by vector similarity, no graph</td><td><code>basic_search</code></td></tr>
+    <tr><td><code>local</code></td><td>Entities matched by low-level keywords, plus their edges and chunks</td><td><code>lightrag_search(..., mode="local")</code></td></tr>
+    <tr><td><code>global</code></td><td>Relationships matched by high-level keywords, plus their endpoints</td><td><code>lightrag_search(..., mode="global")</code></td></tr>
+    <tr><td><code>hybrid</code></td><td>Local and global combined</td><td><code>lightrag_search(..., mode="hybrid")</code> (the default there)</td></tr>
+    <tr><td><code>mix</code></td><td>Local and global graph results plus vector-retrieved chunks; the default mode, and the one the README recommends</td><td>closest: <code>hybrid_search</code> fusing graph and vector lists</td></tr>
+  </tbody>
+</table>
+<p>LightRAG's “global” and Microsoft GraphRAG's global are different algorithms with the same name. LightRAG retrieves relationships whose descriptions match abstract keywords and never reads a summary of the whole corpus. For Q4 (“main themes”) it tends to return the themes touched by the best-matching edges rather than a balanced survey. Keep the collision in mind when you read benchmark comparisons that put the two side by side.</p>
+<p>For operations, LightRAG can delete a document with <code>adelete_by_doc_id</code>; the README says affected entities and relationships are rebuilt from the LLM cache written during indexing rather than extracted again. It also ships <code>lightrag-server</code>, a REST API with a web UI, and storage backends including PostgreSQL (the README's recommendation for production), Neo4j and MongoDB. Plan for one constraint up front: indexing and querying must use the same embedding model, so switching embedders means re-embedding everything.</p>
+
+<h3>fast-graphrag: PageRank instead of reports</h3>
+<p>Circlemind's fast-graphrag (not to be confused with FastGraphRAG, the indexing method inside Microsoft GraphRAG) builds an LLM-extracted graph guided by a domain description and example queries, and retrieves with Personalized PageRank from query-matched entities: HippoRAG's idea from <a href="17-ppr-hipporag.html">Chapter 17</a>, packaged. There are no community reports, so inserts are incremental.</p>
+<pre data-file="frameworks/fast_graphrag_kestrel.py"><code class="language-python">from pathlib import Path
+from fast_graphrag import GraphRAG
+
+DOMAIN = ("Analyze this corpus about an ocean-technology startup. Identify the companies, people, "
+          "projects, investors and regulations, and how supply, funding and leadership changed over time.")
+EXAMPLE_QUERIES = "\n".join([
+    "Why did Kestrel Labs start Project Tern?",
+    "Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?",
+    "What connects Priya Nair to Deepcast?",
+])
+ENTITY_TYPES = ["Organization", "Person", "Project", "Location", "Event", "Law"]
+
+grag = GraphRAG(working_dir="./fast_kestrel", domain=DOMAIN,
+                example_queries=EXAMPLE_QUERIES, entity_types=ENTITY_TYPES)
+
+for path in sorted(Path("code/data/corpus").glob("*.md")):
+    grag.insert(path.read_text())
+
+print(grag.query("Why did Kestrel Labs start Project Tern?").response)</code></pre>
+<p>The example queries do real work. They steer extraction toward the relations those questions need, a lightweight version of the schema design you did in <a href="05-knowledge-graphs.html">Chapter 5</a>. The README reports indexing <em>The Wizard of Oz</em> for $0.08 against $0.48 with Microsoft GraphRAG, a sixfold saving. That is the authors' measurement on one book with their settings; measure on your own corpus before relying on it.</p>
+
+<p>The three libraries retrieve different shapes from the same graph. Step through one Kestrel question to see the difference.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "One question, three retrieval shapes",
+  "subtitle": "Why did Kestrel Labs start Project Tern?",
+  "height": 400,
+  "directed": false,
+  "scoreDigits": 3,
+  "nodes": [
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 50, "y": 44},
+    {"id": "okafor", "label": "Mira Okafor", "group": 2, "x": 36, "y": 11},
+    {"id": "vehl", "label": "Jonas Vehl", "group": 2, "x": 12, "y": 28},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 20, "y": 62},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 40, "y": 80},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 64, "y": 88},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 74, "y": 64},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 86, "y": 40},
+    {"id": "brightwater", "label": "Brightwater Capital", "group": 1, "x": 66, "y": 11},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 90, "y": 16},
+    {"id": "tidewater", "label": "Tidewater Institute", "group": 1, "x": 88, "y": 88}
+  ],
+  "edges": [
+    {"source": "okafor", "target": "kestrel", "label": "CEO of"},
+    {"source": "vehl", "target": "kestrel", "label": "co-founded"},
+    {"source": "priya", "target": "kestrel", "label": "CTO of"},
+    {"source": "kestrel", "target": "tern", "label": "runs"},
+    {"source": "priya", "target": "tern", "label": "co-leads"},
+    {"source": "vehl", "target": "tern", "label": "co-leads"},
+    {"source": "kestrel", "target": "sentinel", "label": "runs"},
+    {"source": "tern", "target": "deepcast", "label": "replaces sonar"},
+    {"source": "deepcast", "target": "kestrel", "label": "supplied"},
+    {"source": "marlow", "target": "deepcast", "label": "acquired"},
+    {"source": "marlow", "target": "kestrel", "label": "competes"},
+    {"source": "brightwater", "target": "kestrel", "label": "invested"},
+    {"source": "lena", "target": "brightwater", "label": "partner at"},
+    {"source": "lena", "target": "kestrel", "label": "board"},
+    {"source": "tidewater", "target": "sentinel", "label": "partners on"},
+    {"source": "priya", "target": "marlow", "label": "formerly at"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project"},
+  "steps": [
+    {"caption": "A slice of the Kestrel graph that each of these libraries would build, give or take alias noise. The question names two entities and asks for a cause that sits two hops away."},
+    {"caption": "<strong>LightRAG local mode.</strong> Low-level keywords <span class=\"viz-chip node\">Kestrel Labs</span> <span class=\"viz-chip node\">Project Tern</span> match entity embeddings. Their one-hop edges and source chunks fill the context. The acquisition edge is <em>not</em> included: neither Marlow Dynamics nor Deepcast was a seed, so the context shows that Marlow competes with Kestrel but not that it bought Deepcast.", "active": ["kestrel", "tern"], "visited": ["okafor", "vehl", "priya", "sentinel", "deepcast", "marlow", "brightwater", "lena"], "edges": ["kestrel>tern", "tern>deepcast"], "visitedEdges": ["okafor>kestrel", "vehl>kestrel", "priya>kestrel", "priya>tern", "vehl>tern", "kestrel>sentinel", "deepcast>kestrel", "marlow>kestrel", "brightwater>kestrel", "lena>kestrel"]},
+    {"caption": "<strong>LightRAG global mode.</strong> High-level keywords such as <span class=\"viz-chip edge\">supplier loss</span> and <span class=\"viz-chip edge\">in-house sonar</span> match <em>relationship</em> descriptions. The supply, acquisition and replacement edges come back with their endpoints, which is exactly the causal chain the answer needs.", "active": ["deepcast", "marlow", "tern"], "visited": ["kestrel"], "edges": ["marlow>deepcast", "deepcast>kestrel", "tern>deepcast"], "visitedEdges": []},
+    {"caption": "<strong>fast-graphrag (Personalized PageRank).</strong> Seeds are the query-matched entities; here Project Tern and Deepcast share the restart mass. Scores are real PPR values on this 11-node graph with α = 0.85 (computed with <code>personalized_pagerank</code> from <code>minigraphrag</code>). Kestrel Labs outranks the seeds because it is the hub; Marlow Dynamics ranks fourth without being named in the question.", "active": ["kestrel", "tern", "deepcast"], "visited": ["marlow", "priya", "vehl"], "scores": {"kestrel": 0.236, "tern": 0.198, "deepcast": 0.166, "marlow": 0.095, "priya": 0.091, "vehl": 0.064, "brightwater": 0.039, "lena": 0.039, "sentinel": 0.035, "okafor": 0.022, "tidewater": 0.015}, "edges": ["tern>deepcast", "marlow>deepcast"], "visitedEdges": ["kestrel>tern", "deepcast>kestrel"]},
+    {"caption": "<strong>neo4j-graphrag VectorCypherRetriever.</strong> A vector search hits the chunk announcing Project Tern; a Cypher <code>retrieval_query</code> then walks from the entities in that chunk up to two hops. You write the traversal, so you decide that the path Tern, Deepcast, Marlow Dynamics is what comes back.", "active": ["tern", "deepcast", "marlow"], "visited": ["kestrel"], "edges": ["tern>deepcast", "marlow>deepcast"], "visitedEdges": ["kestrel>tern"]}
+  ]
+}
+</script>
+</div>
+
+<h2>Graph-database-first: neo4j-graphrag-python and LlamaIndex PropertyGraphIndex</h2>
+<p>The previous libraries own their storage. The next two assume the graph lives in a database you query directly, usually Neo4j. You gain a schema you control, Cypher for precise questions (<a href="20-text2cypher.html">Chapter 20</a>), transactions and access control, and a graph other applications can read. You lose precomputed summaries: neither ships community detection or community reports, so neither has a built-in answer to “What are the main themes?”.</p>
+
+<h3>neo4j-graphrag-python: a KG builder and a set of retrievers</h3>
+<p>Neo4j's package has two halves. <code>SimpleKGPipeline</code> chunks text, runs schema-guided LLM extraction, resolves entities (on by default), and writes both a lexical graph and a domain graph into Neo4j. The lexical graph holds <code>Document</code> and <code>Chunk</code> nodes linked by <code>FROM_DOCUMENT</code> and <code>NEXT_CHUNK</code>; the domain graph holds entities labeled <code>__Entity__</code>, each linked to its chunk by <code>FROM_CHUNK</code>. The retrievers then query both. The schema is where your Chapter 5 design pays off: patterns say which relationship types may connect which node types, which discourages the extractor from inventing “Deepcast CEO_OF Halden Reef”. Patterns are guidance unless you also set <code>enforce_schema</code>, whose options vary by version.</p>
+<pre data-file="frameworks/neo4j_kg_build.py"><code class="language-python">import asyncio
+from pathlib import Path
+
+from neo4j import GraphDatabase
+from neo4j_graphrag.embeddings.openai import OpenAIEmbeddings
+from neo4j_graphrag.experimental.pipeline.kg_builder import SimpleKGPipeline
+from neo4j_graphrag.indexes import create_vector_index
+from neo4j_graphrag.llm import OpenAILLM
+
+driver = GraphDatabase.driver("neo4j://localhost:7687", auth=("neo4j", "password"))
+llm = OpenAILLM(model_name="gpt-4o", model_params={"temperature": 0,
+                                                    "response_format": {"type": "json_object"}})
+embedder = OpenAIEmbeddings(model="text-embedding-3-large")
+
+node_types = ["Organization", "Person", "Project", "Location", "Event", "Law"]
+relationship_types = ["CO_FOUNDED", "CEO_OF", "CTO_OF", "FORMERLY_WORKED_AT", "DIRECTS", "RUNS",
+                      "PARTNERS_ON", "LEADS", "CO_LEADS", "MONITORS", "DETECTED", "OCCURRED_AT",
+                      "INVESTED_IN", "PARTNER_AT", "BOARD_MEMBER_OF", "SUPPLIED", "ACQUIRED",
+                      "COMPETES_WITH", "REPLACES", "REQUIRES", "CONTRACTED", "LOCATED_IN"]
+patterns = [
+    ("Person", "CEO_OF", "Organization"), ("Person", "CTO_OF", "Organization"),
+    ("Person", "CO_FOUNDED", "Organization"), ("Person", "FORMERLY_WORKED_AT", "Organization"),
+    ("Organization", "RUNS", "Project"), ("Person", "CO_LEADS", "Project"),
+    ("Organization", "SUPPLIED", "Organization"), ("Organization", "ACQUIRED", "Organization"),
+    ("Project", "REPLACES", "Organization"), ("Project", "DETECTED", "Event"),
+    ("Organization", "INVESTED_IN", "Organization"), ("Person", "BOARD_MEMBER_OF", "Organization"),
+    ("Organization", "CONTRACTED", "Organization"), ("Law", "REQUIRES", "Project"),
+]
+
+kg_builder = SimpleKGPipeline(
+    llm=llm, driver=driver, embedder=embedder,
+    schema={"node_types": node_types, "relationship_types": relationship_types, "patterns": patterns},
+    from_file=False,
+    on_error="IGNORE",
+)
+
+async def build():
+    for path in sorted(Path("code/data/corpus").glob("*.md")):
+        await kg_builder.run_async(text=path.read_text())
+
+asyncio.run(build())
+
+# One vector index over chunk embeddings (the builder stores them in the "embedding" property);
+# 3072 dimensions for text-embedding-3-large.
+create_vector_index(driver, "kestrel_chunks", label="Chunk", embedding_property="embedding",
+                    dimensions=3072, similarity_fn="cosine")</code></pre>
+
+<p>Now query. <code>VectorCypherRetriever</code> does most of the work: it runs a vector search, then executes your Cypher with the matched <code>node</code> and its <code>score</code> in scope. That is local search (<a href="14-local-search.html">Chapter 14</a>) with an expansion you write yourself.</p>
+<pre data-file="frameworks/neo4j_query.py"><code class="language-python">from neo4j_graphrag.generation import GraphRAG
+from neo4j_graphrag.retrievers import VectorCypherRetriever, Text2CypherRetriever
+
+# From each matched chunk, collect the entities it mentions and their typed neighbors.
+# Labels and relationship types follow the builder's default lexical graph configuration;
+# check yours with CALL db.schema.visualization() before relying on them.
+retrieval_query = """
+MATCH (node)&lt;-[:FROM_CHUNK]-(e:__Entity__)
+OPTIONAL MATCH (e)-[r]-(nbr:__Entity__)
+WHERE type(r) &lt;&gt; 'FROM_CHUNK'
+RETURN node.text AS chunk, score,
+       collect(DISTINCT e.name + ' ' + type(r) + ' ' + nbr.name)[..30] AS facts
+"""
+
+vc_retriever = VectorCypherRetriever(driver, index_name="kestrel_chunks",
+                                     retrieval_query=retrieval_query, embedder=embedder)
+rag = GraphRAG(retriever=vc_retriever, llm=llm)
+result = rag.search(query_text="Why did Kestrel Labs start Project Tern?",
+                    retriever_config={"top_k": 5}, return_context=True)
+print(result.answer)
+for item in result.retriever_result.items:     # the context, for citations and evaluation
+    print(item.content[:200], item.metadata)
+
+# Precise, structured questions go to Text2Cypher (Chapter 20: validate before you run it).
+t2c = Text2CypherRetriever(driver=driver, llm=llm, examples=[
+    "USER INPUT: 'Who is the CEO of Kestrel Labs?' QUERY: "
+    "MATCH (p:Person)-[:CEO_OF]-&gt;(o:Organization {name: 'Kestrel Labs'}) RETURN p.name",
+])
+print(GraphRAG(retriever=t2c, llm=llm).search(query_text="Which organization acquired Deepcast?").answer)</code></pre>
+<p>The package also provides <code>VectorRetriever</code> (vector search only, your <code>basic_search</code>), <code>HybridRetriever</code>, which queries a vector index and a full-text index together, much like the keyword-plus-vector fusion of <a href="21-hybrid-design-patterns.html">Chapter 21</a>, and <code>HybridCypherRetriever</code>, which adds a Cypher expansion on top. Recent releases also include a <code>ToolsRetriever</code> that lets an LLM choose among several retrievers, a small step toward the agents of <a href="30-agentic-graphrag.html">Chapter 30</a>.</p>
+
+<div class="callout warn">
+  <span class="callout-title">A schema does not model time</span>
+  <p>With the schema above, the 2021 founding article and the 2026 interview both produce a <code>CTO_OF</code> edge into Kestrel Labs, one from Jonas Vehl and one from Priya Nair. Neither edge carries dates unless you add properties and extract them. Text2Cypher will answer “Who is the CTO?” with both names. Either add <code>valid_from</code>/<code>valid_to</code> properties and a prompt that fills them, or use a temporal store.</p>
+</div>
+
+<h3>LlamaIndex PropertyGraphIndex: composable extractors and retrievers</h3>
+<p>If your application already uses LlamaIndex, <code>PropertyGraphIndex</code> gives you the same two halves inside that framework. Graph construction is a list of <code>kg_extractors</code> applied to every chunk; retrieval is a list of <code>sub_retrievers</code> whose results are merged. The default extractors are <code>SimpleLLMPathExtractor</code> (free-form single-hop triples) and <code>ImplicitPathExtractor</code> (links already recorded on LlamaIndex node objects, such as a chunk's previous and next chunk). The default retrievers are <code>LLMSynonymRetriever</code> and, when the graph store supports vectors, <code>VectorContextRetriever</code>.</p>
+<pre data-file="frameworks/llamaindex_kestrel.py"><code class="language-python">from typing import Literal
+
+from llama_index.core import PropertyGraphIndex, SimpleDirectoryReader
+from llama_index.core.indices.property_graph import (
+    LLMSynonymRetriever, SchemaLLMPathExtractor, VectorContextRetriever,
+)
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+from llama_index.llms.openai import OpenAI
+
+llm = OpenAI(model="gpt-4o-mini", temperature=0)
+embed_model = OpenAIEmbedding(model_name="text-embedding-3-small")
+
+documents = SimpleDirectoryReader("code/data/corpus", required_exts=[".md"]).load_data()
+
+extractor = SchemaLLMPathExtractor(
+    llm=llm,
+    possible_entities=Literal["ORGANIZATION", "PERSON", "PROJECT", "LOCATION", "EVENT", "LAW"],
+    possible_relations=Literal["CO_FOUNDED", "CEO_OF", "CTO_OF", "RUNS", "CO_LEADS", "SUPPLIED",
+                               "ACQUIRED", "REPLACES", "INVESTED_IN", "BOARD_MEMBER_OF", "DETECTED"],
+)
+
+graph_store = Neo4jPropertyGraphStore(username="neo4j", password="password", url="bolt://localhost:7687")
+
+index = PropertyGraphIndex.from_documents(
+    documents,
+    kg_extractors=[extractor],
+    embed_model=embed_model,
+    property_graph_store=graph_store,
+)
+
+retrievers = [
+    VectorContextRetriever(index.property_graph_store, embed_model=embed_model,
+                           similarity_top_k=4, path_depth=2, include_text=True),
+    LLMSynonymRetriever(index.property_graph_store, llm=llm, include_text=False),
+]
+engine = index.as_query_engine(sub_retrievers=retrievers, llm=llm)
+print(engine.query("What connects Priya Nair to Deepcast?"))</code></pre>
+<p>Three arguments map directly onto earlier chapters. <code>path_depth=2</code> is the neighborhood radius of local search. <code>include_text=True</code> adds the source chunks of matched paths, the text-unit share of your context budget. <code>LLMSynonymRetriever</code> asks the LLM for keywords and synonyms of the question and matches them to node names, a cheap form of the query-side entity linking in <code>map_query_to_entities</code>. The remaining extractor is <code>DynamicLLMPathExtractor</code>, which takes suggested types without enforcing them. The remaining retrievers are <code>TextToCypherRetriever</code> and <code>CypherTemplateRetriever</code>; in the second, the LLM only fills parameters into a Cypher template you wrote, which is the safest form of Text2Cypher.</p>
+
+<h2>Temporal and memory-oriented frameworks: Graphiti and cognee</h2>
+<p>The frameworks so far index a document collection that changes slowly. In agent memory and operational data, facts arrive continuously and contradict earlier ones. The Kestrel example is canonical question 6, “Who is the CTO of Kestrel Labs?”, whose answer changed in March 2026.</p>
+
+<h3>Graphiti: bi-temporal edges and invalidation</h3>
+<p>Graphiti is the open-source engine behind Zep (<a href="27-incremental-temporal.html">Chapter 27</a>). Data enters as <em>episodes</em>, each with a reference time. For each episode, Graphiti extracts entities and edges, resolves them against the existing graph, and compares new edges with semantically related existing ones. The Zep paper describes the rule: when an LLM judges that a new edge contradicts an existing edge whose validity overlaps it, the old edge's <code>t_invalid</code> is set to the new edge's <code>t_valid</code>. The old fact stays in the graph, so “who was CTO in 2024” still has an answer; in the Python API these fields surface as <code>valid_at</code> and <code>invalid_at</code>. Search combines embedding similarity, BM25 keyword search and graph traversal.</p>
+<pre data-file="frameworks/graphiti_kestrel.py"><code class="language-python">import asyncio
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+from graphiti_core import Graphiti
+from graphiti_core.nodes import EpisodeType
+
+def document_date(text: str) -&gt; datetime:
+    # Every Kestrel document has a date line near the top, such as "Published 4 October 2021";
+    # the first "day Month year" in each file is that date.
+    m = re.search(r"\b(\d{1,2} [A-Z][a-z]+ \d{4})\b", text)
+    return datetime.strptime(m.group(1), "%d %B %Y").replace(tzinfo=timezone.utc)
+
+async def main():
+    graphiti = Graphiti("bolt://localhost:7687", "neo4j", "password")
+    try:
+        await graphiti.build_indices_and_constraints()
+        # Episodes should be added in time order so that later facts invalidate earlier ones.
+        paths = sorted(Path("code/data/corpus").glob("*.md"), key=lambda p: document_date(p.read_text()))
+        for path in paths:
+            text = path.read_text()
+            await graphiti.add_episode(
+                name=path.stem,
+                episode_body=text,
+                source=EpisodeType.text,
+                source_description="Kestrel Labs corpus document",
+                reference_time=document_date(text),
+            )
+
+        for edge in await graphiti.search("Who is the CTO of Kestrel Labs?"):
+            print(edge.fact, "| valid:", edge.valid_at, "| invalid:", edge.invalid_at)
+    finally:
+        await graphiti.close()
+
+asyncio.run(main())</code></pre>
+<p>What you want to see: a fact that Jonas Vehl is CTO of Kestrel Labs with a <code>valid_at</code> in 2021 and an <code>invalid_at</code> around March 2026, and a fact that Priya Nair is CTO with <code>valid_at</code> in March 2026 and no <code>invalid_at</code>. Whether you get exactly that depends on the extraction model reading dates correctly, so inspect the edges rather than trusting the first search result. Your <code>minigraphrag.temporal</code> module (<code>add_fact</code>, <code>as_of</code>) is the hand-built version of the same model. Graphiti's backends include Neo4j, FalkorDB and Amazon Neptune.</p>
+<p>The cost is per-episode LLM work: extraction, resolution against existing nodes and a contradiction check against related edges. That is fine for conversational memory and a stream of business events. It is the wrong tool for a one-off index of ten thousand static PDFs, where you would pay for contradiction checks you do not need.</p>
+
+<h3>cognee: a memory layer for agents</h3>
+<p>cognee describes itself as “the open-source AI memory platform that gives AI agents persistent long-term memory across sessions”. It ingests text and other content, turns it into entities, relationships and searchable chunks, and exposes a small API over the resulting knowledge graph and vector store. That API has changed across releases. The current README uses <code>remember</code> and <code>recall</code>, while earlier releases and many tutorials use an explicit add, build and search sequence. Check which one your installed version provides:</p>
+<pre data-file="frameworks/cognee_kestrel.py"><code class="language-python">import asyncio
+from pathlib import Path
+import cognee
+
+async def main():
+    texts = [p.read_text() for p in sorted(Path("code/data/corpus").glob("*.md"))]
+
+    # Recent releases: memory-style API.
+    for text in texts:
+        await cognee.remember(text)
+    print(await cognee.recall("What connects Priya Nair to Deepcast?"))
+
+    # Earlier releases used an explicit pipeline instead:
+    #   for text in texts: await cognee.add(text)
+    #   await cognee.cognify()                       # build the graph
+    #   results = await cognee.search(query_text="What connects Priya Nair to Deepcast?")
+
+asyncio.run(main())</code></pre>
+<p>The README says that in cognee 1.0 the whole memory layer can run on a single Postgres instance, which matters if you want to avoid operating a separate graph database, but it labels Postgres as a graph store a demo feature in the open-source release. Treat cognee as a higher-level building block: you give up control over each stage in exchange for a quick path to persistent agent memory.</p>
+
+<h2>Choosing a framework</h2>
+
+<h3>Comparison</h3>
+<table>
+  <thead><tr><th>Framework</th><th>Extraction</th><th>Retrieval modes</th><th>Storage</th><th>Incremental updates</th><th>Maturity (2026)</th></tr></thead>
+  <tbody>
+    <tr><td>Microsoft GraphRAG</td><td>LLM with gleaning, summaries, optional claims; or NLP noun phrases (<code>--method fast</code>)</td><td>local, global, DRIFT, basic</td><td>Parquet files; vector store (LanceDB by default, or Azure AI Search, Cosmos DB); file cache</td><td><code>update</code> command merges new documents; communities and reports still need recomputation</td><td>Widely used reference; in maintenance mode, bug fixes only</td></tr>
+    <tr><td>nano-graphrag</td><td>LLM, GraphRAG-style prompts</td><td>local, global</td><td>working directory; swappable vector and graph stores</td><td>Inserts deduplicated by content hash</td><td>Small and hackable; best read as a reference</td></tr>
+    <tr><td>LightRAG</td><td>LLM entities and relationships with key-value profiles</td><td>naive, local, global, hybrid, mix</td><td>working directory; PostgreSQL, Neo4j, MongoDB and others</td><td>Union inserts; delete by document id</td><td>Active; server with web UI</td></tr>
+    <tr><td>fast-graphrag</td><td>LLM, guided by domain and example queries</td><td>Personalized PageRank over the graph</td><td>working directory</td><td>Incremental inserts</td><td>Smaller community; focused scope</td></tr>
+    <tr><td>neo4j-graphrag-python</td><td>Schema-guided LLM (<code>SimpleKGPipeline</code>) with entity resolution</td><td>vector, vector plus Cypher, Text2Cypher, hybrid</td><td>Neo4j</td><td>Run the pipeline on new documents; merges are your design</td><td>Vendor-maintained; KG builder under an <code>experimental</code> package</td></tr>
+    <tr><td>LlamaIndex PropertyGraphIndex</td><td>Pluggable extractors: simple, implicit, dynamic, schema</td><td>synonym, vector context, Text2Cypher, Cypher templates, custom</td><td>In-memory by default; integrations for Neo4j and other graph stores</td><td>Insert new documents into the index</td><td>Part of a large framework; moves fast</td></tr>
+    <tr><td>Graphiti</td><td>LLM per episode with resolution and contradiction checks</td><td>hybrid: embeddings, BM25, graph traversal, rerankers</td><td>Neo4j, FalkorDB, Amazon Neptune</td><td>Designed for it: bi-temporal invalidation</td><td>Active; backs Zep</td></tr>
+    <tr><td>cognee</td><td>LLM pipeline into entities, relationships and chunks</td><td>several search strategies behind one recall call</td><td>Graph plus vector stores; single Postgres as a demo option</td><td>Designed for continuous memory</td><td>Active; API still evolving</td></tr>
+  </tbody>
+</table>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 460" role="img" aria-labelledby="choose-title">
+      <title id="choose-title">Decision diagram for picking a GraphRAG framework: four yes or no questions leading to Graphiti, neo4j-graphrag, Microsoft GraphRAG, LightRAG, or building on minigraphrag</title>
+      <defs>
+        <marker id="ch28-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/>
+        </marker>
+      </defs>
+      <!-- questions -->
+      <rect class="d-box" x="10" y="14" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="24" y="38">1. Do facts change over time,</text>
+      <text class="d-text bold" x="24" y="57">or is this agent memory?</text>
+
+      <rect class="d-box" x="10" y="114" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="24" y="138">2. Is Neo4j already your</text>
+      <text class="d-text bold" x="24" y="157">system of record?</text>
+
+      <rect class="d-box" x="10" y="214" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="24" y="238">3. Do users ask global,</text>
+      <text class="d-text bold" x="24" y="257">whole-corpus questions?</text>
+
+      <rect class="d-box" x="10" y="314" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="24" y="338">4. Need cheap incremental</text>
+      <text class="d-text bold" x="24" y="357">inserts inside your app?</text>
+
+      <!-- outcomes -->
+      <rect class="d-box comm" x="380" y="14" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="394" y="38">Graphiti</text>
+      <text class="d-text small" x="394" y="57">bi-temporal edges; cognee for a memory API</text>
+
+      <rect class="d-box node" x="380" y="114" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="394" y="138">neo4j-graphrag-python</text>
+      <text class="d-text small" x="394" y="157">or PropertyGraphIndex in LlamaIndex apps</text>
+
+      <rect class="d-box edge" x="380" y="214" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="394" y="238">Microsoft GraphRAG</text>
+      <text class="d-text small" x="394" y="257">global and DRIFT; fast method on a budget</text>
+
+      <rect class="d-box good" x="380" y="314" width="290" height="56" rx="8"/>
+      <text class="d-text bold" x="394" y="338">LightRAG or nano-graphrag</text>
+      <text class="d-text small" x="394" y="357">fast-graphrag for PageRank retrieval</text>
+
+      <rect class="d-box ghost" x="10" y="404" width="400" height="46" rx="8"/>
+      <text class="d-text bold" x="24" y="432">Build on minigraphrag: you own every stage</text>
+
+      <!-- yes arrows -->
+      <line class="d-line hot" x1="300" y1="42" x2="376" y2="42" marker-end="url(#ch28-arrow)"/>
+      <line class="d-line hot" x1="300" y1="142" x2="376" y2="142" marker-end="url(#ch28-arrow)"/>
+      <line class="d-line hot" x1="300" y1="242" x2="376" y2="242" marker-end="url(#ch28-arrow)"/>
+      <line class="d-line hot" x1="300" y1="342" x2="376" y2="342" marker-end="url(#ch28-arrow)"/>
+      <text class="d-text small" x="326" y="35">yes</text>
+      <text class="d-text small" x="326" y="135">yes</text>
+      <text class="d-text small" x="326" y="235">yes</text>
+      <text class="d-text small" x="326" y="335">yes</text>
+      <!-- no arrows -->
+      <line class="d-line" x1="155" y1="70" x2="155" y2="110" marker-end="url(#ch28-arrow)"/>
+      <line class="d-line" x1="155" y1="170" x2="155" y2="210" marker-end="url(#ch28-arrow)"/>
+      <line class="d-line" x1="155" y1="270" x2="155" y2="310" marker-end="url(#ch28-arrow)"/>
+      <line class="d-line" x1="155" y1="370" x2="155" y2="400" marker-end="url(#ch28-arrow)"/>
+      <text class="d-text small" x="163" y="95">no</text>
+      <text class="d-text small" x="163" y="195">no</text>
+      <text class="d-text small" x="163" y="295">no</text>
+      <text class="d-text small" x="163" y="390">no</text>
+      <text class="d-text small" x="430" y="412">Then run your golden set on the</text>
+      <text class="d-text small" x="430" y="428">top two choices before committing</text>
+    </svg>
+  </div>
+  <figcaption>A first cut. The questions are ordered by how hard each requirement is to retrofit: time is hardest to add later, then the system of record, then corpus-wide summaries. Whatever the diagram suggests, compare at least two candidates on your own questions.</figcaption>
+</figure>
+
+<h3>Reasoning behind the order</h3>
+<p><strong>Time first.</strong> If the truth changes (Kestrel's CTO, a supplier, a price), a framework without validity intervals will retrieve both the old and new fact and leave the LLM to guess. You can bolt dates onto edges later, but every stored fact then needs re-extraction to fill them. Graphiti builds this in.</p>
+<p><strong>System of record second.</strong> If your organization's data already lives in Neo4j with access control and other consumers, a second graph in Parquet files is a synchronization problem. Build the GraphRAG layer on the database you have.</p>
+<p><strong>Global questions third.</strong> Of the frameworks in this chapter, only Microsoft GraphRAG and nano-graphrag precompute community reports, which is what lets them answer Q4 (“main themes”) and Q5 (“risks”) without reading the whole corpus at query time. If your users never ask such questions, you are paying for reports you do not use. <a href="26-cost-scaling.html">Chapter 26</a> covers LazyGraphRAG-style alternatives that defer that cost to query time.</p>
+<p><strong>Everything else.</strong> LightRAG and nano-graphrag are the cheapest path to entity-centric multi-hop answers with incremental inserts. When a requirement falls outside every framework (custom claim types, strict provenance for audits, an unusual store), a small codebase you understand is a sound engineering choice.</p>
+
+<h3>Evaluate before you commit</h3>
+<p>Framework READMEs report results on their authors' datasets, and your corpus, questions and model will differ. The adapter pattern below puts any framework behind the interface <code>run_eval</code> (<code>minigraphrag/evaluation.py</code>) expects: a function from a question to an object with <code>.answer</code> and <code>.sources</code>. <code>SearchResult</code> from <code>minigraphrag.search.common</code> already has that shape.</p>
+<pre data-file="frameworks/bakeoff.py"><code class="language-python">import asyncio
+import subprocess
+
+from minigraphrag.evaluation import format_summary, load_questions, run_eval
+from minigraphrag.indexer import load_index
+from minigraphrag.llm import get_llm
+from minigraphrag.search.common import SearchResult
+from minigraphrag.search.local import local_search
+
+questions = load_questions("code/data/questions.jsonl")
+
+def graphrag_cli(method: str):
+    def run(question: str) -&gt; SearchResult:
+        out = subprocess.run(["graphrag", "query", question, "--root", "./kestrel", "--method", method],
+                             capture_output=True, text=True, check=True).stdout
+        return SearchResult(answer=out, method=f"graphrag-{method}")   # no doc ids: context_recall reads 0
+    return run
+
+def lightrag_mode(rag, mode: str):
+    from lightrag import QueryParam
+    def run(question: str) -&gt; SearchResult:
+        answer = asyncio.run(rag.aquery(question, param=QueryParam(mode=mode)))
+        return SearchResult(answer=answer, method=f"lightrag-{mode}")
+    return run
+
+index, llm = load_index("code/.index"), get_llm("openai", cache_dir=".cache/llm")
+systems = {
+    "mini-local": lambda q: local_search(index, q, llm),
+    "gr-local": graphrag_cli("local"),
+    "gr-global": graphrag_cli("global"),
+    # "lr-mix": lightrag_mode(rag, "mix"),   # construct and initialize rag as in lightrag_kestrel.py
+}
+print(format_summary(run_eval(questions, systems)))</code></pre>
+<p>Two cautions carry over from <a href="25-evaluation.html">Chapter 25</a>. First, token F1 against a one-sentence gold answer penalizes GraphRAG's long, multi-paragraph answers, so compare within a question type and add the pairwise judge (<code>llm_judge_pairwise</code>, with order swapping) for global questions. Second, frameworks that do not expose retrieved sources get a context recall of zero from this adapter. Either recover document ids from their context output or leave that column out of the comparison; a zero there measures the adapter, not the retriever.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 28.1 <span class="level">Warm-up</span></h4>
+  <p>Translate this <code>minigraphrag</code> configuration into the corresponding Microsoft GraphRAG <code>settings.yaml</code> sections, and name one setting in each direction that has no counterpart:</p>
+  <pre><code class="language-python">IndexConfig(chunk_size=300, chunk_overlap=50, max_gleanings=2, max_cluster_size=8,
+            extract_claims=False, alias_threshold=0.85)</code></pre>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-yaml">chunking:
+  size: 300          # note: minigraphrag chunks count words, GraphRAG chunks count tokens
+  overlap: 50
+extract_graph:
+  max_gleanings: 2
+cluster_graph:
+  max_cluster_size: 8
+extract_claims:
+  enabled: false</code></pre>
+    <p>The unit mismatch matters: <code>chunk_fixed</code> slides a window of whitespace-delimited words, so 300 words is roughly 400 tokens under the 4-tokens-per-3-words estimate in <code>tokens.py</code>. To match, set <code>size</code> to about 400.</p>
+    <p>No GraphRAG counterpart: <code>alias_threshold</code>. <code>resolve_entities</code> does fuzzy alias merging (“TWI” into “TIDEWATER INSTITUTE”), while GraphRAG merges entities by exact title and relies on the extraction prompt and description summarization. No <code>minigraphrag</code> counterpart: <code>vector_store</code> (<code>minigraphrag</code> always uses its in-memory <code>VectorStore</code> saved as <code>.npz</code>) and the per-method search budgets under <code>local_search</code>/<code>global_search</code>, which in <code>minigraphrag</code> are function arguments such as <code>max_context_tokens</code> and <code>community_prop</code>.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 28.2 <span class="level">Core</span></h4>
+  <p>Estimate the number of LLM calls Microsoft GraphRAG makes to index the Kestrel corpus with the standard method and with the fast method. Assume: 12 documents of about 650 tokens each; <code>chunking.size</code> 600 with overlap 100, which gives two text units per document, 24 in all; <code>max_gleanings</code> 1; claims enabled; about 60 entities and 90 relationships after merging, of which half have more than one description; and 8 communities across all levels. Which stage dominates each method?</p>
+  <details class="hint"><summary>Hint</summary><p>Count per stage: extraction calls per text unit (first pass plus gleaning), claim calls per text unit, one summarization call per entity or relationship that has several descriptions, and one report per community.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Standard.</strong></p>
+    <ul>
+      <li>Extraction: 24 units × (1 first pass + 1 gleaning continue) = 48 calls. With <code>max_gleanings</code> 1 no loop-check call is needed after the last round, which matches <code>extract_from_unit</code> in <code>minigraphrag</code>. If your version asks the loop check anyway, add 24.</li>
+      <li>Claims: 24 units × 1 = 24 calls (more if claim gleaning is on).</li>
+      <li>Description summarization: (60 + 90) / 2 = 75 calls. Records with a single description need no summary.</li>
+      <li>Community reports: 8 calls.</li>
+      <li>Total: 48 + 24 + 75 + 8 = <strong>155 calls</strong>. Extraction and claims make up 72 of 155 calls, but they also carry the longest prompts (the extraction prompt with examples plus the chunk, then the whole transcript again for gleaning), so they dominate tokens even more than call counts.</li>
+    </ul>
+    <p><strong>Fast.</strong> Noun-phrase extraction and co-occurrence edges use no LLM calls, and there are no descriptions to summarize. The documentation's description of the fast method does not include claim extraction, so assume none. Only community reports use the LLM, though the fast graph is noisier and typically has more noun-phrase nodes, so the community count can rise. With 8 communities: <strong>8 calls</strong>, plus embedding calls in both methods. Reports dominate by definition.</p>
+    <p>That is roughly a twentyfold difference in calls on this toy corpus. The token ratio is less extreme, because fast-method reports are built from raw text units, which are longer than entity descriptions. The direction agrees with the documentation's estimate that graph extraction is roughly 75% of standard indexing cost.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 28.3 <span class="level">Core</span></h4>
+  <p>Using the neo4j-graphrag graph built in this chapter, write a <code>retrieval_query</code> for <code>VectorCypherRetriever</code> that answers canonical question 2 (“Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?”) reliably. It should return, for each matched chunk, the chunk text and any path of the form project, organization that runs it, board member, investor. Explain why a fixed two-hop expansion is not enough.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-cypher">MATCH (node)&lt;-[:FROM_CHUNK]-(e:__Entity__)
+OPTIONAL MATCH path = (proj:Project)&lt;-[:RUNS]-(org:Organization)
+                      &lt;-[:BOARD_MEMBER_OF]-(p:Person)-[:PARTNER_AT]-&gt;(inv:Organization)
+WHERE e IN nodes(path)
+RETURN node.text AS chunk, score,
+       collect(DISTINCT proj.name + ' is run by ' + org.name + ', whose board member ' +
+               p.name + ' is a partner at ' + inv.name)[..5] AS board_paths</code></pre>
+    <p><code>PARTNER_AT</code> is already in the chapter's relationship types, but no pattern allows it, so add <code>("Person", "PARTNER_AT", "Organization")</code> to <code>patterns</code> or the extractor has no guidance to emit the partner edge. The vector search will most likely match the research-note chunk that mentions Sentinel drones and the bleaching; the entity found there is Project Sentinel. From Project Sentinel the answer is three hops away: Sentinel to Kestrel Labs (<code>RUNS</code>), Kestrel Labs to Lena Park (<code>BOARD_MEMBER_OF</code>), Lena Park to Brightwater Capital (<code>PARTNER_AT</code>). A generic two-hop neighborhood stops at Lena Park and never reaches the investor. It also floods the context with every neighbor of the Kestrel Labs hub. A typed metapath (<a href="21-hybrid-design-patterns.html">Chapter 21</a>) is both more complete and much smaller. The trade-off is that you wrote it for one question shape; keep a generic retriever as a fallback.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 28.4 <span class="level">Core</span></h4>
+  <p>You run LightRAG in <code>global</code> mode and Microsoft GraphRAG with <code>--method global</code> on canonical question 4 (“What are the main themes in this corpus?”). The GraphRAG answer lists all four expected themes; the LightRAG answer covers supply-chain risk and funding but misses regulation. Explain the difference mechanically, and propose two changes to the LightRAG setup that would help, with their costs.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Mechanism.</strong> GraphRAG's global search maps over <em>every</em> community report at the chosen level, scores each for helpfulness and reduces the useful partial answers. Because the Ocean Health Act and Port Avalon City Council form their own community with a report, the regulation theme is guaranteed a chance to be read. LightRAG's global mode extracts high-level keywords from the question (“main themes”, “corpus”) and retrieves the top-k relationships whose descriptions are nearest to those keywords. Such generic keywords are weak queries, and the retrieved edges concentrate around the densest part of the graph (Kestrel Labs, Deepcast, Brightwater Capital). The regulation edges are few and peripheral, so they fall outside the top-k. Nothing enforces coverage.</p>
+    <p><strong>Changes.</strong></p>
+    <ol>
+      <li>Raise <code>top_k</code> for relationship retrieval and use <code>mix</code> mode so chunks are also retrieved. It is cheap (one query, more context tokens), but it only makes coverage more likely, not guaranteed, and it can push the context past the useful budget.</li>
+      <li>Add a coverage layer: run community detection on LightRAG's stored graph (for example with <code>hierarchical_communities</code> from <code>minigraphrag</code>), generate one report per community once, and answer global questions with map-reduce over those reports. This costs one LLM call per community at index time and one map call per report batch per question, and the reports must be refreshed as inserts change the communities. In effect you are rebuilding GraphRAG's global search on top of LightRAG, which is a legitimate design when most questions are local.</li>
+    </ol>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 28.5 <span class="level">Stretch</span></h4>
+  <p>Load a Microsoft GraphRAG index into NetworkX and run <code>minigraphrag</code>'s Personalized PageRank over it to rank text units for canonical question 1, HippoRAG style. Use the <code>entities</code>, <code>relationships</code> and <code>text_units</code> Parquet tables. What does this tell you about framework lock-in?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from collections import defaultdict
+
+import networkx as nx
+import pandas as pd
+
+from minigraphrag.search.ppr import personalized_pagerank
+
+out = "kestrel/output"
+entities = pd.read_parquet(f"{out}/entities.parquet")
+rels = pd.read_parquet(f"{out}/relationships.parquet")
+units = pd.read_parquet(f"{out}/text_units.parquet")
+
+G = nx.Graph()
+for _, e in entities.iterrows():
+    G.add_node(e["title"], type=e["type"], text_unit_ids=list(e["text_unit_ids"]))
+for _, r in rels.iterrows():
+    # relationships reference entity titles in source/target
+    G.add_edge(r["source"], r["target"], weight=float(r["weight"]))
+
+# Seeds: entities named in the question (a real system would link via embeddings).
+question = "Why did Kestrel Labs start Project Tern?"
+seeds = {n: 1.0 for n in G if n.lower() in question.lower()}
+print("seeds:", seeds)                                   # e.g. KESTREL LABS, PROJECT TERN
+
+scores = personalized_pagerank(G, seeds, alpha=0.85)
+
+# Passage score = sum of the PPR mass of the entities it mentions (Chapter 17).
+unit_score = defaultdict(float)
+for node, s in scores.items():
+    for uid in G.nodes[node].get("text_unit_ids", []):
+        unit_score[uid] += s
+
+text_by_id = dict(zip(units["id"], units["text"]))
+for uid, s in sorted(unit_score.items(), key=lambda x: -x[1])[:5]:
+    print(round(s, 4), text_by_id[uid][:120].replace("\n", " "))</code></pre>
+    <p>The top passages should include the Marlow Dynamics acquisition article and the Project Tern engineering blog post, because Deepcast and Marlow Dynamics collect mass through their edges to both seeds, as in the viz above. Seed matching by substring is brittle: GraphRAG titles are usually uppercase, which the <code>.lower()</code> comparison handles, but aliases such as “Tern” are missed, so replace it with embedding-based linking for real use.</p>
+    <p>On lock-in: a framework's index is worth something apart from its query engine. Because GraphRAG writes open Parquet tables with provenance (<code>text_unit_ids</code>), you can build the graph with one tool and retrieve with another. Before adopting any framework, check that its stored graph can be read outside the framework with provenance intact.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">What does <code>graphrag index --method fast</code> change compared with the standard method?</p>
+  <ol>
+    <li>It skips community detection and reports</li>
+    <li>It uses a smaller LLM for extraction</li>
+    <li data-correct>It extracts noun phrases with NLP and uses co-occurrence as relationships, using the LLM only for community reports</li>
+    <li>It skips embeddings and only builds the graph</li>
+  </ol>
+  <div class="explain">FastGraphRAG replaces LLM entity and relationship extraction, and with it description summarization, with NLP noun phrases and text-unit co-occurrence. Community detection still runs, and the LLM still writes community reports, from raw text rather than descriptions.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">LightRAG's <code>global</code> mode and Microsoft GraphRAG's <code>global</code> method differ mainly in that:</p>
+  <ol>
+    <li>LightRAG's global mode uses a larger context window</li>
+    <li>They are the same algorithm under the same name</li>
+    <li>GraphRAG's global method uses Personalized PageRank</li>
+    <li data-correct>LightRAG retrieves relationships matching high-level keywords, while GraphRAG maps over precomputed community reports</li>
+  </ol>
+  <div class="explain">LightRAG builds no communities or reports. Its global mode is keyword-to-relationship matching. GraphRAG's global search is map-reduce over community reports, which is what gives it coverage on whole-corpus questions.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In neo4j-graphrag-python, what does the <code>retrieval_query</code> of a <code>VectorCypherRetriever</code> receive?</p>
+  <ol>
+    <li data-correct>The node matched by the vector index as <code>node</code> and its similarity as <code>score</code></li>
+    <li>The user's question as a Cypher parameter</li>
+    <li>The full graph schema</li>
+    <li>The LLM's draft answer</li>
+  </ol>
+  <div class="explain">The retriever first runs the vector search, then executes your Cypher with <code>node</code> and <code>score</code> in scope, so you can expand from the matched chunk into the domain graph.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Your application stores customer contracts whose terms are amended every month, and agents must answer “what were the terms on date X?”. Which framework characteristic matters most?</p>
+  <ol>
+    <li>Community reports for global questions</li>
+    <li>A Text2Cypher retriever</li>
+    <li data-correct>Validity intervals on edges with invalidation of superseded facts</li>
+    <li>Content-hash deduplication of chunks</li>
+  </ol>
+  <div class="explain">As-of questions need facts with valid-time intervals and a rule for superseding contradicted facts without deleting them. That is Graphiti's bi-temporal model, or your own <code>temporal.py</code>. The other features do not help with time.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Auto prompt tuning discovered entity types <code>VENTURE_FIRM</code>, <code>SONAR_SUPPLIER</code> and <code>DRONE_COMPANY</code> for the Kestrel corpus. What is the most likely downside of indexing with them unchanged?</p>
+  <ol>
+    <li>The prompt becomes too long to cache</li>
+    <li data-correct>Organizations get split across near-synonym types, fragmenting type-based filtering and making type votes inconsistent</li>
+    <li>Global search stops working</li>
+    <li>GraphRAG rejects custom entity types</li>
+  </ol>
+  <div class="explain">Fine-grained, overlapping types cause type drift: Deepcast might be a SONAR_SUPPLIER in one chunk and a DRONE_COMPANY in another. Keep the generated examples, but review the type list and collapse it to a small, disjoint set.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You wrap Microsoft GraphRAG's CLI in an adapter that returns only the answer text and run <code>run_eval</code>. Its context recall comes out as 0.0 on every question. What should you conclude?</p>
+  <ol>
+    <li>GraphRAG retrieved none of the supporting documents</li>
+    <li>The questions file is malformed</li>
+    <li>Local search is broken for this corpus</li>
+    <li data-correct>Nothing about retrieval: the adapter passes no source ids, so the metric is not measured</li>
+  </ol>
+  <div class="explain"><code>context_recall</code> compares <code>result.sources</code> against <code>supporting_docs</code>. With an empty sources list it is zero by construction. Either recover document ids from the context or drop the column for that system.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Microsoft GraphRAG is in maintenance mode. Is it still safe to use?</summary>
+  <div><p>For batch indexing of a stable document collection, yes, with care. The README says the project “won't be accepting new PRs or implementing new features”; bug fixes and dependency updates continue. Pin the version, keep your generated <code>settings.yaml</code> and prompts in version control, and plan for the fact that improvements from newer research (cheaper indexing, better temporal handling) will not arrive there. Its open Parquet output means your index is not trapped if you later move query-time logic elsewhere (Exercise 28.5).</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should I start with a framework or with my own code?</summary>
+  <div><p>Start with a framework to get a baseline quickly, then let the evaluation decide. If its answers are good enough and its operational model fits, keep it. If you find yourself patching prompts, monkey-patching retrieval and working around its storage, a pipeline of your own, built from the stages in this course, is often cheaper to own. Many production systems end up hybrid: a framework's extractor feeding a custom retriever over a database they already run.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I mix frameworks, for example GraphRAG extraction with Neo4j retrieval?</summary>
+  <div><p>Yes, and it is common. GraphRAG's <code>entities</code> and <code>relationships</code> tables load straight into Neo4j with <code>MERGE</code> statements (compare <code>graph_to_cypher_statements</code> in <code>search/text2cypher.py</code>). Community reports can be stored as nodes linked to their member entities. After that, neo4j-graphrag retrievers or your own Cypher can serve queries. The price is keeping the two in sync on updates.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why do framework comparisons in blog posts disagree so much?</summary>
+  <div><p>They usually differ in the corpus, the question mix, the LLM, the chunk size, the judge and whether the baseline was tuned. Mode names also collide (“global” means different things in LightRAG and GraphRAG), so two posts can compare different algorithms under the same label. Chapter 25 covers these pitfalls; the fix is your own golden set, sliced by question type, run through every candidate with the same model.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Which framework handles deleting a document properly?</summary>
+  <div><p>Deletion is harder than insertion, because an entity may be supported by several documents. You need the reference counting by <code>source_ids</code> from Chapter 27. LightRAG exposes <code>adelete_by_doc_id</code> and regenerates affected entities from cached extractions. Graphiti prefers invalidation over deletion for facts that stopped being true. With Microsoft GraphRAG, the dependable path for true removal (for example a legal takedown) is re-indexing without the document; the LLM cache keeps that cheaper than a cold rebuild.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a framework bake-off on the Kestrel corpus</h3>
+  <p>Pick three systems: your <code>minigraphrag</code> index, Microsoft GraphRAG, and one of LightRAG, neo4j-graphrag-python or Graphiti. Run them on the same corpus with the same LLM and produce a short decision memo backed by numbers.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>Each system indexed from <code>code/data/corpus</code>, with its config or setup script committed</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An indexing cost log per system: LLM calls, input and output tokens, wall-clock time (wrap the LLM client or read the framework's logs)</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An adapter per system for <code>run_eval</code>, returning source document ids wherever the framework exposes context</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Results on all 23 questions in <code>questions.jsonl</code>, sliced by type (single-hop, multi-hop, global, temporal), plus pairwise judge win rates on the global questions</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A graph inspection note per system: entity count, alias fragments found, and whether the CTO change is represented</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A one-page memo recommending one system for a stated workload, citing at least three of your numbers</span></li>
+  </ul>
+  <p><strong>Done when</strong> someone who has not read this course could re-run your scripts, get comparable numbers, and see why you chose what you chose.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Every framework is a set of answers to five questions: extraction, precomputed summaries, storage, retrieval and updates. You have implemented each one, so you can read any framework's config as a map of those choices.</li>
+    <li>Microsoft GraphRAG has the most complete pipeline (<code>init</code>, <code>prompt-tune</code>, <code>index</code>, <code>query</code>, <code>update</code>) and the only built-in global and DRIFT search over community reports among these frameworks. It is in maintenance mode, and <code>--method fast</code> removes LLM graph extraction, its largest indexing cost.</li>
+    <li>LightRAG, nano-graphrag and fast-graphrag are embeddable libraries with cheap incremental inserts. Mode names such as “global” mean different algorithms in different frameworks.</li>
+    <li>neo4j-graphrag-python and LlamaIndex PropertyGraphIndex put the graph in a database with a schema and composable retrievers, but ship no community reports.</li>
+    <li>When facts change, look at Graphiti: bi-temporal edges, with contradicted facts invalidated and kept as history.</li>
+    <li>Pick with a decision rule, then confirm with your own golden set through a common evaluation adapter.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a> and <a href="https://microsoft.github.io/graphrag/">documentation</a>: CLI, configuration, indexing methods, outputs and auto prompt tuning. <span class="venue">GitHub, 2024–2026</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span>; <a href="https://github.com/HKUDS/LightRAG">HKUDS/LightRAG repository</a>. <span class="venue">GitHub</span></li>
+  <li>gusye1234. <a href="https://github.com/gusye1234/nano-graphrag">nano-graphrag</a>. <span class="venue">GitHub</span></li>
+  <li>Circlemind. <a href="https://github.com/circlemind-ai/fast-graphrag">fast-graphrag</a>. <span class="venue">GitHub</span></li>
+  <li>Neo4j. <a href="https://github.com/neo4j/neo4j-graphrag-python">neo4j-graphrag-python</a> and <a href="https://neo4j.com/docs/neo4j-graphrag-python/current/">user guide</a>. <span class="venue">GitHub and Neo4j docs</span></li>
+  <li>LlamaIndex. <a href="https://developers.llamaindex.ai/python/framework/module_guides/indexing/lpg_index_guide/">Using a Property Graph Index</a>. <span class="venue">LlamaIndex documentation</span></li>
+  <li>Rasmussen et al. <a href="https://arxiv.org/abs/2501.13956">Zep: A Temporal Knowledge Graph Architecture for Agent Memory</a>. <span class="venue">arXiv 2501.13956, 2025</span>; <a href="https://github.com/getzep/graphiti">getzep/graphiti repository</a>. <span class="venue">GitHub</span></li>
+  <li>Topoteretes. <a href="https://github.com/topoteretes/cognee">cognee</a>. <span class="venue">GitHub</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2405.14831">HippoRAG: Neurobiologically Inspired Long-Term Memory for Large Language Models</a>. <span class="venue">arXiv 2405.14831, 2024</span></li>
+  <li>Zhou et al. <a href="https://arxiv.org/abs/2503.04338">In-depth Analysis of Graph-based RAG in a Unified Framework</a>. <span class="venue">arXiv 2503.04338, 2025</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

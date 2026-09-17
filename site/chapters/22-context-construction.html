@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turning graphs into prompts | Graph RAG from Scratch</title>
+<meta name="description" content="Serialize retrieved subgraphs as triples, tables, adjacency lists, JSON, sentences or paths; order, deduplicate and budget them; and make answers cite their evidence.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="22-context-construction" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Turning graphs into prompts</h1>
+  <p class="lede">Retrieval hands you nodes, edges, paths and passages; the model can only read text. This chapter is about the last step before generation: choosing a serialization, ordering and deduplicating evidence, splitting a token budget across sections, and making the answer cite what it used, so that good retrieval is not wasted by a bad prompt.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Serialize the same subgraph as triples, GraphRAG-style tables, markdown, adjacency lists, JSON, sentences and paths, and compare their token cost</li>
+      <li>Summarize what research on graph encodings for LLMs found, without overstating it</li>
+      <li>Order and deduplicate evidence to work with, not against, position effects such as “lost in the middle”</li>
+      <li>Allocate a token budget across evidence sections and redistribute unused space</li>
+      <li>Write a grounded system prompt with citation ids and an explicit “I don't know” path</li>
+      <li>Measure whether citations are valid and actually support the sentences that carry them</li>
+    </ul>
+  </div>
+</header>
+
+<h2>The last mile of GraphRAG</h2>
+<p>Everything in Part 3 ended with a list of things: entity ids from <a href="14-local-search.html">local search</a>, community reports from <a href="15-global-search.html">global search</a>, scored paths from <a href="18-paths-and-agents.html">path retrieval</a>, fused passages and panels from <a href="21-hybrid-design-patterns.html">the hybrid layer</a>. None of that reaches the model until it becomes a string. That conversion, called <em>linearization</em> or <em>serialization</em>, decides three things:</p>
+<ul>
+  <li><strong>Cost.</strong> The same five facts can take 60 tokens or 250 tokens depending on format, and you pay for them on every query.</li>
+  <li><strong>What the model can see.</strong> A flat list of triples hides that two facts share an entity; an adjacency list hides edge descriptions; JSON hides nothing and is hard to skim. What is easy for the model to notice changes what it concludes.</li>
+  <li><strong>What the answer can cite.</strong> If rows have no stable ids, the answer cannot point back at evidence, and you cannot check it.</li>
+</ul>
+<p>We will use one small subgraph throughout: the evidence for canonical questions 1 and 3, “Why did Kestrel Labs start Project Tern?” and “What connects Priya Nair to Deepcast?”. It has five entities (Marlow Dynamics, Deepcast, Kestrel Labs, Project Tern, Priya Nair) and five relationships.</p>
+
+<h2>Serialization formats</h2>
+
+<h3>Triples, one per line</h3>
+<p>The most compact option: <code>(subject, predicate, object)</code>. <code>minigraphrag</code> uses the edge's description as the predicate, because extracted edges carry free-text descriptions rather than typed labels.</p>
+<pre data-file="minigraphrag/context.py"><code class="language-python">def triples_to_text(G: nx.Graph, edges: list[tuple[str, str]] | None = None) -&gt; str:
+    """One `(SOURCE, description, TARGET)` line per edge: the most compact format."""
+    edges = edges if edges is not None else list(G.edges())
+    return "\n".join(f"({u}, {G.edges[u, v].get('description', 'related to')}, {v})" for u, v in edges)
+
+
+def to_markdown_tables(G: nx.Graph, nodes: list[str] | None = None) -&gt; str:
+    """Markdown entity and relationship tables for the induced subgraph on `nodes`."""
+    nodes = nodes if nodes is not None else list(G.nodes())
+    sub = G.subgraph(nodes)
+    out = ["| id | entity | type | description |", "|---|---|---|---|"]
+    for n in nodes:
+        d = G.nodes[n]
+        out.append(f"| {d.get('human_id', '')} | {n} | {d.get('type', '')} | {_clean(d.get('description', ''))} |")
+    out += ["", "| id | source | target | description | weight |", "|---|---|---|---|---|"]
+    for u, v, d in sub.edges(data=True):
+        out.append(f"| {d.get('human_id', '')} | {u} | {v} | {_clean(d.get('description', ''))} | {d.get('weight', 1)} |")
+    return "\n".join(out)
+
+
+def to_adjacency_text(G: nx.Graph, nodes: list[str] | None = None) -&gt; str:
+    """`NODE: neighbour1, neighbour2` lines: shows neighbourhood structure at a glance."""
+    nodes = nodes if nodes is not None else list(G.nodes())
+    return "\n".join(f"{n}: {', '.join(sorted(G.neighbors(n)))}" for n in nodes)
+
+
+def to_json(G: nx.Graph, nodes: list[str] | None = None) -&gt; str:
+    """Node-link JSON of the induced subgraph (lists and scalars only)."""
+    sub = G.subgraph(nodes if nodes is not None else list(G.nodes()))
+    keep = ("type", "description")
+    data = {
+        "nodes": [{"id": n, **{k: d[k] for k in keep if k in d}} for n, d in sub.nodes(data=True)],
+        "edges": [{"source": u, "target": v, "description": d.get("description", ""), "weight": d.get("weight", 1)}
+                  for u, v, d in sub.edges(data=True)],
+    }
+    return json.dumps(data, indent=1)</code></pre>
+<p>Output for three edges of our subgraph:</p>
+<pre><code>(MARLOW DYNAMICS, Marlow Dynamics acquired Deepcast in April 2025, DEEPCAST)
+(DEEPCAST, Deepcast supplied sonar modules to Kestrel Labs from 2022 until June 2025, KESTREL LABS)
+(KESTREL LABS, Kestrel Labs started Project Tern in June 2025 to build its own sonar, PROJECT TERN)</code></pre>
+<p>Triples are cheap and familiar to models that have seen a lot of knowledge-graph text. They have no row ids, so citation must go through the passage the triple came from, and they repeat entity names on every line, which costs tokens on dense subgraphs. On an undirected graph the tuple order is arbitrary; direction survives only inside the description.</p>
+
+<h3>GraphRAG-style tables</h3>
+<p>Microsoft GraphRAG's local search renders each evidence type as a delimited table with a title line and an <code>id</code> column: entities, relationships, claims, community reports, sources. The answer then cites rows as <code>[Data: Relationships (3, 8)]</code>. <code>minigraphrag</code> uses the same shape:</p>
+<pre data-file="minigraphrag/context.py"><code class="language-python">def format_table(title: str, header: list[str], rows: list[list]) -&gt; str:
+    """GraphRAG-style pipe-delimited table: `-----Title-----` then `a|b|c` lines."""
+    lines = [f"-----{title}-----", "|".join(header)]
+    lines += ["|".join(_clean(c) for c in row) for row in rows]
+    return "\n".join(lines)</code></pre>
+<pre><code>-----Relationships-----
+id|source|target|description|weight
+0|MARLOW DYNAMICS|DEEPCAST|Marlow Dynamics acquired Deepcast in April 2025|9
+1|DEEPCAST|KESTREL LABS|Deepcast supplied sonar modules to Kestrel Labs from 2022 until June 2025|8
+2|KESTREL LABS|PROJECT TERN|Kestrel Labs started Project Tern in June 2025 to build its own sonar|8</code></pre>
+<p>The header is paid once rather than on every row, columns such as <code>weight</code> or <code>degree</code> tell the model what the retriever thought was important, and ids make citation checkable. Markdown tables (<code>to_markdown_tables</code>) carry the same information with extra <code>| </code> padding; they cost more tokens but render nicely in logs and are very familiar to models.</p>
+
+<h3>Adjacency lists</h3>
+<p><code>NODE: neighbor1, neighbor2</code>. Very cheap, and the only format in which “Kestrel Labs sits between Deepcast and Project Tern” is visible on a single line. It drops edge descriptions and direction, so on its own it supports structural questions (“who is connected to Deepcast?”) but not causal ones (“why?”). A useful hybrid is labeled adjacency: <code>DEEPCAST: SUPPLIED KESTREL LABS; ACQUIRED BY MARLOW DYNAMICS</code>.</p>
+
+<h3>JSON</h3>
+<p>Node-link JSON is lossless and easy to generate and parse, and it is the natural choice when the model must return structured output that refers to the input. It is also the most token-hungry format here: quotes, keys and indentation are repeated for every node and edge, which can easily cost one and a half to two times a pipe table with the same content, and more for small tables. Minified JSON (no indentation) recovers some of that.</p>
+
+<h3>Natural-language verbalization</h3>
+<p>Turn each edge into a sentence. When descriptions were written by an extractor, verbalization is mostly a matter of stitching them together; with typed relations you need a template per relation type (“{s} acquired {o} in {date}”). Sentences read the way the model's pretraining text reads, and they are the easiest format for a human to audit. They cost about as much as triples and, like triples, lack ids unless you add them.</p>
+<pre data-file="examples/context_tools.py"><code class="language-python">def verbalize_edges(G, edges) -&gt; str:
+    """One plain sentence per relationship, using the stored description when there is one."""
+    lines = []
+    for u, v in edges:
+        d = G.edges[u, v]
+        desc = d.get("description") or "is related to"
+        lines.append(f"{u.title()} and {v.title()}: {desc.rstrip('.')}.")
+    return "\n".join(lines)
+
+def dedupe(items: list[str], key=lambda s: re.sub(r"\W+", " ", s.lower()).strip()) -&gt; list[str]:
+    """Drop exact and near-exact duplicates (same text after lowercasing and stripping punctuation)."""
+    seen, out = set(), []
+    for item in items:
+        k = key(item)
+        if k not in seen:
+            seen.add(k)
+            out.append(item)
+    return out</code></pre>
+
+<h3>Paths</h3>
+<p>For multi-hop questions, serialize the chain itself, in hop order: <code>PRIYA NAIR --[worked at before 2023]--&gt; MARLOW DYNAMICS --[acquired in April 2025]--&gt; DEEPCAST</code>. <code>paths_to_text</code> in <code>minigraphrag/search/paths.py</code> renders PathRAG-style paths this way (<a href="18-paths-and-agents.html">Chapter 18</a>). A path puts the reasoning order on the page, so the model does not have to reassemble it from shuffled rows. The cost is duplication: two paths through the same edge repeat it.</p>
+
+<p>The visualization below renders one five-edge Kestrel subgraph in every format. Token counts are the rough estimate of characters divided by four, which is close to what BPE tokenizers give for English and code-like text. Toggle descriptions off to see how much of the cost is description text rather than structure.</p>
+
+<div class="viz" data-viz="ch22-serialize">
+<script type="application/json">
+{
+  "title": "One subgraph, seven serializations",
+  "subtitle": "Evidence for “What connects Priya Nair to Deepcast?” and “Why did Kestrel start Tern?”",
+  "nodes": [
+    {"id": "MARLOW DYNAMICS", "type": "ORGANIZATION", "description": "Defense-focused underwater vehicle maker"},
+    {"id": "DEEPCAST", "type": "ORGANIZATION", "description": "Sonar hardware supplier"},
+    {"id": "KESTREL LABS", "type": "ORGANIZATION", "description": "Ocean-tech startup in Port Avalon"},
+    {"id": "PROJECT TERN", "type": "PROJECT", "description": "In-house sonar module started in June 2025"},
+    {"id": "PRIYA NAIR", "type": "PERSON", "description": "Engineer who joined Kestrel Labs from Marlow Dynamics in 2023"}
+  ],
+  "edges": [
+    {"source": "MARLOW DYNAMICS", "relation": "ACQUIRED", "target": "DEEPCAST", "description": "Marlow Dynamics acquired Deepcast in April 2025"},
+    {"source": "DEEPCAST", "relation": "SUPPLIED", "target": "KESTREL LABS", "description": "Deepcast supplied sonar modules to Kestrel Labs from 2022 until June 2025"},
+    {"source": "KESTREL LABS", "relation": "RUNS", "target": "PROJECT TERN", "description": "Kestrel Labs started Project Tern in June 2025 to replace Deepcast sonar"},
+    {"source": "PRIYA NAIR", "relation": "CO_LEADS", "target": "PROJECT TERN", "description": "Priya Nair co-leads Project Tern"},
+    {"source": "PRIYA NAIR", "relation": "FORMERLY_WORKED_AT", "target": "MARLOW DYNAMICS", "description": "Priya Nair worked at Marlow Dynamics before joining Kestrel Labs in 2023"}
+  ],
+  "paths": [
+    ["PRIYA NAIR", "MARLOW DYNAMICS", "DEEPCAST", "KESTREL LABS", "PROJECT TERN"],
+    ["PRIYA NAIR", "PROJECT TERN"]
+  ]
+}
+</script>
+</div>
+
+<table>
+  <thead><tr><th>Format</th><th>Relative tokens</th><th>Citable ids</th><th>Shows structure</th><th>Good for</th></tr></thead>
+  <tbody>
+    <tr><td>Triples</td><td>Low</td><td>No (add them)</td><td>Edge by edge</td><td>Many small facts, tight budgets</td></tr>
+    <tr><td>GraphRAG tables</td><td>Low to medium</td><td>Yes</td><td>Rows, with rank columns</td><td>Local search contexts with citations</td></tr>
+    <tr><td>Markdown tables</td><td>Medium</td><td>Yes</td><td>Rows</td><td>Human-readable logs, models that like markdown</td></tr>
+    <tr><td>Adjacency list</td><td>Very low</td><td>No</td><td>Neighborhoods at a glance</td><td>Structural questions, overviews</td></tr>
+    <tr><td>JSON</td><td>Highest</td><td>Yes</td><td>Everything, hard to skim</td><td>Structured output, tool results</td></tr>
+    <tr><td>Sentences</td><td>Low to medium</td><td>No (add them)</td><td>Implicit</td><td>Small models, auditability</td></tr>
+    <tr><td>Paths</td><td>Medium, with repeats</td><td>Per path</td><td>Reasoning order</td><td>Multi-hop “why” and “how connected” questions</td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">Which token counter are you using?</span>
+  <p><code>count_tokens</code> uses tiktoken when it is installed and otherwise estimates 4 tokens per 3 whitespace-separated words. The word estimate is fine for prose and badly wrong for delimiter-heavy text: <code>0|MARLOW DYNAMICS|DEEPCAST|ACQUIRED</code> has two whitespace-separated “words”, so the fallback counts it as 3 tokens, while a BPE tokenizer splits it into a dozen or so. If you budget pipe tables with the fallback estimator, you will overfill the context. Install tiktoken or the tokenizer of your actual model before trusting budgets on tables and JSON.</p>
+</div>
+
+<h3>What research on graph encodings found</h3>
+<div class="callout paper">
+  <span class="callout-title">Fatemi, Halcrow and Perozzi, Talk like a Graph: Encoding Graphs for Large Language Models (2023)</span>
+  <p>The first systematic study of how to write a graph as text for an LLM. Using a benchmark of basic graph reasoning tasks (edge existence, node degree, connectivity, cycle detection and others), the authors varied how nodes are named (integers or familiar names), how edges are phrased (an adjacency style, “incident” lists of each node's neighbors, or social framings such as friendship), how the question is posed, and which random-graph generator produced the graph. Their headline is that these choices matter a lot: the abstract reports that the right encoder can improve performance by 4.8% to 61.8% depending on the task. No single encoding won everywhere, and the structure of the graph itself also affected accuracy.</p>
+</div>
+<p>Three practical lessons carry over to GraphRAG even though their tasks were synthetic rather than question answering over extracted knowledge:</p>
+<ol>
+  <li><strong>Test formats on your own questions.</strong> Format effects are task-dependent, so a format that wins on “who is connected to X” can lose on “why did X happen”. Exercise 22.5 builds that test.</li>
+  <li><strong>Group by node when the question is about a node.</strong> Listing each node's neighbors together keeps related facts adjacent, which is what incident-style encodings do. GraphRAG's entity table followed by that entity's relationships approximates it.</li>
+  <li><strong>Meaningful names beat opaque ids for reasoning.</strong> Keep human-readable names in the text and put ids in a separate column for citation, rather than replacing names with ids to save tokens.</li>
+</ol>
+
+<h2>Ordering, position and duplicates</h2>
+
+<h3>Lost in the middle</h3>
+<p>Long-context models do not read every position equally well. The best-known measurement is below; its lesson for GraphRAG is that <em>where</em> you put the Deepcast acquisition row can matter as much as <em>whether</em> you retrieved it.</p>
+<div class="callout paper">
+  <span class="callout-title">Liu et al., Lost in the Middle: How Language Models Use Long Contexts (2023)</span>
+  <p>In multi-document question answering and key-value retrieval tasks, model accuracy was often highest when the relevant document was at the beginning or the end of the context and dropped noticeably when it was in the middle, producing a U-shaped curve. The authors also report that giving the reader more retrieved documents stopped helping well before retrieval recall stopped improving. Later long-context models appear to have narrowed the effect without removing it, so measure it on your model.</p>
+</div>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 260" role="img" aria-labelledby="litm-title">
+      <title id="litm-title">A U-shaped curve of accuracy against evidence position, and a sandwich ordering that puts the strongest evidence at both ends</title>
+      <defs>
+        <marker id="litm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <line class="d-line" x1="50" y1="200" x2="330" y2="200" marker-end="url(#litm-arrow)"/>
+      <line class="d-line" x1="50" y1="200" x2="50" y2="30" marker-end="url(#litm-arrow)"/>
+      <text class="d-text small" x="56" y="40">answer quality</text>
+      <text class="d-text small" x="60" y="218">start</text>
+      <text class="d-text small" x="170" y="218">middle</text>
+      <text class="d-text small" x="296" y="218">end</text>
+      <text class="d-text small" x="80" y="240">position of the key evidence</text>
+      <path class="d-line hot" d="M60,60 C120,170 240,170 310,75"/>
+      <text class="d-text small" x="112" y="112">qualitative shape</text>
+
+      <text class="d-text bold" x="380" y="40">Sandwich ordering of 7 ranked rows</text>
+      <rect class="d-box node" x="380" y="56" width="36" height="120" rx="4"/>
+      <text class="d-text bold" x="398" y="122" text-anchor="middle">1</text>
+      <rect class="d-box node" x="422" y="56" width="36" height="120" rx="4"/>
+      <text class="d-text bold" x="440" y="122" text-anchor="middle">3</text>
+      <rect class="d-box" x="464" y="56" width="36" height="120" rx="4"/>
+      <text class="d-text bold" x="482" y="122" text-anchor="middle">5</text>
+      <rect class="d-box ghost" x="506" y="56" width="36" height="120" rx="4"/>
+      <text class="d-text bold" x="524" y="122" text-anchor="middle">7</text>
+      <rect class="d-box" x="548" y="56" width="36" height="120" rx="4"/>
+      <text class="d-text bold" x="566" y="122" text-anchor="middle">6</text>
+      <rect class="d-box node" x="590" y="56" width="36" height="120" rx="4"/>
+      <text class="d-text bold" x="608" y="122" text-anchor="middle">4</text>
+      <rect class="d-box node" x="632" y="56" width="36" height="120" rx="4"/>
+      <text class="d-text bold" x="650" y="122" text-anchor="middle">2</text>
+      <text class="d-text small" x="380" y="200">best rows at both ends, weakest in the middle</text>
+      <text class="d-text small" x="380" y="218">(within a section; keep sections in a fixed order)</text>
+    </svg>
+  </div>
+  <figcaption>Left: the qualitative U shape reported for long contexts. Right: sandwich ordering places the highest-ranked rows at the start and end of a section and the weakest in the middle, so a position penalty falls on the evidence you trust least.</figcaption>
+</figure>
+
+<p>Ordering rules that work well in practice:</p>
+<ul>
+  <li><strong>Rank first, then place.</strong> Sort by retrieval score, then apply a placement policy. Sandwich ordering is one; “best first” is another and is easier to debug.</li>
+  <li><strong>Put the question close to the end.</strong> <code>generate_answer</code> puts the context in the system prompt and the question in the user turn, so the question is the last thing read. Restating it just before the tables helps smaller models focus.</li>
+  <li><strong>Use natural orders when they exist.</strong> Paths go in hop order, timelines in date order. A chronologically shuffled timeline makes “who was CTO in 2025” harder than it needs to be.</li>
+  <li><strong>Keep related rows adjacent.</strong> An entity followed by its relationships beats all entities then all relationships when the question is about one entity.</li>
+  <li><strong>Keep section order fixed across queries.</strong> A stable prefix is also what makes prompt caching work.</li>
+</ul>
+<pre data-file="examples/context_tools.py"><code class="language-python">def sandwich(items_best_first: list[str]) -&gt; list[str]:
+    """Place rank 1 first, rank 2 last, rank 3 second, rank 4 second-to-last, ...
+
+    The weakest items end up in the middle, where long-context models attend least.
+    """
+    front, back = [], []
+    for i, item in enumerate(items_best_first):
+        (front if i % 2 == 0 else back).append(item)
+    return front + back[::-1]</code></pre>
+
+<h3>Deduplication</h3>
+<p>Graph retrieval produces duplicates in three ways. The same fact appears as a relationship row and inside a source passage. Two paths share edges. And entity resolution misses leave near-identical descriptions under two names (“Deepcast” and “Deepcast Inc.”). Duplicates cost tokens and they also bias the model: a fact stated three times looks more important than one stated once. Deduplicate at three levels: exact or normalized text within a section (the <code>dedupe</code> helper above), shared edges across paths (render each edge once and refer to paths by edge ids), and facts across sections (drop a relationship row when a source passage already selected states it, or keep the row and drop the passage if you need the id for citation).</p>
+
+<h2>Token budgets across sections</h2>
+<p>A context window is a budget. Local search in <code>minigraphrag</code> splits it by proportion: 15% community reports, 50% source text, and the remaining 35% shared by entities and relationships (see <code>build_local_context</code> in <a href="14-local-search.html">Chapter 14</a>). Each section is filled greedily with its best items until its slice runs out:</p>
+<pre data-file="minigraphrag/context.py"><code class="language-python">def fit_to_budget(items: list[str], max_tokens: int, header: str = "") -&gt; list[str]:
+    """Greedily keep items (already ranked best-first) until the budget is used up."""
+    used = count_tokens(header)
+    kept = []
+    for item in items:
+        t = count_tokens(item)
+        if used + t &gt; max_tokens:
+            break
+        kept.append(item)
+        used += t
+    return kept</code></pre>
+
+<div class="viz" data-viz="token-budget">
+<script type="application/json">
+{
+  "title": "Splitting an 8,000-token local search context",
+  "subtitle": "Drag the sliders; shares are renormalized to the total",
+  "total": 8000,
+  "parts": [
+    {"label": "Reports", "share": 0.15},
+    {"label": "Entities", "share": 0.17},
+    {"label": "Relationships", "share": 0.18},
+    {"label": "Sources", "share": 0.5}
+  ],
+  "note": "Global questions want more Reports; multi-hop questions want more Relationships and paths; quote-heavy questions want more Sources. Whatever you choose, the system prompt, question and answer also need room."
+}
+</script>
+</div>
+
+<p>Fixed shares waste space whenever a section has less evidence than its slice. A question about Lena Park might retrieve two entity rows and fill 40 of its 1,400 entity tokens. The fix is a second pass that hands leftover tokens to sections that still have items, starting with the largest share:</p>
+<pre data-file="examples/context_tools.py"><code class="language-python">from minigraphrag.context import fit_to_budget
+from minigraphrag.tokens import count_tokens
+
+def allocate_budget(sections: dict[str, list[str]], total: int, shares: dict[str, float],
+                    headers: dict[str, str] | None = None) -&gt; dict[str, list[str]]:
+    """Fill each section up to its share, then hand unused tokens to sections that still have items."""
+    headers = headers or {}
+    kept = {name: fit_to_budget(items, int(total * shares[name]), headers.get(name, ""))
+            for name, items in sections.items()}
+    used = sum(count_tokens(headers.get(n, "")) + sum(count_tokens(x) for x in kept[n]) for n in kept)
+    for name in sorted(sections, key=lambda n: -shares[n]):          # biggest share gets first pick
+        rest = sections[name][len(kept[name]):]
+        extra = fit_to_budget(rest, total - used)
+        kept[name] += extra
+        used += sum(count_tokens(x) for x in extra)
+    return kept</code></pre>
+
+<h3>A worked allocation</h3>
+<p>Take a 6,000-token budget with shares Reports 15%, Entities 20%, Relationships 15%, Sources 50%. Available items: 2 reports of 500 tokens, 30 entity rows of 60 tokens, 40 relationship rows of 44 tokens, 12 passages of 400 tokens.</p>
+<table>
+  <thead><tr><th>Section</th><th>Slice</th><th>First pass</th><th>Used</th><th>Second pass</th><th>Final</th></tr></thead>
+  <tbody>
+    <tr><td>Sources</td><td>3,000</td><td>7 passages (an 8th would need 3,200)</td><td>2,800</td><td>+1 passage (400 of the 620 left)</td><td>8</td></tr>
+    <tr><td>Entities</td><td>1,200</td><td>20 rows</td><td>1,200</td><td>+3 rows (180 of the 220 left)</td><td>23</td></tr>
+    <tr><td>Reports</td><td>900</td><td>1 report (2 would need 1,000)</td><td>500</td><td>none (40 left, report needs 500)</td><td>1</td></tr>
+    <tr><td>Relationships</td><td>900</td><td>20 rows (21 would need 924)</td><td>880</td><td>none (40 left, row needs 44)</td><td>20</td></tr>
+  </tbody>
+</table>
+<p>First pass total: 2,800 + 1,200 + 500 + 880 = 5,380 tokens, leaving 620. The second pass visits sections by share (Sources, then Entities, then the two 15% sections in their original order) and ends at 5,960 tokens. Without redistribution, 10% of the budget would have gone unused.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Budget for the answer too</span>
+  <p>A model with a 128k window does not mean a 128k context is a good idea. Longer contexts cost more, respond slower and, as above, can bury evidence. Most GraphRAG systems use contexts between a few thousand and a few tens of thousands of tokens. Set the context budget from answer quality measurements, and always reserve room for the system prompt, the question and the maximum answer length.</p>
+</div>
+
+<h2>Citations and answer formats</h2>
+
+<h3>Ids that survive the round trip</h3>
+<p>Citations need ids that are short, unique within the prompt, and mappable back to real records. GraphRAG uses per-table integer ids (<code>human_id</code> in <code>minigraphrag</code>) for entities and relationships and text unit ids for sources. Two rules keep them trustworthy. Never renumber rows per query in a way that collides across sections: “Relationships (3)” and “Entities (3)” are fine because the table name disambiguates, but a bare “[3]” is not. And log the id-to-record map for every query, so a citation in a stored answer can still be resolved after the index is rebuilt.</p>
+
+<h3>A grounded system prompt</h3>
+<p>The prompt <code>minigraphrag</code> ships for local search (<code>LOCAL_SEARCH_SYSTEM_PROMPT</code>, adapted from GraphRAG) already contains the two sentences that matter most: “If you don't know the answer, just say so. Do not make anything up.” and the <code>[Data: ...]</code> citation format. For question answering where faithfulness matters more than breadth, a stricter version helps:</p>
+<pre data-file="examples/prompts_grounded.py"><code class="language-python">GROUNDED_ANSWER_SYSTEM = """---Role---
+You answer questions about Kestrel Labs using only the evidence tables below.
+
+---Rules---
+1. Use only facts stated in the tables. Do not add outside knowledge, even if you are confident it is true.
+2. End every sentence that states a fact with the rows it relies on: [Data: &lt;table&gt; (&lt;id&gt;, &lt;id&gt;)].
+   Cite at most 5 ids per reference. Never cite an id that is not in the tables.
+3. If the tables do not contain enough information to answer, reply:
+   "I don't know based on the provided data." Then say in one sentence what is missing.
+4. If two rows disagree, say so and cite both.
+5. When facts have dates, use the one that was true at the time the question asks about.
+
+---Answer format---
+{response_type}
+
+---Evidence tables---
+{context_data}
+"""
+
+# The question goes in the user turn, after the evidence, like generate_answer does:
+# llm.complete(question, system=GROUNDED_ANSWER_SYSTEM.format(context_data=context, response_type="2-4 sentences"))</code></pre>
+<p>Each rule targets an observed failure. Rule 1 stops the model from “helpfully” adding world knowledge, which is how answers about fictional companies acquire invented founders. Rule 2's “never cite an id that is not in the tables” reduces fabricated citations. Rule 3 gives the model a sanctioned exit; without it, models tend to answer anyway. Rule 4 surfaces conflicts instead of hiding them, and rule 5 is the prompt-side half of the temporal windows from <a href="21-hybrid-design-patterns.html">Chapter 21</a>: “Who is the CTO?” with both Vehl and Nair rows in context should produce Priya Nair with the date.</p>
+
+<div class="callout note">
+  <span class="callout-title">Abstention has to be measured</span>
+  <p>Include unanswerable questions in your evaluation set, for example “Who is Kestrel Labs' CFO?” (the corpus never says). Measure how often the system abstains on those and how often it wrongly abstains on answerable ones. A prompt change that raises one usually raises the other.</p>
+</div>
+
+<h3>Structured answers</h3>
+<p>Free text with inline <code>[Data: ...]</code> markers is readable and easy to stream. When a downstream program consumes the answer, or when you want claim-level checking, ask for JSON with one entry per atomic claim:</p>
+<pre data-file="examples/json_answer.py"><code class="language-python">import json
+from minigraphrag.llm import parse_json_response
+
+JSON_ANSWER_INSTRUCTIONS = """Return JSON only:
+{"answer": "&lt;one or two sentences, or null if the tables are insufficient&gt;",
+ "claims": [{"text": "&lt;one atomic claim&gt;", "citations": ["Relationships:1", "Sources:08_kestrel_board_memo_supply-000"]}],
+ "missing": "&lt;what evidence would be needed, or null&gt;"}"""
+
+def answer_as_json(llm, question: str, system: str) -&gt; dict:
+    out = parse_json_response(llm.complete(question + "\n\n" + JSON_ANSWER_INSTRUCTIONS, system=system, json=True))
+    out.setdefault("claims", [])
+    for claim in out["claims"]:                       # normalize "Table:id" strings into pairs
+        claim["citations"] = [tuple(c.split(":", 1)) for c in claim.get("citations", []) if ":" in c]
+    return out</code></pre>
+
+<h3>Measuring citation faithfulness</h3>
+<p>A citation can fail in three increasingly subtle ways, and each needs its own metric:</p>
+<ol>
+  <li><strong>Validity</strong>: the cited id exists in the context. Checkable with a regex and a lookup; failures are fabricated citations.</li>
+  <li><strong>Support (precision)</strong>: the cited rows actually entail the sentence. Needs a judge: an NLI model or an LLM asked a narrow yes/no question.</li>
+  <li><strong>Coverage (recall)</strong>: sentences that state facts carry citations at all.</li>
+</ol>
+<p>Citation recall and precision in this sense were popularized by the ALCE benchmark (Gao et al., 2023), which judges support with an NLI model. The code below implements all three with the <code>minigraphrag</code> LLM protocol as the judge.</p>
+<pre data-file="examples/citations.py"><code class="language-python">import re
+from minigraphrag.context import parse_tables
+
+CITATION = re.compile(r"\[Data:\s*([^\]]+)\]")
+
+def extract_citations(answer: str) -&gt; list[tuple[str, str]]:
+    """'[Data: Entities (5, 7); Relationships (23)]' -&gt; [('Entities','5'), ('Entities','7'), ('Relationships','23')]"""
+    out = []
+    for block in CITATION.findall(answer):
+        for part in block.split(";"):
+            m = re.match(r"\s*(\w+)\s*\(([^)]*)\)", part)
+            if m:
+                out += [(m.group(1), rid.strip()) for rid in m.group(2).split(",") if rid.strip() and rid.strip() != "+more"]
+    return out
+
+def citation_validity(answer: str, context: str) -&gt; float:
+    """Share of cited (table, id) pairs that actually exist in the context tables."""
+    tables = parse_tables(context)
+    present = {(t, row.get("id", "")) for t, rows in tables.items() for row in rows}
+    cited = extract_citations(answer)
+    return 1.0 if not cited else sum(c in present for c in cited) / len(cited)</code></pre>
+<pre data-file="examples/citation_support.py"><code class="language-python">import re
+from minigraphrag.context import parse_tables
+from examples.citations import extract_citations
+SUPPORT_PROMPT = """Statement: {statement}
+
+Evidence:
+{evidence}
+
+Does the evidence fully support the statement? Answer with one word: SUPPORTED, PARTIAL or UNSUPPORTED."""
+
+def citation_support(llm, answer: str, context: str) -&gt; dict:
+    """Per cited sentence, ask a judge whether the cited rows support it."""
+    tables = parse_tables(context)
+    rows = {(t, r.get("id", "")): " | ".join(r.values()) for t, rs in tables.items() for r in rs}
+    sentences = [s for s in re.split(r"(?&lt;=[.!?])\s+", answer) if s.strip()]
+    results = {"SUPPORTED": 0, "PARTIAL": 0, "UNSUPPORTED": 0, "uncited": 0, "invalid_id": 0}
+    for sentence in sentences:
+        cited = extract_citations(sentence)
+        if not cited:
+            results["uncited"] += 1
+            continue
+        evidence = [rows[c] for c in cited if c in rows]
+        results["invalid_id"] += len(cited) - len(evidence)
+        if not evidence:
+            results["UNSUPPORTED"] += 1
+            continue
+        statement = re.sub(r"\[Data:[^\]]*\]", "", sentence).strip()
+        verdict = llm.complete(SUPPORT_PROMPT.format(statement=statement, evidence="\n".join(evidence)))
+        label = next((v for v in ("UNSUPPORTED", "PARTIAL", "SUPPORTED") if v in verdict.upper()), "UNSUPPORTED")
+        results[label] += 1
+    cited_total = results["SUPPORTED"] + results["PARTIAL"] + results["UNSUPPORTED"]
+    results["citation_recall"] = cited_total / max(1, len(sentences))       # share of sentences with a citation
+    results["citation_precision"] = results["SUPPORTED"] / max(1, cited_total)
+    return results</code></pre>
+<p>For the answer “Marlow Dynamics acquired Deepcast [Data: Relationships (0)]. Deepcast then stopped supplying Kestrel, so Kestrel built Tern [Data: Relationships (1)]. It was a hard year.”, validity is 1.0 (both ids exist). Support is mixed: row 0 fully supports the first sentence, but row 1 only says Deepcast supplied Kestrel until June 2025, not that this caused Tern, so a careful judge returns PARTIAL. The third sentence has no citation, so coverage is 2 of 3. The partial citation is the dangerous one: it looks grounded, and the causal claim it carries came from the model.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Judges have biases too</span>
+  <p>LLM judges tend to be lenient with fluent sentences and can be swayed by the statement's confidence. Keep the judge prompt narrow (one statement, only the cited rows, a three-way label), use a different model from the generator when you can, and spot-check a sample of verdicts by hand. <a href="25-evaluation.html">Chapter 25</a> treats judge reliability in depth.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 22.1 <span class="level">Warm-up</span></h4>
+  <p>Serialize the three edges Marlow Dynamics ACQUIRED Deepcast, Deepcast SUPPLIED Kestrel Labs, Kestrel Labs RUNS Project Tern in three ways, using relation labels instead of descriptions: (a) triples, (b) a GraphRAG-style Relationships table with ids, (c) a JSON list of objects with <code>source</code>, <code>relation</code>, <code>target</code> keys on one line. Estimate tokens as characters divided by four (round up). Which one can be cited, and what does each cost relative to triples?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code>(MARLOW DYNAMICS, ACQUIRED, DEEPCAST)
+(DEEPCAST, SUPPLIED, KESTREL LABS)
+(KESTREL LABS, RUNS, PROJECT TERN)</code></pre>
+    <pre><code>-----Relationships-----
+id|source|target|relation
+0|MARLOW DYNAMICS|DEEPCAST|ACQUIRED
+1|DEEPCAST|KESTREL LABS|SUPPLIED
+2|KESTREL LABS|PROJECT TERN|RUNS</code></pre>
+    <pre><code class="language-json">[{"source": "MARLOW DYNAMICS", "relation": "ACQUIRED", "target": "DEEPCAST"}, {"source": "DEEPCAST", "relation": "SUPPLIED", "target": "KESTREL LABS"}, {"source": "KESTREL LABS", "relation": "RUNS", "target": "PROJECT TERN"}]</code></pre>
+    <p>Character counts (newlines included): triples 107, table 151, JSON 225. Estimated tokens: 27, 38 and 57. With only three rows, the table's title and header lines (48 characters) make it 40% larger than triples; the header is a fixed cost, so the gap shrinks as rows grow. JSON costs about twice the triples, and the gap grows with rows because every row repeats its keys. Only the table has ids a model can cite as <code>[Data: Relationships (1)]</code>. <code>count_tokens</code>'s word-based fallback reports 18, 12 and 30 for the same strings, ranking the table cheapest because pipes remove the spaces it counts. That is why real tokenizers matter for tables.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 22.2 <span class="level">Warm-up</span></h4>
+  <p>Seven source passages are ranked r1 (best) to r7. Write the order produced by <code>sandwich</code>. Which rank sits exactly in the middle, and which two ranks are adjacent to the end of the section? Then give one kind of section where you should not use sandwich ordering.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Even indices (r1, r3, r5, r7) go to the front in order; odd indices (r2, r4, r6) go to the back reversed. Result: <strong>r1, r3, r5, r7, r6, r4, r2</strong>. Position 4 of 7, the exact middle, holds r7, the weakest. The last two positions hold r4 and r2, so r2 is the very last row and r1 the very first.</p>
+    <p>Do not sandwich sections that have a meaningful natural order: a timeline (the model needs chronology to answer “who was CTO in 2025”), a path (hops must stay in order), or a conversation history. Rank-based placement would scramble the structure the model relies on.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 22.3 <span class="level">Core</span></h4>
+  <p>Repeat the worked allocation with a 4,000-token budget and the same shares and items (reports 500, entity rows 60, relationship rows 44, passages 400). Compute the first pass, the second pass and the total by hand, then check with <code>allocate_budget</code>.</p>
+  <details class="hint"><summary>Hint</summary><p>Slices are Reports 600, Entities 800, Relationships 600, Sources 2,000. The second pass visits Sources, Entities, Reports, Relationships.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>First pass.</strong> Sources 2,000: 5 passages = 2,000 exactly. Entities 800: 13 rows = 780 (14 would be 840). Reports 600: 1 report = 500. Relationships 600: 13 rows = 572 (14 would be 616). Used: 2,000 + 780 + 500 + 572 = 3,852. Left: 148.</p>
+    <p><strong>Second pass.</strong> Sources: next passage needs 400, skip. Entities: 2 more rows (120) fit, a third would need 180; used 3,972, left 28. Reports: 500, skip. Relationships: 44, skip.</p>
+    <p><strong>Final.</strong> Reports 1, Entities 15, Relationships 13, Sources 5; total 3,972 tokens.</p>
+    <pre><code class="language-python">import math
+from examples.context_tools import allocate_budget
+from minigraphrag.tokens import count_tokens
+
+def item(n_tokens):
+    # With the word-based fallback, ceil(words * 4 / 3) tokens; find a word count that hits n_tokens exactly.
+    words = next(w for w in range(1, 5000) if math.ceil(w * 4 / 3) == n_tokens)
+    return " ".join(["x"] * words)
+
+sections = {"Reports": [item(500)] * 2, "Entities": [item(60)] * 30,
+            "Relationships": [item(44)] * 40, "Sources": [item(400)] * 12}
+kept = allocate_budget(sections, 4000, {"Reports": 0.15, "Entities": 0.2, "Relationships": 0.15, "Sources": 0.5})
+print({k: len(v) for k, v in kept.items()}, sum(count_tokens(x) for v in kept.values() for x in v))
+# {'Reports': 1, 'Entities': 15, 'Relationships': 13, 'Sources': 5} 3972</code></pre>
+    <p>The helper only produces these exact numbers with the word-based fallback counter. With tiktoken installed, strings of repeated “x” tokenize differently; the arithmetic is what matters.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 22.4 <span class="level">Core</span></h4>
+  <p>Extend <code>citation_support</code> to also report <em>fabricated</em> citations (ids not in the context) per answer, and add a rule that a sentence with any fabricated citation counts as UNSUPPORTED even if its other citations support it. Test it on: “Priya Nair co-leads Project Tern [Data: Relationships (3, 99)].” with a context whose Relationships table has ids 0 to 4.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import re
+from minigraphrag.context import parse_tables
+from examples.citations import extract_citations
+from examples.citation_support import SUPPORT_PROMPT
+
+def citation_support_strict(llm, answer: str, context: str) -&gt; dict:
+    tables = parse_tables(context)
+    rows = {(t, r.get("id", "")): " | ".join(r.values()) for t, rs in tables.items() for r in rs}
+    out = {"SUPPORTED": 0, "PARTIAL": 0, "UNSUPPORTED": 0, "uncited": 0, "fabricated": []}
+    for sentence in [s for s in re.split(r"(?&lt;=[.!?])\s+", answer) if s.strip()]:
+        cited = extract_citations(sentence)
+        if not cited:
+            out["uncited"] += 1
+            continue
+        fake = [c for c in cited if c not in rows]
+        out["fabricated"] += fake
+        if fake:                                   # one invented id taints the whole sentence
+            out["UNSUPPORTED"] += 1
+            continue
+        statement = re.sub(r"\[Data:[^\]]*\]", "", sentence).strip()
+        verdict = llm.complete(SUPPORT_PROMPT.format(statement=statement,
+                                                     evidence="\n".join(rows[c] for c in cited))).upper()
+        out[next((v for v in ("UNSUPPORTED", "PARTIAL", "SUPPORTED") if v in verdict), "UNSUPPORTED")] += 1
+    return out</code></pre>
+    <p>On the test sentence, <code>extract_citations</code> returns <code>[("Relationships", "3"), ("Relationships", "99")]</code>. Row 3 exists, row 99 does not, so the result is <code>{"UNSUPPORTED": 1, "fabricated": [("Relationships", "99")], ...}</code> and the judge is never called. Note the order of the label check: “UNSUPPORTED” contains “SUPPORTED”, so it must be tested first. The strict rule is deliberately harsh. A model that invents one id is not reliably tracking where its claims come from, and in a user interface a broken citation link destroys trust faster than a missing one.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 22.5 <span class="level">Stretch</span></h4>
+  <p>Design and run an experiment that measures, on your model, (a) whether serialization format changes answer quality on the Kestrel questions and (b) whether the position of the supporting passages matters. Control for retrieval: only include questions where the supporting documents were retrieved. Report token F1 per (format, position) cell and say what result would make you change your production format.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre data-file="examples/format_position_experiment.py"><code class="language-python">import json, random
+from collections import defaultdict
+from minigraphrag.context import format_table
+from minigraphrag.evaluation import load_questions, token_f1
+from minigraphrag.indexer import load_index
+from minigraphrag.llm import get_llm
+from minigraphrag.search.common import generate_answer
+from minigraphrag.search.local import build_local_context
+
+def place(rows: list[list], gold_rows: list[list], position: str, rng) -&gt; list[list]:
+    """Put the gold rows at the start, middle or end of the distractor rows."""
+    rest = [r for r in rows if r not in gold_rows]
+    rng.shuffle(rest)
+    cut = {"start": 0, "middle": len(rest) // 2, "end": len(rest)}[position]
+    return rest[:cut] + gold_rows + rest[cut:]
+
+def render(rows: list[list], fmt: str) -&gt; str:
+    if fmt == "table":
+        return format_table("Sources", ["id", "text"], rows)
+    if fmt == "json":
+        return json.dumps([{"id": r[0], "text": r[1]} for r in rows], indent=1)
+    return "\n".join(f"[{r[0]}] {r[1]}" for r in rows)            # "lines"
+
+index = load_index("out/kestrel")
+llm = get_llm("openai", cache_dir=".cache/llm")                  # MockLLM only parses tables; use a real model
+questions = load_questions("data/questions.jsonl")
+rng = random.Random(0)
+scores = defaultdict(list)
+for q in questions:
+    gold_docs = set(q.get("supporting_docs", []))
+    if not gold_docs:
+        continue
+    _, data = build_local_context(index, q["question"], max_context_tokens=6000)
+    rows = [[s["id"], s["text"]] for s in data["sources"]]
+    rows += [[u.id, u.text] for u in rng.sample(list(index.text_units.values()), 8) if [u.id, u.text] not in rows]
+    gold = [r for r in rows if index.text_units[r[0]].doc_id in gold_docs]
+    if not gold:
+        continue                                                   # retrieval failed; not a formatting question
+    for fmt in ("table", "lines", "json"):
+        for position in ("start", "middle", "end"):
+            context = render(place(rows, gold, position, rng), fmt)
+            answer = generate_answer(llm, q["question"], context)
+            scores[(fmt, position)].append(token_f1(answer, q["answer"]))
+for key, vals in sorted(scores.items()):
+    print(key, f"F1={sum(vals) / len(vals):.3f} over {len(vals)} questions")</code></pre>
+    <p>Design choices that make the result interpretable: the same rows appear in every cell, only their rendering and placement change; distractor passages are added so position has room to matter; questions whose gold documents were not retrieved are skipped, because they measure retrieval, not formatting; and a fixed seed makes the shuffle reproducible. Run it with a real model: <code>MockLLM</code> only knows how to read GraphRAG-style tables, so with the mock you will see the table format win for a trivial reason, a reminder to check what your evaluation script is really measuring.</p>
+    <p>How to read the grid: with 20-odd questions, differences of a few F1 points are noise; rerun with two or three seeds and look for effects that hold across them. Change the production format only if one format wins consistently across seeds and positions, or if two formats tie and one is much cheaper in tokens (then take the cheaper one). If the “middle” column is clearly worse than “start” and “end” on your model, adopt sandwich ordering or shorten contexts. Token F1 punishes correct but verbose answers, so confirm any decision with an LLM judge on a sample.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why do GraphRAG local search contexts use titled tables with an id column rather than plain triples?</p>
+  <ol>
+    <li>Tables always use fewer tokens than triples</li>
+    <li data-correct>Row ids let the answer cite specific evidence, and extra columns like rank tell the model what the retriever considered important</li>
+    <li>LLMs cannot read parentheses reliably</li>
+    <li>Tables preserve edge direction and triples cannot</li>
+  </ol>
+  <div class="explain">For a few rows, tables can cost more than triples because of the header. Their advantage is citation (<code>[Data: Relationships (3)]</code>) and room for ranking signals.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the most defensible summary of “Talk like a Graph” for a GraphRAG engineer?</p>
+  <ol>
+    <li>Adjacency lists are always the best encoding</li>
+    <li>Graph encoding choices have no measurable effect on large models</li>
+    <li>JSON is the best encoding for reasoning tasks</li>
+    <li data-correct>Encoding choices can change accuracy a lot, the best choice depends on the task and graph, so test formats on your own questions</li>
+  </ol>
+  <div class="explain">The paper found large, task-dependent effects and no universal winner. Its tasks were synthetic graph problems, so the transferable lesson is to measure, not a specific format.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Your context has 40 relationship rows. Accuracy drops when the key Deepcast row lands around row 20. Which change targets that problem directly?</p>
+  <ol>
+    <li data-correct>Order rows so the highest-ranked evidence is at the start and end of the section, or shorten the section</li>
+    <li>Switch from tables to JSON</li>
+    <li>Increase the temperature</li>
+    <li>Add more distractor rows so the key row is less prominent</li>
+  </ol>
+  <div class="explain">That is the lost-in-the-middle pattern. Placement and shorter contexts address it; format changes and more rows do not.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A section's fixed share is 1,200 tokens, but only 3 entity rows (180 tokens) were retrieved. What does a two-pass allocator do with the remaining 1,020 tokens?</p>
+  <ol>
+    <li>Leaves them empty to keep the prompt short</li>
+    <li>Repeats the 3 entity rows to fill the slice</li>
+    <li data-correct>Offers them to other sections that still have unplaced items, largest share first</li>
+    <li>Adds them to the answer's max_tokens</li>
+  </ol>
+  <div class="explain">Redistribution keeps the total budget fixed while letting sections with more evidence use space others do not need.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">An answer cites [Data: Relationships (1)] for “Deepcast stopped supplying Kestrel, so Kestrel built Tern.” Row 1 exists and says Deepcast supplied Kestrel until June 2025. Which metric catches the problem?</p>
+  <ol>
+    <li>Citation validity</li>
+    <li>Citation coverage (recall)</li>
+    <li data-correct>Citation support (precision), judged by entailment</li>
+    <li>Token F1 against the gold answer</li>
+  </ol>
+  <div class="explain">The id is valid and the sentence is cited, but the row does not entail the causal claim. Only a support check that reads the row and the sentence catches it.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does a grounded system prompt explicitly allow “I don't know based on the provided data”?</p>
+  <ol>
+    <li>It reduces output tokens on every query</li>
+    <li data-correct>Without a sanctioned way to abstain, models tend to answer anyway, filling gaps from world knowledge or invention</li>
+    <li>It is required by the citation format</li>
+    <li>It makes retrieval faster</li>
+  </ol>
+  <div class="explain">Abstention has to be allowed and then measured on unanswerable questions, because prompts that increase abstention can also increase wrong abstentions.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I include community reports and raw passages when I already have entities and relationships?</summary>
+  <div><p>Usually yes, but for different reasons. Entities and relationships are compressed and easy to cite; passages carry nuance, dates and quotes that extraction dropped; reports give global framing. The budget split is the lever: shift share toward passages for “what exactly did the memo say” questions and toward reports for “what are the risks” questions. If you must drop one, drop reports for local questions and passages for global ones.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is markdown or XML-style tagging better for section boundaries?</summary>
+  <div><p>Both work; consistency matters more than the choice. Titled sections like <code>-----Relationships-----</code> (GraphRAG), markdown headings, or tags such as <code>&lt;relationships&gt;…&lt;/relationships&gt;</code> all give the model clear boundaries. Tags have one practical advantage: retrieved passages can contain markdown headings or pipes, which blur markdown boundaries, while a closing tag is unlikely to appear in source text. Some model providers also recommend tags in their prompting guides.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I just give the model the whole graph if it fits in the context window?</summary>
+  <div><p>For a graph as small as Kestrel's, you could, and it is a useful baseline. It stops working for three reasons as graphs grow: cost scales with graph size on every query, position effects make distant facts less reliable, and irrelevant but plausible facts distract the model. Retrieval plus a focused context usually beats “everything” on both quality and cost once the graph is more than a few thousand tokens.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does prompt caching change how I should build contexts?</summary>
+  <div><p>It rewards a stable prefix. Put fixed instructions, schema descriptions and few-shot examples first, then per-query evidence, then the question. Keep section order and headers identical across queries. Retrieved evidence differs per query, so it will not be cached, but a long fixed system prompt will be. Do not reorder instructions per query for small gains.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I cite a path, which spans several edges?</summary>
+  <div><p>Give each path an id and list its edge ids: <code>P1: Priya Nair -[r4]-&gt; Marlow Dynamics -[r0]-&gt; Deepcast</code>. Then the answer can cite <code>[Data: Paths (P1)]</code> for the chain and <code>[Data: Relationships (0)]</code> for the single hop it relies on most, and the support checker can verify each hop against its row. <a href="23-graph-reasoning.html">Chapter 23</a> verifies paths hop by hop against source passages.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a context builder with a report card</h3>
+  <p>Build a context construction module that you can switch between formats and policies, and that grades its own output on every query.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>build_context(evidence, format, ordering, budget, shares)</code> supporting at least tables, triples, sentences and paths, with sandwich or natural ordering per section</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Cross-section deduplication and two-pass budget redistribution, with a log line of tokens per section</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The grounded system prompt, with five unanswerable Kestrel questions added to your test set</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A per-answer report: citation validity, support precision, coverage, and whether the system abstained</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Results of the format and position experiment from Exercise 22.5 on a real model, with your production choice and its justification</span></li>
+  </ul>
+  <p><strong>Done when</strong> every answer your system produces comes with a report card, and you changed at least one default because of a number on it.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Serialization is a design decision with measurable effects on cost, on what the model notices, and on whether answers can cite evidence.</li>
+    <li>Tables with ids are the workhorse for cited answers; triples and adjacency lists are cheap; JSON is precise but costly; paths carry reasoning order.</li>
+    <li>Encoding effects are real and task-dependent, so test formats on your own questions rather than adopting a universal favorite.</li>
+    <li>Place strong evidence where the model attends best, keep natural orders for timelines and paths, and deduplicate within and across sections.</li>
+    <li>Split the token budget by section and redistribute what a section does not use; count tokens with the real tokenizer for tables and JSON.</li>
+    <li>Allow “I don't know”, require citations, and measure citation validity, support and coverage separately.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Fatemi, B., Halcrow, J. and Perozzi, B. <a href="https://arxiv.org/abs/2310.04560">Talk like a Graph: Encoding Graphs for Large Language Models</a>. <span class="venue">arXiv 2310.04560, 2023</span></li>
+  <li>Liu, N. F. et al. <a href="https://arxiv.org/abs/2307.03172">Lost in the Middle: How Language Models Use Long Contexts</a>. <span class="venue">Transactions of the ACL, 2023</span></li>
+  <li>Gao, T. et al. <a href="https://arxiv.org/abs/2305.14627">Enabling Large Language Models to Generate Text with Citations</a> (ALCE). <span class="venue">EMNLP 2023; arXiv 2305.14627</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: local search context builder and prompts. <span class="venue">GitHub</span></li>
+  <li>Chen, B. et al. <a href="https://arxiv.org/abs/2502.14902">PathRAG: Pruning Graph-based Retrieval Augmented Generation with Relational Paths</a>. <span class="venue">arXiv 2502.14902, 2025</span></li>
+  <li>Peng, B. et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+<script>
+GRFSViz.register("ch22-serialize", function (el, cfg, api) {
+  const { stage } = api.frame(el, cfg);
+  const nodes = cfg.nodes || [], edges = cfg.edges || [], paths = cfg.paths || [];
+  const title = (s) => s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+  const edgeBetween = (a, b) => edges.find((e) => (e.source === a && e.target === b) || (e.source === b && e.target === a));
+  const formats = {
+    "Triples": (d) => edges.map((e) => "(" + e.source + ", " + (d ? e.description : e.relation) + ", " + e.target + ")").join("\n"),
+    "GraphRAG tables": (d) => "-----Entities-----\nid|entity|type" + (d ? "|description" : "") + "\n" +
+      nodes.map((n, i) => i + "|" + n.id + "|" + n.type + (d ? "|" + n.description : "")).join("\n") +
+      "\n\n-----Relationships-----\nid|source|target|" + (d ? "description" : "relation") + "\n" +
+      edges.map((e, i) => i + "|" + e.source + "|" + e.target + "|" + (d ? e.description : e.relation)).join("\n"),
+    "Markdown": (d) => "| id | entity | type |" + (d ? " description |" : "") + "\n|---|---|---|" + (d ? "---|" : "") + "\n" +
+      nodes.map((n, i) => "| " + i + " | " + n.id + " | " + n.type + " |" + (d ? " " + n.description + " |" : "")).join("\n") +
+      "\n\n| id | source | target | " + (d ? "description" : "relation") + " |\n|---|---|---|---|\n" +
+      edges.map((e, i) => "| " + i + " | " + e.source + " | " + e.target + " | " + (d ? e.description : e.relation) + " |").join("\n"),
+    "Adjacency": (d) => nodes.map((n) => n.id + ": " + edges.filter((e) => e.source === n.id || e.target === n.id)
+      .map((e) => (e.source === n.id ? e.target : e.source) + (d ? " (" + e.relation + ")" : "")).sort().join(", ")).join("\n"),
+    "JSON": (d) => JSON.stringify({
+      nodes: nodes.map((n) => d ? { id: n.id, type: n.type, description: n.description } : { id: n.id, type: n.type }),
+      edges: edges.map((e) => d ? { source: e.source, target: e.target, relation: e.relation, description: e.description } : { source: e.source, target: e.target, relation: e.relation })
+    }, null, 1),
+    "Sentences": (d) => edges.map((e) => d ? e.description + "." : title(e.source) + " " + e.relation.toLowerCase().replace(/_/g, " ") + " " + title(e.target) + ".").join("\n"),
+    "Paths": (d) => paths.map((p, k) => "P" + (k + 1) + ": " + p.map((n, i) => {
+      if (i === 0) return n;
+      const e = edgeBetween(p[i - 1], n);
+      return " --[" + (e ? (d ? e.description : e.relation) : "?") + "]--> " + n;
+    }).join("")).join("\n")
+  };
+  const names = Object.keys(formats);
+  let current = names[0];
+  const tabs = api.h("div", {}, stage); tabs.style.cssText = "display:flex;flex-wrap:wrap;gap:6px;padding:12px 14px 0";
+  const buttons = {};
+  names.forEach((nm) => {
+    const b = api.h("button", { type: "button" }, tabs, nm);
+    b.style.cssText = "padding:4px 10px;border:1px solid var(--rule);border-radius:999px;background:var(--paper);color:var(--ink);font:inherit;font-size:.82rem;cursor:pointer";
+    b.addEventListener("click", () => { current = nm; render(); });
+    buttons[nm] = b;
+  });
+  const box = api.h("div", {}, stage);
+  box.style.cssText = "margin:12px 14px;padding:12px;border:1px solid var(--rule);border-radius:8px;background:var(--paper);font-family:var(--font-mono);font-size:.74rem;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:300px;overflow:auto;color:var(--ink)";
+  const chart = api.h("div", {}, stage); chart.style.cssText = "padding:0 14px 12px;display:grid;grid-template-columns:120px 1fr 52px;gap:4px 8px;align-items:center;font-size:.8rem";
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const bar = api.controls(el);
+  const dL = api.h("label", {}, bar); const desc = api.h("input", { type: "checkbox" }, dL); desc.checked = true;
+  dL.appendChild(document.createTextNode(" include descriptions"));
+  api.h("span", { class: "grow" }, bar); api.h("span", { class: "stepno" }, bar, "tokens ≈ characters / 4");
+  desc.addEventListener("change", render);
+  function render() {
+    const d = desc.checked;
+    const texts = {}; names.forEach((nm) => (texts[nm] = formats[nm](d)));
+    const tok = (s) => Math.ceil(s.length / 4);
+    box.textContent = texts[current];
+    names.forEach((nm) => {
+      const on = nm === current;
+      buttons[nm].style.background = on ? "var(--ink)" : "var(--paper)";
+      buttons[nm].style.color = on ? "var(--paper)" : "var(--ink)";
+      buttons[nm].setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    chart.innerHTML = "";
+    const mx = Math.max(...names.map((nm) => tok(texts[nm])));
+    names.forEach((nm) => {
+      const l = api.h("span", {}, chart, nm); l.style.color = nm === current ? "var(--ink)" : "var(--muted)"; l.style.fontWeight = nm === current ? "650" : "400";
+      const bg = api.h("div", {}, chart); bg.style.cssText = "height:10px;background:var(--paper-2);border-radius:5px;overflow:hidden";
+      const fg = api.h("div", {}, bg); fg.style.cssText = "height:100%;border-radius:5px;background:" + (nm === current ? "var(--edge)" : "var(--node)") + ";width:" + (100 * tok(texts[nm]) / mx) + "%";
+      api.h("span", {}, chart, String(tok(texts[nm]))).style.textAlign = "right";
+    });
+    const base = tok(texts["Triples"]);
+    const notes = {
+      "Triples": "Compact, but no ids to cite and entity names repeat on every line.",
+      "GraphRAG tables": "Ids make every row citable, for example [Data: Relationships (1)]. Headers are paid once per table.",
+      "Markdown": "Same content as the pipe tables plus padding; familiar and readable, somewhat more expensive.",
+      "Adjacency": "Among the cheapest, and shows who connects to whom at a glance, but no descriptions or direction.",
+      "JSON": "Lossless and machine-friendly; keys and quotes repeat for every node and edge.",
+      "Sentences": "Reads like pretraining text and is easy to audit; add ids if you need citations.",
+      "Paths": "Puts the multi-hop chain in reasoning order; shared edges repeat across paths."
+    };
+    cap.innerHTML = "<strong>" + current + "</strong>: about " + tok(texts[current]) + " tokens, " + api.fmt(tok(texts[current]) / base, 1) + "× triples. " + notes[current];
+  }
+  render();
+});
+</script>
+</body>
+</html>

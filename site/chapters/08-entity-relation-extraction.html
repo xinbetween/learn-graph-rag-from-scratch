@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extracting entities and relationships with LLMs | Graph RAG from Scratch</title>
+<meta name="description" content="Design extraction prompts, choose an output format, parse defensively, and use gleaning to recover missed entities.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="08-entity-relation-extraction" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Extracting entities and relationships with LLMs</h1>
+  <p class="lede">The graph in GraphRAG is only as good as the extractor that builds it. In this chapter you write the prompt, the parser and the gleaning loop that turn a text unit into nodes and edges.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain what an extraction step must produce for later stages: names, types, descriptions, relationships and strengths</li>
+      <li>Write an extraction prompt with entity types, a strict output format and a worked example</li>
+      <li>Parse delimited LLM output without trusting it, and say when JSON output is the better choice</li>
+      <li>Implement gleaning and measure how much recall it buys per extra LLM call</li>
+      <li>Recognize the common failure modes: missed entities, invented relations, type drift and name variants</li>
+    </ul>
+  </div>
+</header>
+
+<h2>What the extractor has to produce</h2>
+<p>In <a href="07-chunking-text-units.html">the previous chapter</a> you split the Kestrel Labs corpus into text units, each with a stable id. Extraction reads one text unit at a time and returns two lists:</p>
+<ul>
+  <li><strong>Entities</strong>: a name, a type from a fixed list, and a short description written from this chunk's point of view.</li>
+  <li><strong>Relationships</strong>: a source entity, a target entity, a description of how they relate, and a strength score.</li>
+</ul>
+<p>Two design choices matter more than they look. First, descriptions are free text, not a single label. When the same entity shows up in twelve chunks you get twelve descriptions, and <a href="09-entity-resolution.html">Chapter 9</a> merges and summarizes them into one profile. Second, every record keeps the id of the text unit it came from. That provenance is what lets local search cite sources and lets you debug a bad edge back to the sentence that produced it.</p>
+
+<div class="viz" data-viz="text-to-graph">
+<script type="application/json">
+{
+  "title": "One text unit becomes a subgraph",
+  "subtitle": "Step through the extractor's output",
+  "text": "In April 2025, Marlow Dynamics completed its acquisition of Deepcast, the sonar maker that had supplied Kestrel Labs since 2022. Within weeks Deepcast told outside customers it would stop taking new orders. Kestrel CTO Jonas Vehl said the company would build its own sonar module under a new effort, Project Tern.",
+  "height": 280,
+  "entities": [
+    {"name": "Marlow Dynamics", "type": "ORGANIZATION", "group": 2, "description": "Defense-focused competitor that bought Deepcast.", "x": 14, "y": 25},
+    {"name": "Deepcast", "type": "ORGANIZATION", "group": 2, "description": "Sonar maker; stopped taking outside orders after the acquisition.", "x": 45, "y": 25},
+    {"name": "Kestrel Labs", "type": "ORGANIZATION", "group": 1, "mentions": ["Kestrel Labs", "Kestrel"], "description": "Buyer of Deepcast sonar since 2022.", "x": 78, "y": 25},
+    {"name": "Jonas Vehl", "type": "PERSON", "group": 3, "description": "CTO of Kestrel Labs.", "x": 78, "y": 78},
+    {"name": "Project Tern", "type": "PROJECT", "group": 4, "description": "In-house sonar module effort.", "x": 40, "y": 78}
+  ],
+  "relations": [
+    {"source": "Marlow Dynamics", "target": "Deepcast", "label": "acquired", "description": "(strength 9, April 2025)"},
+    {"source": "Deepcast", "target": "Kestrel Labs", "label": "supplied", "description": "(strength 8, since 2022)"},
+    {"source": "Jonas Vehl", "target": "Kestrel Labs", "label": "CTO of", "description": "(strength 9)"},
+    {"source": "Kestrel Labs", "target": "Project Tern", "label": "started", "description": "(strength 7): a response to losing its supplier."}
+  ]
+}
+</script>
+</div>
+
+<p>Notice what the extractor did not do. It did not write an edge from <em>Marlow Dynamics</em> to <em>Project Tern</em>, even though one caused the other. That causal chain spans two hops, and keeping it implicit is correct: the graph stores what the text states, and retrieval (<a href="18-paths-and-agents.html">Chapter 18</a>) follows the path later.</p>
+
+<h2>Anatomy of an extraction prompt</h2>
+<p>The prompt Microsoft GraphRAG popularized has four parts. Each exists because of a specific failure seen without it.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="anat-title">
+      <title id="anat-title">The four parts of an extraction prompt and the failure each one prevents</title>
+      <rect class="d-box node" x="10" y="10" width="400" height="58" rx="6"/>
+      <text class="d-text bold" x="24" y="34">1. Goal and entity types</text>
+      <text class="d-text small" x="24" y="54">ORGANIZATION, PERSON, PROJECT, LOCATION, EVENT, LAW</text>
+      <rect class="d-box node" x="10" y="80" width="400" height="58" rx="6"/>
+      <text class="d-text bold" x="24" y="104">2. Steps and output format</text>
+      <text class="d-text small mono" x="24" y="124">("entity"&lt;|&gt;NAME&lt;|&gt;TYPE&lt;|&gt;DESC)##</text>
+      <rect class="d-box node" x="10" y="150" width="400" height="58" rx="6"/>
+      <text class="d-text bold" x="24" y="174">3. Worked examples</text>
+      <text class="d-text small" x="24" y="194">An input text and its exact expected output</text>
+      <rect class="d-box edge" x="10" y="220" width="400" height="58" rx="6"/>
+      <text class="d-text bold" x="24" y="244">4. The real input</text>
+      <text class="d-text small mono" x="24" y="264">entity_types: ...  text: {input_text}  output:</text>
+      <line class="d-line dash" x1="410" y1="39" x2="450" y2="39"/>
+      <line class="d-line dash" x1="410" y1="109" x2="450" y2="109"/>
+      <line class="d-line dash" x1="410" y1="179" x2="450" y2="179"/>
+      <line class="d-line dash" x1="410" y1="249" x2="450" y2="249"/>
+      <text class="d-text small" x="456" y="36">Without it: types drift</text>
+      <text class="d-text small" x="456" y="50">("Company", "Firm", "Startup")</text>
+      <text class="d-text small" x="456" y="106">Without it: unparseable prose,</text>
+      <text class="d-text small" x="456" y="120">missing fields</text>
+      <text class="d-text small" x="456" y="176">Without it: vague descriptions,</text>
+      <text class="d-text small" x="456" y="190">no strengths, wrong granularity</text>
+      <text class="d-text small" x="456" y="246">Put the variable part last so the</text>
+      <text class="d-text small" x="456" y="260">fixed prefix can be prompt-cached</text>
+    </svg>
+  </div>
+  <figcaption>Each block of the prompt guards against a specific failure. Keeping the variable text at the end also makes the long fixed prefix cacheable, which matters when you run it on thousands of chunks.</figcaption>
+</figure>
+
+<p>Here is the prompt as shipped in <code>minigraphrag/prompts.py</code>. It is a shortened descendant of Microsoft GraphRAG's, with one worked example instead of several. The delimiters are the module constants <code>TUPLE_DELIMITER</code> (<code>&lt;|&gt;</code>), <code>RECORD_DELIMITER</code> (<code>##</code>) and <code>COMPLETION_DELIMITER</code> (<code>&lt;|COMPLETE|&gt;</code>). The worked example is about a company that is not in the corpus. Keep it that way when you tune the prompt: an example drawn from your own documents teaches the model those particular names as much as it teaches the format, and they start turning up in chunks that never mention them.</p>
+
+<pre data-file="minigraphrag/prompts.py"><code class="language-python">ENTITY_EXTRACTION_PROMPT = """-Goal-
+Given a text document and a list of entity types, identify all entities of those types from the text and all relationships among the identified entities.
+
+-Steps-
+1. Identify all entities. For each identified entity, extract:
+- entity_name: Name of the entity, capitalized
+- entity_type: One of the following types: [{entity_types}]
+- entity_description: Comprehensive description of the entity's attributes and activities
+Format each entity as ("entity"{tuple_delimiter}&lt;entity_name&gt;{tuple_delimiter}&lt;entity_type&gt;{tuple_delimiter}&lt;entity_description&gt;)
+
+2. From the entities identified in step 1, identify all pairs of (source_entity, target_entity) that are *clearly related* to each other. For each pair, extract:
+- source_entity: name of the source entity, as identified in step 1
+- target_entity: name of the target entity, as identified in step 1
+- relationship_description: explanation of why the source and target are related, including dates when stated
+- relationship_strength: a numeric score from 1 to 10 indicating the strength of the relationship
+Format each relationship as ("relationship"{tuple_delimiter}&lt;source_entity&gt;{tuple_delimiter}&lt;target_entity&gt;{tuple_delimiter}&lt;relationship_description&gt;{tuple_delimiter}&lt;relationship_strength&gt;)
+
+3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use **{record_delimiter}** as the list delimiter.
+
+4. When finished, output {completion_delimiter}
+
+######################
+-Example-
+######################
+Entity_types: ORGANIZATION,PERSON
+Text:
+Harbor Robotics hired Dana Lee as head of research in 2019.
+######################
+Output:
+("entity"{tuple_delimiter}HARBOR ROBOTICS{tuple_delimiter}ORGANIZATION{tuple_delimiter}Harbor Robotics is a company that hired Dana Lee in 2019)
+{record_delimiter}
+("entity"{tuple_delimiter}DANA LEE{tuple_delimiter}PERSON{tuple_delimiter}Dana Lee is head of research at Harbor Robotics)
+{record_delimiter}
+("relationship"{tuple_delimiter}DANA LEE{tuple_delimiter}HARBOR ROBOTICS{tuple_delimiter}Dana Lee became head of research at Harbor Robotics in 2019{tuple_delimiter}9)
+{completion_delimiter}
+
+######################
+-Real Data-
+######################
+Entity_types: {entity_types}
+Text:
+{input_text}
+######################
+Output:
+"""</code></pre>
+
+<div class="callout note">
+  <span class="callout-title">Why names are uppercased</span>
+  <p>Asking for capitalized names is a cheap first pass at entity resolution: “Kestrel labs” and “Kestrel Labs” collapse to the same key before any fuzzy matching runs. It does nothing for “Kestrel” vs. “Kestrel Labs”; that is Chapter 9's job.</p>
+</div>
+
+<h3>Choosing entity types</h3>
+<p>Types are a schema in disguise. Too few (just “THING”) and you cannot filter or reason by type. Too many and the model spends its attention choosing between near-synonyms, and you get the same company typed as ORGANIZATION in one chunk and COMPANY in the next. Start with five to eight types that match the questions your users ask. For Kestrel Labs that is ORGANIZATION, PERSON, PROJECT, LOCATION, EVENT and LAW. Microsoft GraphRAG's auto prompt tuning can propose domain-specific types by sampling your corpus; you will try it in <a href="28-frameworks-in-practice.html">Chapter 28</a>.</p>
+
+<h2>Delimited tuples or JSON?</h2>
+<p>You have two broad ways to ask for structured output, and both are in production use.</p>
+<table>
+  <thead><tr><th>Concern</th><th>Delimited tuples</th><th>JSON (with schema or structured outputs)</th></tr></thead>
+  <tbody>
+    <tr><td>Partial output</td><td>Every complete record before a truncation is still usable</td><td>A truncated JSON document fails to parse unless you repair it</td></tr>
+    <tr><td>Token cost</td><td>Lower: no quotes, keys or braces per field</td><td>Higher: quotes, keys and braces are repeated on every record</td></tr>
+    <tr><td>Validity guarantees</td><td>None: you must write a tolerant parser</td><td>Strong when the provider enforces a schema</td></tr>
+    <tr><td>Streaming</td><td>Easy: split on the record delimiter as text arrives</td><td>Needs an incremental JSON parser</td></tr>
+    <tr><td>Small local models</td><td>Often follow the pattern well from one example</td><td>Can struggle without constrained decoding</td></tr>
+  </tbody>
+</table>
+<p>A reasonable default in 2026: use schema-enforced JSON when your provider supports it and your chunks are small enough that truncation is rare; use tuples with a tolerant parser for local models or very long outputs. The rest of this chapter uses tuples because the parser teaches you what can go wrong.</p>
+
+<h2>Parsing without trusting the model</h2>
+<p>LLM output is almost-structured. Over thousands of chunks you will see stray whitespace, missing parentheses, a strength of “high” instead of 8, relationships to entities never declared, and the occasional chatty sentence before the first record. The parser's job is to keep every record it can and drop, not crash on, the rest.</p>
+
+<pre data-file="minigraphrag/extraction.py"><code class="language-python">import re
+from dataclasses import dataclass, field, asdict
+
+from . import prompts as P
+from .chunking import TextUnit
+from .llm import LLM
+
+
+@dataclass
+class Entity:
+    name: str
+    type: str
+    description: str
+    source_id: str = ""  # TextUnit id the mention came from
+
+    def to_dict(self) -&gt; dict:
+        return asdict(self)
+
+
+@dataclass
+class Relationship:
+    source: str
+    target: str
+    description: str
+    strength: float = 1.0
+    source_id: str = ""
+
+    def to_dict(self) -&gt; dict:
+        return asdict(self)
+
+
+@dataclass
+class ExtractionResult:
+    """Everything extracted from one TextUnit."""
+
+    unit_id: str
+    entities: list[Entity] = field(default_factory=list)
+    relationships: list[Relationship] = field(default_factory=list)
+    llm_calls: int = 0
+
+
+def _clean_field(value: str) -&gt; str:
+    return value.strip().strip('"').strip("'").strip()
+
+
+def _split_records(text: str, record_delimiter: str, completion_delimiter: str) -&gt; list[str]:
+    """Split raw output into candidate records.
+
+    Models sometimes forget the record delimiter and use newlines, or glue
+    records together as `(...)(...)`, so we split on all three.
+    """
+    text = text.replace(completion_delimiter, "")
+    records = []
+    for chunk in re.split(re.escape(record_delimiter) + r"|\n", text):
+        for piece in re.split(r"(?&lt;=\))\s*(?=\()", chunk):
+            piece = piece.strip()
+            if "(" in piece and ")" in piece:  # drop chatter around the parentheses
+                piece = piece[piece.index("(") : piece.rindex(")") + 1]
+            if piece:
+                records.append(piece)
+    return records
+
+
+def parse_extraction_output(
+    text: str,
+    source_id: str = "",
+    tuple_delimiter: str = P.TUPLE_DELIMITER,
+    record_delimiter: str = P.RECORD_DELIMITER,
+    completion_delimiter: str = P.COMPLETION_DELIMITER,
+) -&gt; tuple[list[Entity], list[Relationship]]:
+    """Parse `("entity"&lt;|&gt;...)##("relationship"&lt;|&gt;...)` output. Bad records are skipped, not fatal."""
+    entities, relationships = [], []
+    for record in _split_records(text, record_delimiter, completion_delimiter):
+        record = record.strip()
+        if record.startswith("(") and record.endswith(")"):
+            record = record[1:-1]
+        fields = [_clean_field(f) for f in record.split(tuple_delimiter)]
+        kind = fields[0].lower()
+        if kind == "entity" and len(fields) &gt;= 4 and fields[1]:
+            entities.append(Entity(fields[1].upper(), fields[2].upper().replace(" ", "_"),
+                                   tuple_delimiter.join(fields[3:]), source_id))
+        elif kind == "relationship" and len(fields) &gt;= 4 and fields[1] and fields[2]:
+            strength = 1.0
+            desc_fields = fields[3:]
+            if len(fields) &gt;= 5:
+                try:
+                    strength = float(re.sub(r"[^\d.]", "", fields[-1]) or "1")
+                    desc_fields = fields[3:-1]
+                except ValueError:
+                    pass
+            relationships.append(Relationship(fields[1].upper(), fields[2].upper(),
+                                              tuple_delimiter.join(desc_fields), strength, source_id))
+    return entities, relationships</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">What about relationships to undeclared entities?</span>
+  <p>This parser, like Microsoft GraphRAG, keeps a relationship even when one of its endpoints was never declared as an entity; the graph builder then creates the missing node with an empty description. That preserves recall but lets misspelled names become nodes. A stricter policy drops those relationships. There is no universally right answer, so count them and decide with data. Exercise 8.2 asks you to write the strict variant.</p>
+</div>
+
+<h2>Gleaning: asking “did you miss anything?”</h2>
+<p>A single pass over a dense chunk misses entities, especially late in long chunks. Gleaning is a simple loop: after the first extraction, append the model's answer to the conversation and say that many entities were missed, then ask it to add them in the same format. After each round, ask a yes/no question about whether anything is still missing, and stop when the answer is no or you hit a round limit.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "The gleaning loop",
+  "perRow": 3,
+  "stages": [
+    {"label": "Extract", "detail": "Run the extraction prompt on the text unit. Parse and keep the records."},
+    {"label": "Continue prompt", "detail": "Send: MANY entities and relationships were missed in the last extraction. Add them below using the same format."},
+    {"label": "Parse additions", "detail": "Parse the new records and append them. Duplicates are fine; resolution merges them later."},
+    {"label": "Loop check", "detail": "Ask: are there still entities that need to be added? Answer Y or N. Constrain the answer to one token."},
+    {"label": "Stop or repeat", "detail": "If N, or the round limit is reached, stop. Otherwise go back to the continue prompt with the whole conversation."},
+    {"label": "Return records", "detail": "Hand all records for this text unit, tagged with its id, to entity resolution."}
+  ]
+}
+</script>
+</div>
+
+<pre data-file="minigraphrag/extraction.py"><code class="language-python">def extract_from_unit(
+    llm: LLM, unit: TextUnit, entity_types: list[str] | None = None, max_gleanings: int = 1
+) -&gt; ExtractionResult:
+    """Extract entities/relationships from one chunk, with up to `max_gleanings` extra passes.
+
+    Our LLM interface is single-turn, so the "conversation" is replayed by
+    concatenating: original prompt + previous answers + follow-up instruction.
+    """
+    types = ",".join(entity_types or P.DEFAULT_ENTITY_TYPES)
+    prompt = P.ENTITY_EXTRACTION_PROMPT.format(
+        entity_types=types, input_text=unit.text, tuple_delimiter=P.TUPLE_DELIMITER,
+        record_delimiter=P.RECORD_DELIMITER, completion_delimiter=P.COMPLETION_DELIMITER,
+    )
+    response = llm.complete(prompt)
+    calls, transcript, outputs = 1, prompt + response, [response]
+    for i in range(max_gleanings):
+        more = llm.complete(transcript + P.GLEANING_CONTINUE_PROMPT)
+        calls += 1
+        outputs.append(more)
+        transcript += P.GLEANING_CONTINUE_PROMPT + more
+        if i &gt;= max_gleanings - 1:
+            break  # no point asking "anything left?" if we won't act on it
+        answer = llm.complete(transcript + P.GLEANING_LOOP_CHECK_PROMPT)
+        calls += 1
+        if answer.strip().upper()[:1] != "Y":
+            break
+
+    result = ExtractionResult(unit.id, llm_calls=calls)
+    for out in outputs:
+        ents, rels = parse_extraction_output(out, source_id=unit.id)
+        result.entities.extend(ents)
+        result.relationships.extend(rels)
+    return result</code></pre>
+
+<div class="callout paper">
+  <span class="callout-title">Edge et al., From Local to Global (2024)</span>
+  <p>In the paper's appendix on self-reflection, on a sample of HotPotQA, GPT-4 extracted almost twice as many entity references with 600-token chunks as with 2400-token chunks in a single pass. Their Figure 3 then shows gleaning rounds lifting the larger chunks back up. Chunk size and gleaning are two knobs on the same recall budget: smaller chunks cost more calls per document, gleaning costs more calls per chunk.</p>
+</div>
+
+<p>Every gleaning round re-sends the whole transcript, so the cost grows faster than linearly with rounds. The pattern people report after measuring it is that the first round adds a handful of real entities per dense chunk and the second adds mostly aliases and noise. That is other people's corpora; Exercise 8.3 has you measure it on yours.</p>
+
+<h2>Failure modes to watch for</h2>
+<table>
+  <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+  <tbody>
+    <tr><td>“Sentinel” and “Project Sentinel” are separate nodes</td><td>Aliases in different chunks</td><td>Entity resolution (Chapter 9); add alias guidance to the prompt</td></tr>
+    <tr><td>Types like COMPANY or STARTUP appear</td><td>Type drift</td><td>Map unknown types to the nearest allowed type or to OTHER after parsing</td></tr>
+    <tr><td>Edges no sentence supports</td><td>Model inferring from world knowledge</td><td>Add “only relationships stated in the text”; spot-check with provenance ids</td></tr>
+    <tr><td>Pronouns become entities (“THE COMPANY”)</td><td>No coreference guidance</td><td>Instruct to resolve pronouns to named entities; drop generic nouns</td></tr>
+    <tr><td>Very few records from long chunks</td><td>Attention thins over long inputs</td><td>Smaller chunks or one gleaning round</td></tr>
+    <tr><td>Parser drops many records</td><td>Delimiter mismatch or chatty output</td><td>Log raw outputs; tighten the example; switch to schema-enforced JSON</td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 8.1 <span class="level">Warm-up</span></h4>
+  <p>By hand, extract entities and relationships from this sentence using the tuple format and the Kestrel entity types: <em>“Dr. Ana Ruiz, who directs Tidewater Institute, led the survey of Halden Reef after Sentinel drones detected bleaching in August 2024.”</em></p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code>("entity"&lt;|&gt;DR. ANA RUIZ&lt;|&gt;PERSON&lt;|&gt;Director of Tidewater Institute who led the Halden Reef survey)##
+("entity"&lt;|&gt;TIDEWATER INSTITUTE&lt;|&gt;ORGANIZATION&lt;|&gt;Research institute directed by Dr. Ana Ruiz)##
+("entity"&lt;|&gt;HALDEN REEF&lt;|&gt;LOCATION&lt;|&gt;Reef surveyed after bleaching was detected)##
+("entity"&lt;|&gt;PROJECT SENTINEL&lt;|&gt;PROJECT&lt;|&gt;Drone program whose drones detected bleaching in August 2024)##
+("entity"&lt;|&gt;2024 HALDEN REEF BLEACHING EVENT&lt;|&gt;EVENT&lt;|&gt;Coral bleaching detected in August 2024)##
+("relationship"&lt;|&gt;DR. ANA RUIZ&lt;|&gt;TIDEWATER INSTITUTE&lt;|&gt;Ana Ruiz directs Tidewater Institute&lt;|&gt;9)##
+("relationship"&lt;|&gt;DR. ANA RUIZ&lt;|&gt;HALDEN REEF&lt;|&gt;Ana Ruiz led the survey of Halden Reef&lt;|&gt;8)##
+("relationship"&lt;|&gt;PROJECT SENTINEL&lt;|&gt;2024 HALDEN REEF BLEACHING EVENT&lt;|&gt;Sentinel drones detected the bleaching&lt;|&gt;9)##
+("relationship"&lt;|&gt;2024 HALDEN REEF BLEACHING EVENT&lt;|&gt;HALDEN REEF&lt;|&gt;The bleaching occurred at Halden Reef&lt;|&gt;8)
+&lt;|COMPLETE|&gt;</code></pre>
+    <p>Judgment calls worth noticing: naming the drones “PROJECT SENTINEL” rather than “SENTINEL DRONES” (a resolution decision you are making early), and whether the event deserves its own node. Making the event a node lets you attach a date and connect it to both the reef and the detector, which a single edge cannot do.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 8.2 <span class="level">Core</span></h4>
+  <p>Write three unit tests for <code>parse_extraction_output</code> that cover: (a) a record wrapped in leading prose, (b) a relationship strength written as <code>"high (8)"</code>, and (c) a relationship to an undeclared entity. For (c), also write a strict <code>drop_dangling</code> helper and test both policies.</p>
+  <details class="hint"><summary>Hint</summary><p>Build the strings with the delimiter constants from <code>minigraphrag.prompts</code> so a delimiter change does not silently break your tests.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.extraction import parse_extraction_output
+from minigraphrag.prompts import TUPLE_DELIMITER as T, RECORD_DELIMITER as R, COMPLETION_DELIMITER as DONE
+
+def test_prose_before_record():
+    out = f'Sure! Here you go: ("entity"{T}DEEPCAST{T}ORGANIZATION{T}Sonar maker){R}{DONE}'
+    ents, rels = parse_extraction_output(out, source_id="u1")
+    assert [e.name for e in ents] == ["DEEPCAST"] and ents[0].source_id == "u1"
+
+def test_strength_with_words():
+    out = (f'("entity"{T}A{T}ORGANIZATION{T}x){R}("entity"{T}B{T}ORGANIZATION{T}y){R}'
+           f'("relationship"{T}A{T}B{T}a buys b{T}high (8))')
+    _, rels = parse_extraction_output(out)
+    assert rels[0].strength == 8.0 and rels[0].description == "a buys b"
+
+def drop_dangling(entities, relationships):
+    known = {e.name for e in entities}
+    return [r for r in relationships if r.source in known and r.target in known]
+
+def test_dangling_relationship():
+    out = f'("entity"{T}A{T}ORGANIZATION{T}x){R}("relationship"{T}A{T}GHOST{T}?{T}5)'
+    ents, rels = parse_extraction_output(out)
+    assert len(rels) == 1                      # the parser keeps it (recall-first policy)
+    assert drop_dangling(ents, rels) == []     # the strict policy removes it</code></pre>
+    <p>The <code>re.sub(r"[^\d.]", "", ...)</code> in the parser is what rescues “high (8)”: it strips everything except digits and dots. It has a weakness: “8 of 10” becomes “810”. A stricter version would take the first number with <code>re.search</code>, which is a good follow-up change to make and test.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 8.3 <span class="level">Core</span></h4>
+  <p>Run extraction over the whole Kestrel corpus with <code>max_gleanings</code> set to 0, 1 and 2. For each setting record: total LLM calls, total input and output tokens, unique entity names, and how many of the 17 canonical entities in the running example were found (after uppercasing). Where does the curve flatten?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>A good test runner keeps everything else fixed (chunk size, model, temperature 0) and wraps the LLM to count calls and tokens:</p>
+    <pre><code class="language-python">from minigraphrag.chunking import chunk_documents, load_documents
+from minigraphrag.extraction import extract_from_unit
+from minigraphrag.llm import get_llm
+from minigraphrag.prompts import DEFAULT_ENTITY_TYPES as TYPES
+
+docs = load_documents("data/corpus")
+real_llm = get_llm("openai")    # or "anthropic" / "ollama"; the mock is gazetteer-based and not a fair test
+
+CANON = {"KESTREL LABS", "DR. MIRA OKAFOR", "JONAS VEHL", "PRIYA NAIR", "TIDEWATER INSTITUTE",
+         "DR. ANA RUIZ", "PROJECT SENTINEL", "PROJECT TERN", "HALDEN REEF", "PORT AVALON",
+         "2024 HALDEN REEF BLEACHING EVENT", "BRIGHTWATER CAPITAL", "LENA PARK",
+         "MARLOW DYNAMICS", "DEEPCAST", "OCEAN HEALTH ACT", "PORT AVALON CITY COUNCIL"}
+
+class Counting:
+    def __init__(self, llm): self.llm, self.calls, self.chars = llm, 0, 0
+    def complete(self, prompt, **kw):
+        self.calls += 1; out = self.llm.complete(prompt, **kw)
+        self.chars += len(prompt) + len(out); return out
+
+for g in (0, 1, 2):
+    llm = Counting(real_llm)
+    names = set()
+    for unit in chunk_documents(docs, size=600, overlap=50):
+        result = extract_from_unit(llm, unit, TYPES, max_gleanings=g)
+        names |= {e.name for e in result.entities}
+    print(g, llm.calls, llm.chars // 4, len(names), len(CANON &amp; names))</code></pre>
+    <p>What you should observe: going from 0 to 1 round roughly doubles calls and adds a noticeable number of names, including some canonical ones that appear late in long chunks. Going from 1 to 2 adds far fewer names, many of them aliases or noise, at a higher cost per round because the transcript is longer. Exact numbers depend on the model. Strict matching against canonical names undercounts, because “MIRA OKAFOR” will not match “DR. MIRA OKAFOR”; that gap is the motivation for Chapter 9.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 8.4 <span class="level">Stretch</span></h4>
+  <p>Implement a JSON-mode extractor using a Pydantic schema, then compare it with the tuple extractor on the same chunks: parse failure rate, output tokens and entity recall. Under what conditions did JSON win?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from pydantic import BaseModel, Field, ValidationError
+import json
+
+class EntityOut(BaseModel):
+    name: str
+    type: str
+    description: str
+
+class RelOut(BaseModel):
+    source: str
+    target: str
+    description: str
+    strength: int = Field(ge=1, le=10)
+
+class ExtractionOut(BaseModel):
+    entities: list[EntityOut]
+    relationships: list[RelOut]
+
+def extract_json(llm, unit, types):
+    prompt = (f"Extract entities of types {types} and relationships among them from the text. "
+              f"Return JSON matching this schema:\n{json.dumps(ExtractionOut.model_json_schema())}\n\n"
+              f"Text:\n{unit.text}")
+    raw = llm.complete(prompt, json=True)
+    try:
+        return ExtractionOut.model_validate_json(raw), None
+    except ValidationError as err:
+        return None, err</code></pre>
+    <p>Typical findings: with a provider that enforces the schema, JSON's parse failure rate drops to near zero, while tuple parsing loses a small percentage of records to formatting slips. JSON uses more output tokens per record. Tuples degrade more gracefully when output hits the max-token limit, because every record before the cut survives. JSON tends to win for hosted models with structured outputs and small chunks; tuples tend to win for small local models and dense chunks.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why does the extractor store a free-text description for each entity instead of just a type?</p>
+  <ol>
+    <li>Descriptions are required by the graph database</li>
+    <li data-correct>Descriptions from many chunks are later summarized into a profile that search and reports can use</li>
+    <li>Types are unreliable, so descriptions replace them</li>
+    <li>Descriptions make the extraction prompt shorter</li>
+  </ol>
+  <div class="explain">Each chunk contributes its own view of the entity. Resolution merges these, and an LLM summarizes them into one description that gets embedded for local search and quoted in community reports.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">An extraction output is cut off by the max-token limit halfway through the 14th record. Which format loses less?</p>
+  <ol>
+    <li>JSON, because it has a schema</li>
+    <li data-correct>Delimited tuples, because the first 13 complete records still parse</li>
+    <li>Both lose everything</li>
+    <li>Neither loses anything if temperature is 0</li>
+  </ol>
+  <div class="explain">Tuple records are independent, so a tolerant parser keeps all complete ones. A truncated JSON document is invalid as a whole unless you add repair logic.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What does the gleaning loop-check prompt decide?</p>
+  <ol>
+    <li>Whether the extracted relationships are correct</li>
+    <li>Which entity types to use</li>
+    <li data-correct>Whether to run another round of “add what you missed”</li>
+    <li>Whether to split the chunk into smaller pieces</li>
+  </ol>
+  <div class="explain">It is a one-token Y/N question asked after a gleaning round. N (or the round limit) ends the loop.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">The text says Marlow acquired Deepcast, and separately that Kestrel started Project Tern after losing its supplier. Should the extractor emit MARLOW DYNAMICS → PROJECT TERN?</p>
+  <ol>
+    <li>Yes, because it is true and saves a hop later</li>
+    <li data-correct>No, not unless a sentence states it; multi-hop connections are for retrieval to discover</li>
+    <li>Yes, but only with strength 10</li>
+    <li>No, because organizations cannot relate to projects</li>
+  </ol>
+  <div class="explain">Inferred edges are unverifiable and compound errors. Keep the graph faithful to the text and let path retrieval connect the dots, with each hop citable.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You see entity types COMPANY, FIRM and ORGANIZATION in your graph. What is the cheapest reliable fix?</p>
+  <ol>
+    <li>Increase temperature</li>
+    <li>Add more gleaning rounds</li>
+    <li data-correct>Normalize types after parsing, mapping unknown types to allowed ones or OTHER, and tighten the prompt</li>
+    <li>Remove types entirely</li>
+  </ol>
+  <div class="explain">Post-parse normalization is deterministic and free. Pair it with a prompt that lists allowed types explicitly and an example that uses them.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Can I use a classical NER model instead of an LLM?</summary>
+  <div><p>Yes, for entities. spaCy or GLiNER-style models are fast and cheap and work well for standard types. They are weaker at relationship extraction with free-text descriptions, which is what GraphRAG's summaries rely on. A common hybrid: classical NER proposes entity spans, and a smaller LLM writes relationships and descriptions only for chunks with two or more entities. LightRAG's and LazyGraphRAG's cost ideas (Chapter 26) push this further.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should I extract per chunk or per document?</summary>
+  <div><p>Per chunk. Long inputs reduce recall, and chunk ids give you precise provenance. Pass document-level context (title, date, section heading) into each chunk's prompt so the model can resolve “the company” and date relative references.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I pick relationship strength?</summary>
+  <div><p>The model's 1–10 score is a rough signal of how central and explicit the relation is. Its main use is as an edge weight: summed across chunks it tells you which relations are repeated, which helps community detection and ranking. Don't treat a single score as calibrated.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is a fixed relation vocabulary (CEO_OF, ACQUIRED) better than free-text descriptions?</summary>
+  <div><p>It depends on your queries. Fixed relation types enable precise graph queries such as Text2Cypher and metapaths (Chapters 20 and 21). Free-text descriptions capture nuance that summarization and embedding search can use. Many systems do both: a typed label plus a description. <code>minigraphrag</code> stores only the description. If you want a label as well, add a <code>label</code> field drawn from a fixed list to the JSON schema in Exercise 8.4.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What temperature should extraction use?</summary>
+  <div><p>0, or as low as your provider allows. You want reproducible graphs so that re-indexing a document does not churn nodes, and so caching (keyed on prompt hash) actually hits.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: an extraction workbench</h3>
+  <p>Build a small command-line tool that makes extraction quality visible, so you can tune prompts with evidence instead of vibes.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>extract --unit &lt;id&gt;</code> prints the raw LLM output, the parsed records and any dropped records with the reason</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A run over the full corpus writes <code>entities.jsonl</code> and <code>relationships.jsonl</code> with each record's <code>source_id</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A report: records per chunk, type distribution, dropped-record rate, gleaning yield per round</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A gold file of hand-labeled entities for three chunks, and precision and recall against it</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>One prompt change you made because of the report, with before and after numbers</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can point at a number that got better and the prompt diff that caused it.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Every extracted entity and relationship carries a free-text description and the id of the text unit it came from.</li>
+    <li>A good prompt names allowed types, fixes the output format, shows a worked example, and puts variable input last.</li>
+    <li>Parse defensively: keep complete records, normalize names and types, log what you drop.</li>
+    <li>Gleaning trades extra calls for recall with quickly diminishing returns. Measure it on your data.</li>
+    <li>Keep the graph faithful to the text; let retrieval discover multi-hop connections.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: entity extraction and gleaning prompts. <span class="venue">GitHub</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>Zaratiana et al. <a href="https://arxiv.org/abs/2404.12491">GraphER: A Structure-aware Text-to-Graph Model for Entity and Relation Extraction</a>. <span class="venue">arXiv 2404.12491, 2024</span></li>
+  <li>Yang et al. <a href="https://arxiv.org/abs/2410.17600">Graphusion: A RAG Framework for Knowledge Graph Construction with a Global Perspective</a>. <span class="venue">arXiv 2410.17600, 2024</span></li>
+  <li>Sun et al. <a href="https://arxiv.org/abs/2406.02962">Docs2KG: Unified Knowledge Graph Construction from Heterogeneous Documents</a>. <span class="venue">arXiv 2406.02962, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

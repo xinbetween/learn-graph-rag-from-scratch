@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glossary | Graph RAG from Scratch</title>
+<meta name="description" content="Definitions of every GraphRAG term used in the course, with examples and links to the chapters that teach them.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="glossary" data-root="..">
+<main class="chapter" id="main">
+<header class="chapter-head">
+  <h1>Glossary</h1>
+  <p class="lede">Every term the course uses, defined in one to three sentences, with the Kestrel Labs example where it helps and links to the chapters that teach it.</p>
+</header>
+<style>
+.az-bar { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 18px; font-family: var(--font-ui); }
+.az-bar a, .az-bar span { display: inline-block; min-width: 2em; text-align: center; padding: 2px 6px; border: 1px solid var(--rule); border-radius: 6px; background: var(--panel); text-decoration: none; font-size: .9rem; }
+.az-bar span { color: var(--muted); opacity: .5; }
+.az-bar a:hover { border-color: var(--node); }
+.gloss-tools { margin: 0 0 28px; font-family: var(--font-ui); }
+.gloss-tools label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+.gloss-tools input { width: 100%; max-width: 420px; padding: 8px 12px; border: 1px solid var(--rule); border-radius: 8px; background: var(--panel); color: var(--ink); font: inherit; }
+.gloss-tools input:focus { border-color: var(--node); }
+.gloss-count { font-size: .85rem; color: var(--muted); margin: 6px 0 0; }
+dl.gloss { margin: 0 0 12px; }
+dl.gloss dt { font-family: var(--font-ui); font-weight: 650; font-size: 1.05rem; margin-top: 18px; color: var(--ink); scroll-margin-top: 80px; }
+dl.gloss dd { margin: 2px 0 0; padding-left: 14px; border-left: 2px solid var(--rule); }
+dl.gloss dd p { margin: 0 0 4px; }
+dl.gloss .see { font-family: var(--font-ui); font-size: .85rem; color: var(--muted); }
+.gloss-letter[hidden], dl.gloss [hidden], .gloss-empty[hidden] { display: none !important; }
+</style>
+<nav class="az-bar" aria-label="Jump to letter"><a href="#letter-a">A</a><a href="#letter-b">B</a><a href="#letter-c">C</a><a href="#letter-d">D</a><a href="#letter-e">E</a><a href="#letter-f">F</a><a href="#letter-g">G</a><a href="#letter-h">H</a><a href="#letter-i">I</a><span aria-hidden="true">J</span><a href="#letter-k">K</a><a href="#letter-l">L</a><a href="#letter-m">M</a><a href="#letter-n">N</a><a href="#letter-o">O</a><a href="#letter-p">P</a><a href="#letter-q">Q</a><a href="#letter-r">R</a><a href="#letter-s">S</a><a href="#letter-t">T</a><a href="#letter-u">U</a><a href="#letter-v">V</a><span aria-hidden="true">W</span><span aria-hidden="true">X</span><span aria-hidden="true">Y</span><a href="#letter-z">Z</a></nav>
+<div class="gloss-tools" id="gloss-tools" hidden>
+  <label for="gloss-filter">Filter terms and definitions</label>
+  <input type="search" id="gloss-filter" placeholder="Try: temporal, PageRank, Deepcast" autocomplete="off">
+  <p class="gloss-count" id="gloss-count" aria-live="polite"></p>
+</div>
+<p class="gloss-empty" id="gloss-empty" hidden>No terms match. Try a shorter word.</p>
+
+<section class="gloss-letter">
+<h2 id="letter-a">A</h2>
+<dl class="gloss">
+  <dt id="term-a-mem">A-MEM</dt>
+  <dd><p>An agentic memory system for LLM agents (Xu et al., 2025). Each memory is a note with keywords, tags and links to related notes, and adding a note can update the notes it links to, in the spirit of a Zettelkasten.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
+  <dt id="term-access-control-list-acl">Access control list (ACL)</dt>
+  <dd><p>A list of the users or groups allowed to read a resource. In GraphRAG, ACLs have to follow the data into text units, entities, edges and every derived summary, because one community report can blend facts from documents with different permissions. Example: the board memo about the Deepcast supply crisis must not leak, through the DEEPCAST entity summary, into a community report every employee can read.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a>, <a href="c4-enterprise-kgqa.html">Capstone 4</a></p></dd>
+  <dt id="term-adjacency-list">Adjacency list</dt>
+  <dd><p>A graph representation that maps each node to its neighbors, optionally with edge attributes. It uses memory proportional to nodes plus edges and makes "give me the neighbors of X", the core step of every traversal, fast.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dt id="term-agent-memory">Agent memory</dt>
+  <dd><p>Information an LLM agent keeps outside its context window so it survives across turns and sessions. Graph memory stores entities and dated facts, so the agent can update a fact (Priya Nair is now CTO) instead of appending a contradiction.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
+  <dt id="term-agentic-graphrag">Agentic GraphRAG</dt>
+  <dd><p>GraphRAG in which an LLM agent chooses which graph operations to call (search entities, expand neighbors, run a Cypher query, read a report), looks at the results and repeats until it has enough evidence. The alternative is a fixed retrieval pipeline.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dt id="term-approximate-nearest-neighbor-ann-search">Approximate nearest neighbor (ANN) search</dt>
+  <dd><p>Finding vectors that are probably the closest to a query vector without comparing against every vector. Index structures such as HNSW trade a little recall for large speedups on big collections.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-b">B</h2>
+<dl class="gloss">
+  <dt id="term-beam-search">Beam search</dt>
+  <dd><p>A search that keeps only the best B partial candidates at each step and expands only those. Think-on-Graph uses the LLM to score candidate relations and entities and keeps the top few reasoning paths at each depth.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dt id="term-bfs-breadth-first-search">BFS (breadth-first search)</dt>
+  <dd><p>A traversal that visits nodes in order of hop distance from a start node, using a queue. It yields k-hop neighborhoods and unweighted shortest paths in time proportional to nodes plus edges. From Deepcast, BFS reaches Kestrel Labs, Marlow Dynamics and Project Tern at hop 1.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
+  <dt id="term-bi-temporal">Bi-temporal</dt>
+  <dd><p>A data model that records two time axes for every fact: valid time (when it was true in the world) and transaction time, also called record time (when the system learned it or learned it had ended). minigraphrag stores them as <code>valid_from</code>/<code>valid_to</code> and <code>recorded_at</code>/<code>invalidated_at</code>; Graphiti as <code>valid_at</code>/<code>invalid_at</code> and <code>created_at</code>/<code>expired_at</code>. It can answer both "who was CTO in February 2026?" and "what did we believe on 1 March 2026?"</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a>, <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
+  <dt id="term-blocking">Blocking</dt>
+  <dd><p>In entity resolution, a cheap first pass that groups candidate names (same normalized first token, shared embedding bucket, same type) so that expensive pairwise comparisons happen only inside a group. It avoids comparing all n&sup2; pairs.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dt id="term-bm25">BM25</dt>
+  <dd><p>A sparse lexical ranking function. A document's score is the sum over query terms of IDF(q) &middot; f(q,D)(k<sub>1</sub>+1) / (f(q,D) + k<sub>1</sub>(1 &minus; b + b&middot;|D|/avgdl)), with typical k<sub>1</sub> between 1.2 and 2 and b = 0.75. It excels at rare exact names such as "Deepcast" that embeddings can blur.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-c">C</h2>
+<dl class="gloss">
+  <dt id="term-centrality">Centrality</dt>
+  <dd><p>A family of node-importance scores: degree, betweenness, closeness, eigenvector and PageRank. GraphRAG systems use them to decide which entities and edges get space when the context budget is tight.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
+  <dt id="term-chain-of-thought-cot">Chain-of-thought (CoT)</dt>
+  <dd><p>Prompting a model to write intermediate reasoning steps before its answer. Graph-guided variants ground each step in nodes, edges or paths retrieved from a graph.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a></p></dd>
+  <dt id="term-chunk">Chunk</dt>
+  <dd><p>A contiguous span of a document used as the unit of embedding, extraction and citation. Microsoft GraphRAG calls chunks text units.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
+  <dt id="term-claim">Claim</dt>
+  <dd><p>A dated, sourced statement extracted from text, with subject, object, claim type, status (TRUE, FALSE or SUSPECTED), start and end dates, a description and the source quote. Example: Marlow Dynamics ended Deepcast's outside supply contracts, status TRUE, 2025. Microsoft GraphRAG stores claims as covariates.</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a></p></dd>
+  <dt id="term-code-graph">Code graph</dt>
+  <dd><p>A graph of a software repository whose nodes are files, classes and functions and whose edges are relations such as defines, imports, calls and inherits. It lets an assistant answer call-chain and impact questions.</p><p class="see">See: <a href="32-domain-graphrag.html">Chapter 32</a>, <a href="c2-code-graph.html">Capstone 2</a></p></dd>
+  <dt id="term-community">Community</dt>
+  <dd><p>A group of nodes more densely connected to each other than to the rest of the graph. In the Kestrel graph, {Marlow Dynamics, Deepcast} and {Brightwater Capital, Lena Park} are small communities.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
+  <dt id="term-community-report">Community report</dt>
+  <dd><p>An LLM-written summary of one community, with a title, a summary, an impact rating with explanation, and a list of findings. Reports are the retrieval units of global search.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a>, <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dt id="term-connected-component">Connected component</dt>
+  <dd><p>A maximal set of nodes in which every pair is joined by some path. Many small components in an extracted graph often signal missed relationships or aliases that were never merged.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="11-community-detection.html">Chapter 11</a></p></dd>
+  <dt id="term-context-recall">Context recall</dt>
+  <dd><p>The fraction of the gold supporting documents or facts that appear in the retrieved context. It measures retrieval separately from answer quality. In minigraphrag: <code>context_recall(retrieved_doc_ids, supporting_docs)</code>.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-context-window">Context window</dt>
+  <dd><p>The maximum number of tokens a model can take in one call, counting prompt and output. Longer windows do not remove the need for retrieval: cost grows with tokens, and models use the middle of long inputs less reliably.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
+  <dt id="term-cosine-similarity">Cosine similarity</dt>
+  <dd><p>The cosine of the angle between two vectors: a&middot;b / (|a| |b|), between &minus;1 and 1. For unit-length vectors it equals the dot product, which is why vector stores often normalize embeddings.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a></p></dd>
+  <dt id="term-covariate">Covariate</dt>
+  <dd><p>Microsoft GraphRAG's name for extra records attached to entities, in practice claims. See Claim.</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a></p></dd>
+  <dt id="term-cross-encoder">Cross-encoder</dt>
+  <dd><p>A model that reads the query and a candidate passage together and outputs one relevance score. It is more accurate than comparing separate embeddings but must run once per pair, so it is used to rerank a short list.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-cypher">Cypher</dt>
+  <dd><p>A declarative query language for property graphs, used by Neo4j and other databases through openCypher. Patterns look like drawings: <code>(p:Person)-[:CTO_OF]-&gt;(o:Organization)</code>.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-d">D</h2>
+<dl class="gloss">
+  <dt id="term-damping-factor">Damping factor</dt>
+  <dd><p>In PageRank, the probability &alpha; that the random walker follows an outgoing edge instead of teleporting; 1 &minus; &alpha; is the restart probability. The web default is 0.85 (minigraphrag's <code>personalized_pagerank</code> uses it too); HippoRAG's paper uses 0.5. A lower &alpha; restarts more often and keeps Personalized PageRank mass closer to the seeds.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-degree">Degree</dt>
+  <dd><p>The number of edges touching a node (in-degree and out-degree for directed graphs; weighted degree sums edge weights). A cheap importance signal; Kestrel Labs has the highest degree in the course graph.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
+  <dt id="term-dense-retrieval">Dense retrieval</dt>
+  <dd><p>Retrieval by similarity between learned embeddings of the query and the passages, as in Dense Passage Retrieval. It matches paraphrases well and misses rare exact tokens more often than BM25.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-description-summarization">Description summarization</dt>
+  <dd><p>Merging the many per-chunk descriptions of one entity or relationship into a single coherent description with an LLM. Priya Nair might appear in five chunks with five partial descriptions that become one profile.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dt id="term-dfs-depth-first-search">DFS (depth-first search)</dt>
+  <dd><p>A traversal that follows one branch as deep as possible before backtracking, using a stack or recursion. It is used to enumerate paths and detect cycles; always cap the depth on real graphs.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a></p></dd>
+  <dt id="term-directed-graph">Directed graph</dt>
+  <dd><p>A graph whose edges have a direction, such as Marlow Dynamics &rarr; ACQUIRED &rarr; Deepcast. Many GraphRAG pipelines store directed relationships but traverse them as undirected for retrieval.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
+  <dt id="term-directness">Directness</dt>
+  <dd><p>An evaluation criterion from the GraphRAG paper: how specifically and clearly the answer addresses the question. It was used as a control, since it tends to trade off against comprehensiveness and diversity.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-diversity">Diversity</dt>
+  <dd><p>An evaluation criterion from the GraphRAG paper: how varied an answer is in offering different perspectives and insights.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-domain-graph">Domain graph</dt>
+  <dd><p>A graph whose nodes are real-world entities and concepts (people, organizations, projects) and whose edges are semantic relationships. Contrast with a lexical graph, whose nodes are documents and chunks.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a></p></dd>
+  <dt id="term-drift-search">DRIFT search</dt>
+  <dd><p>Dynamic Reasoning and Inference with Flexible Traversal, a Microsoft GraphRAG query mode. It first compares the question with the most relevant community reports to draft a broad answer and follow-up questions, then refines those with local search, returning a ranked hierarchy of answers.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dt id="term-dynamic-community-selection">Dynamic community selection</dt>
+  <dd><p>A global search variant that walks the community hierarchy from the top, asks a cheaper LLM to rate each report's relevance, and only descends into children of relevant communities. Irrelevant reports never reach the map step, which cuts tokens.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-e">E</h2>
+<dl class="gloss">
+  <dt id="term-edge-weight">Edge weight</dt>
+  <dd><p>A number on an edge expressing strength, frequency or cost. In minigraphrag a merged edge's <code>weight</code> is the sum of the <code>strength</code> values of every extracted mention of that relationship, and modularity, PageRank and path pruning all read it.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dt id="term-embedding">Embedding</dt>
+  <dd><p>A dense vector representation of text (or a node, or an image) produced by a model so that similar meanings land close together. Chunks, entity descriptions and community reports are all embedded for search.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dt id="term-empowerment">Empowerment</dt>
+  <dd><p>An evaluation criterion from the GraphRAG paper: how well an answer helps the reader understand the topic and make informed judgments.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-entity">Entity</dt>
+  <dd><p>A distinct real-world thing, such as a person, organization, place, project, event or concept, represented as a node with a name, type, description and source ids. Kestrel Labs, Dr. Mira Okafor and Halden Reef are entities.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+  <dt id="term-entity-linking">Entity linking</dt>
+  <dd><p>Mapping a mention in a query or document to a node in the graph. "the CEO" in a question about Kestrel should link to Dr. Mira Okafor. Seed selection in local search and HippoRAG is a form of entity linking.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="17-ppr-hipporag.html">Chapter 17</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+  <dt id="term-entity-resolution">Entity resolution</dt>
+  <dd><p>Deciding which extracted names refer to the same real-world entity and merging them into one node. "Dr. Mira Okafor", "Mira Okafor" and "Okafor" should become one node; "Tidewater" and "TWI" should join "Tidewater Institute".</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dt id="term-entity-type">Entity type</dt>
+  <dd><p>The category an extractor assigns to an entity from a fixed list, such as ORGANIZATION, PERSON, PROJECT, LOCATION, EVENT or LAW. Types constrain extraction, guide resolution and become node labels in a database.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+  <dt id="term-evidence-panel">Evidence panel</dt>
+  <dd><p>An interface pattern that shows the entities, paths and source passages behind an answer next to it, so users can check the answer instead of trusting it.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-exact-match-em">Exact match (EM)</dt>
+  <dd><p>An answer metric that scores 1 if the normalized prediction equals the normalized gold answer and 0 otherwise. It is strict: "Priya Nair" matches, "Priya Nair, since March 2026" does not.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-extraction">Extraction</dt>
+  <dd><p>The indexing step in which an LLM reads a text unit and returns entities and relationships (and optionally claims) in a fixed output format.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-f">F</h2>
+<dl class="gloss">
+  <dt id="term-f1-token-f1">F1 (token F1)</dt>
+  <dd><p>The harmonic mean of token-level precision and recall between a predicted and a gold answer. It gives partial credit where exact match gives none.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-faithfulness">Faithfulness</dt>
+  <dd><p>How far every statement in an answer is supported by the retrieved context. An answer can be correct but unfaithful, if the model used its own memory instead of the evidence.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a>, <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-fastgraphrag">FastGraphRAG</dt>
+  <dd><p>An open-source GraphRAG framework by Circlemind that builds an entity graph with an LLM and uses PageRank-based exploration at query time, with the aim of lower cost than Microsoft GraphRAG.</p><p class="see">See: <a href="26-cost-scaling.html">Chapter 26</a>, <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
+  <dt id="term-finding">Finding</dt>
+  <dd><p>One item in a community report: a short summary statement plus a longer explanation grounded in the community's data.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a></p></dd>
+  <dt id="term-flow-based-pruning">Flow-based pruning</dt>
+  <dd><p>PathRAG's path filter. Resource starts at a source node and is split among neighbors and multiplied by a decay rate at each hop; nodes whose flow falls below a threshold are pruned early, and surviving paths are scored by their average flow.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-g">G</h2>
+<dl class="gloss">
+  <dt id="term-g-retriever">G-Retriever</dt>
+  <dd><p>A method for question answering over textual graphs (He et al., 2024). It retrieves a connected subgraph with a prize-collecting Steiner tree, encodes it with a GNN into a soft prompt, and also passes the subgraph as text to the LLM.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-gfm-rag">GFM-RAG</dt>
+  <dd><p>Graph Foundation Model for RAG (Luo et al., 2025). A query-dependent GNN, pre-trained on many graphs, scores entities in one pass for multi-hop retrieval and can be used on new datasets without retraining.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
+  <dt id="term-gleaning">Gleaning</dt>
+  <dd><p>A recall booster for extraction: after the first pass, tell the LLM that entities were missed and ask it to add them, then ask a yes/no question about whether any remain; repeat until it says no or <code>max_gleanings</code> rounds (1 by default in minigraphrag) are used.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+  <dt id="term-global-search">Global search</dt>
+  <dd><p>Microsoft GraphRAG's query mode for corpus-wide questions. It runs map-reduce over community reports at a chosen level: each batch of reports yields scored partial answers, low scores are dropped, and a final call combines the rest.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dt id="term-gnn-graph-neural-network">GNN (graph neural network)</dt>
+  <dd><p>A neural network that computes node, edge or graph representations by repeatedly aggregating information from neighbors. In GraphRAG, GNNs score nodes for retrieval or encode subgraphs into vectors an LLM can read.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-gnn-rag">GNN-RAG</dt>
+  <dd><p>A method (Mavromatis and Karypis, 2024) in which a GNN reasons over a knowledge-graph subgraph to find candidate answers, then the shortest paths from question entities to those candidates are written as text for the LLM.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
+  <dt id="term-graph-constrained-decoding">Graph-constrained decoding</dt>
+  <dd><p>Restricting an LLM's token generation so it can only produce paths that exist in the graph. Graph-constrained Reasoning (GCR) builds a trie of valid knowledge-graph paths to enforce this, which rules out invented relations.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a></p></dd>
+  <dt id="term-graph-cot">Graph CoT</dt>
+  <dd><p>Graph Chain-of-Thought (Jin et al., 2024). The LLM alternates between reasoning, choosing a graph function to call (such as retrieving a node, reading a feature, checking neighbors) and reading the result, iterating until it can answer.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a></p></dd>
+  <dt id="term-graph-database">Graph database</dt>
+  <dd><p>A database that stores nodes and edges natively and answers traversal queries efficiently, such as Neo4j, Memgraph or FalkorDB. Postgres with edge tables can play the same role at modest scale.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dt id="term-graph-foundation-model">Graph foundation model</dt>
+  <dd><p>A graph model pre-trained across many graphs so it transfers to new graphs with little or no retraining. GFM-RAG applies the idea to retrieval.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
+  <dt id="term-graph-r1">Graph-R1</dt>
+  <dd><p>An agentic GraphRAG framework (Luo et al., 2025) that trains the model with end-to-end reinforcement learning to interact with a hypergraph knowledge environment over multiple turns.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-graphgpt">GraphGPT</dt>
+  <dd><p>A graph instruction tuning method (Tang et al., 2023) that aligns a graph encoder with an LLM through a projector and tunes the model on graph tasks in two stages.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-graphiti">Graphiti</dt>
+  <dd><p>An open-source library from Zep for building temporally aware knowledge graphs for agents. It ingests episodes incrementally, keeps bi-temporal edges, and invalidates facts that newer information contradicts.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="30-agentic-graphrag.html">Chapter 30</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
+  <dt id="term-graphrag">GraphRAG</dt>
+  <dd><p>Broadly, any retrieval-augmented generation that uses graph structure to organize, retrieve or integrate knowledge. Narrowly, Microsoft's method and library: extract an entity graph, detect communities, write community reports, then answer with local, global or DRIFT search.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a>, <a href="06-graph-shapes.html">Chapter 6</a>, <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
+  <dt id="term-grounding">Grounding</dt>
+  <dd><p>Tying generated statements to supplied evidence. Retrieval grounds answers; citations to source ids make the grounding checkable.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-h">H</h2>
+<dl class="gloss">
+  <dt id="term-hallucination">Hallucination</dt>
+  <dd><p>Fluent output that is not supported by the input or by reality. Retrieval reduces hallucination only if the answer actually uses the evidence.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a></p></dd>
+  <dt id="term-helpfulness-score">Helpfulness score</dt>
+  <dd><p>In global search's map step, a 0 to 100 score the LLM attaches to each partial answer to say how much it helps answer the question. Low-scoring points are dropped and the rest are sorted before the reduce step.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dt id="term-hierarchical-leiden">Hierarchical Leiden</dt>
+  <dd><p>Running Leiden recursively: any community larger than a maximum cluster size is partitioned again, producing levels from coarse to fine. Microsoft GraphRAG uses it to build its community hierarchy.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a>, <a href="12-community-reports.html">Chapter 12</a></p></dd>
+  <dt id="term-high-level-keywords">High-level keywords</dt>
+  <dd><p>In LightRAG, abstract theme words extracted from the question ("supply-chain risk") that are matched against relationships to gather broad context. Contrast with low-level keywords.</p><p class="see">See: <a href="16-lightrag.html">Chapter 16</a></p></dd>
+  <dt id="term-hipporag">HippoRAG</dt>
+  <dd><p>A retrieval method (Jim&eacute;nez Guti&eacute;rrez et al., 2024) inspired by hippocampal memory. It builds a graph of OpenIE triples plus synonymy edges, seeds Personalized PageRank from the question's entities, and ranks passages by the mass of the nodes they contain. HippoRAG 2 adds passage nodes to the graph and links the query to triples rather than only to entities.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-hnsw">HNSW</dt>
+  <dd><p>Hierarchical Navigable Small World, a graph-based approximate nearest neighbor index (Malkov and Yashunin). Searches start in a sparse top layer and descend to denser layers. Most vector databases offer it, and pgvector supports it alongside IVFFlat.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dt id="term-hotpotqa">HotpotQA</dt>
+  <dd><p>A multi-hop question answering dataset built on Wikipedia (Yang et al., 2018) whose questions require two supporting paragraphs, with annotated supporting facts. A standard benchmark for multi-hop retrieval.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-hub-node">Hub node</dt>
+  <dd><p>A node with very high degree, such as Kestrel Labs or a generic entity like "the company". Expanding through hubs floods the context with loosely related facts, so retrievers cap, down-weight or skip them.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-hybrid-retrieval">Hybrid retrieval</dt>
+  <dd><p>Combining several retrievers, typically BM25, dense vectors and graph traversal, and fusing their rankings, often with reciprocal rank fusion and a reranker.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-hyperedge">Hyperedge</dt>
+  <dd><p>An edge that connects any number of nodes at once. "Brightwater Capital led Kestrel Labs' $40M Series B in 2025" is one n-ary fact that a hyperedge can hold without splitting it into pairs.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
+  <dt id="term-hypergraph">Hypergraph</dt>
+  <dd><p>A graph whose edges (hyperedges) can join more than two nodes. HyperGraphRAG and related methods use hypergraphs to keep n-ary facts intact.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-i">I</h2>
+<dl class="gloss">
+  <dt id="term-incremental-indexing">Incremental indexing</dt>
+  <dd><p>Updating a graph index when documents are added, changed or removed without rebuilding everything: extract only new text units, upsert entities and edges, and recompute only the communities and reports that changed.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="26-cost-scaling.html">Chapter 26</a></p></dd>
+  <dt id="term-instruction-tuning">Instruction tuning</dt>
+  <dd><p>Fine-tuning a model on instruction and response pairs. Graph instruction tuning (GraphGPT, LLaGA, MuseGraph) teaches a model to read graph inputs and perform graph tasks.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-invalidation">Invalidation</dt>
+  <dd><p>Marking a fact as no longer true when newer information contradicts it, rather than deleting it: close its valid-time interval and stamp when the system learned that (minigraphrag's <code>valid_to</code> and <code>invalidated_at</code>, Graphiti's <code>invalid_at</code> and <code>expired_at</code>). When Priya Nair became CTO in March 2026, Jonas Vehl's CTO_OF edge was invalidated, not erased.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="c3-temporal-memory.html">Capstone 3</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-k">K</h2>
+<dl class="gloss">
+  <dt id="term-k-hop-neighborhood">k-hop neighborhood</dt>
+  <dd><p>All nodes reachable from a node within k edges, plus the edges among them. The 2-hop neighborhood of Project Tern includes Deepcast (1 hop, through REPLACES) and Marlow Dynamics (2 hops, through Priya Nair's FORMERLY_WORKED_AT edge).</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="14-local-search.html">Chapter 14</a></p></dd>
+  <dt id="term-kestrel-labs-corpus">Kestrel Labs corpus</dt>
+  <dd><p>The fictional running example of this course: an ocean-tech startup, its people, projects, investors, supplier and regulators. Every chapter builds and queries the same graph.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a></p></dd>
+  <dt id="term-kgqa">KGQA</dt>
+  <dd><p>Knowledge graph question answering: answering natural-language questions from an existing knowledge graph, with benchmarks such as WebQSP, CWQ and MetaQA. Think-on-Graph, RoG and GNN-RAG were evaluated in this setting.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a>, <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
+  <dt id="term-knowledge-graph">Knowledge graph</dt>
+  <dd><p>A graph of entities and typed relationships that encodes facts about a domain, usually with a schema or ontology. It can be stored as RDF triples or as a property graph.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-l">L</h2>
+<dl class="gloss">
+  <dt id="term-lazygraphrag">LazyGraphRAG</dt>
+  <dd><p>A Microsoft Research approach that skips LLM summarization at indexing time (using lightweight concept extraction and co-occurrence instead) and defers LLM work to query time, bringing indexing cost close to vector RAG.</p><p class="see">See: <a href="26-cost-scaling.html">Chapter 26</a></p></dd>
+  <dt id="term-leiden">Leiden</dt>
+  <dd><p>A community detection algorithm (Traag, Waltman and van Eck, 2019) that fixes a flaw in Louvain: a refinement phase between local moving and aggregation guarantees that communities are well connected.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
+  <dt id="term-lexical-graph">Lexical graph</dt>
+  <dd><p>A graph of documents and their structure, with nodes for documents, sections and chunks and edges such as PART_OF and NEXT. Entities can be attached to it to form a hybrid graph.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
+  <dt id="term-lightrag">LightRAG</dt>
+  <dd><p>A graph-based RAG system (Guo et al., 2024) that indexes entities and relationships with key-value descriptions and retrieves in two levels: low-level keywords match entities, high-level keywords match relationships. It supports incremental updates by merging new subgraphs.</p><p class="see">See: <a href="16-lightrag.html">Chapter 16</a></p></dd>
+  <dt id="term-linearization">Linearization</dt>
+  <dd><p>Turning a graph or subgraph into text an LLM can read: triples, markdown tables, adjacency lists, JSON or natural-language sentences. The format and ordering both affect answer quality.</p><p class="see">See: <a href="22-context-construction.html">Chapter 22</a></p></dd>
+  <dt id="term-llaga">LLaGA</dt>
+  <dd><p>Large Language and Graph Assistant (Chen et al., 2024). It turns each node's neighborhood into a structure-aware sequence and maps it into the LLM's token embedding space with a trained projector.</p><p class="see">See: <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-llamaindex-propertygraphindex">LlamaIndex PropertyGraphIndex</dt>
+  <dd><p>LlamaIndex's index type for building and querying labeled property graphs, with pluggable extractors and retrievers and support for graph stores such as Neo4j.</p><p class="see">See: <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
+  <dt id="term-llm-as-judge">LLM-as-judge</dt>
+  <dd><p>Using an LLM to grade answers against criteria or against each other. Useful when there is no single gold answer, but sensitive to position, length and self-preference biases, so randomize order and check agreement.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-local-search">Local search</dt>
+  <dd><p>Microsoft GraphRAG's query mode for questions about specific entities. It links the question to seed entities by embedding, gathers their relationships, claims, community reports and source text units, and fills a token budget with ranked tables.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a></p></dd>
+  <dt id="term-lost-in-the-middle">Lost in the middle</dt>
+  <dd><p>The finding (Liu et al., 2023) that language models use information at the start and end of a long context more reliably than information in the middle. It is why context builders put the strongest evidence at the edges.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
+  <dt id="term-louvain">Louvain</dt>
+  <dd><p>A greedy modularity-maximization algorithm (Blondel et al., 2008). It repeats two phases: move single nodes to the neighboring community with the best modularity gain, then collapse communities into super-nodes.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
+  <dt id="term-low-level-keywords">Low-level keywords</dt>
+  <dd><p>In LightRAG, specific entity words extracted from the question ("Deepcast", "Project Tern") that are matched against entity embeddings to retrieve precise facts.</p><p class="see">See: <a href="16-lightrag.html">Chapter 16</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-m">M</h2>
+<dl class="gloss">
+  <dt id="term-map-reduce">Map-reduce</dt>
+  <dd><p>A two-step pattern: apply the same operation to many pieces independently (map), then combine the partial results (reduce). Global search maps the question over batches of community reports and reduces the partial answers.</p><p class="see">See: <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dt id="term-match">MATCH</dt>
+  <dd><p>The Cypher clause that describes a graph pattern to find, such as <code>MATCH (p:Person)-[:CO_LEADS]-&gt;(:Project {name: 'Project Tern'}) RETURN p.name</code>.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+  <dt id="term-message-passing">Message passing</dt>
+  <dd><p>The core operation of most GNNs: each node builds a message from its neighbors' current representations, aggregates the messages (sum, mean, attention) and updates its own representation. k rounds give each node a k-hop receptive field.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
+  <dt id="term-metapath">Metapath</dt>
+  <dd><p>A sequence of node and edge types that defines a kind of connection, such as Person &rarr; FORMERLY_WORKED_AT &rarr; Organization &rarr; ACQUIRED &rarr; Organization. Following metapaths retrieves only meaningful routes instead of every path.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-minigraphrag">minigraphrag</dt>
+  <dd><p>The course's small Python reference implementation of GraphRAG: chunking, extraction, resolution, communities, reports, indexing, several search methods and evaluation, runnable offline.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a>, <a href="c1-minigraphrag.html">Capstone 1</a></p></dd>
+  <dt id="term-mockllm">MockLLM</dt>
+  <dd><p>minigraphrag's deterministic offline LLM. It recognizes each prompt by a marker phrase and answers with heuristics: gazetteer-based extraction, extractive answers built from the context sentences. Pipelines and tests run without an API key or network, but its answers show what retrieval supplied, not how well a model would reason.</p><p class="see">See: <a href="00-welcome.html">Chapter 0</a></p></dd>
+  <dt id="term-modularity">Modularity</dt>
+  <dd><p>A score for a partition: Q = (1/2m) &Sigma;<sub>ij</sub> [A<sub>ij</sub> &minus; &gamma; k<sub>i</sub>k<sub>j</sub>/2m] &delta;(c<sub>i</sub>, c<sub>j</sub>), where m is total edge weight, k<sub>i</sub> is a node's degree and &gamma; is the resolution. It compares edges inside communities with what a random graph with the same degrees would give.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="11-community-detection.html">Chapter 11</a></p></dd>
+  <dt id="term-multi-hop-question">Multi-hop question</dt>
+  <dd><p>A question whose answer requires combining facts from several places. "Why did Kestrel Labs start Project Tern?" needs acquisition, supply and project facts from different chunks.</p><p class="see">See: <a href="03-where-rag-breaks.html">Chapter 3</a></p></dd>
+  <dt id="term-multihop-rag">MultiHop-RAG</dt>
+  <dd><p>A benchmark (Tang and Yang, 2024) of multi-hop queries over a news corpus, with inference, comparison, temporal and null query types, for testing retrieval and answering.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-multimodal-knowledge-graph">Multimodal knowledge graph</dt>
+  <dd><p>A knowledge graph whose nodes or attributes include images, tables, audio or video segments alongside text entities.</p><p class="see">See: <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-n">N</h2>
+<dl class="gloss">
+  <dt id="term-neighborhood-expansion">Neighborhood expansion</dt>
+  <dd><p>Retrieving the entities that match a query, then adding their k-hop neighbors and the connecting edges as context. It is the first of the seven Graph RAG designs and the core of local search.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-neo4j">Neo4j</dt>
+  <dd><p>A widely used property graph database queried with Cypher. It offers vector indexes and an official GraphRAG Python package.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a>, <a href="20-text2cypher.html">Chapter 20</a>, <a href="28-frameworks-in-practice.html">Chapter 28</a></p></dd>
+  <dt id="term-networkx">NetworkX</dt>
+  <dd><p>A pure-Python library for building and analyzing graphs. It is ideal for learning and for graphs up to a few hundred thousand edges; minigraphrag uses it throughout.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dt id="term-node-specificity">Node specificity</dt>
+  <dd><p>HippoRAG's weight for a node, the inverse of the number of passages it appears in. Rare entities get stronger seeds in Personalized PageRank, like IDF for graph nodes.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-normalization-entity-names">Normalization (entity names)</dt>
+  <dd><p>Rewriting names into a canonical comparison form: case folding, trimming punctuation and titles ("Dr."), collapsing whitespace. It is the cheapest step of entity resolution.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-o">O</h2>
+<dl class="gloss">
+  <dt id="term-observability">Observability</dt>
+  <dd><p>Being able to see what a running system did and why: traces of each retrieval step, prompts, token counts, latency, cost and the ids of evidence used for each answer.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a></p></dd>
+  <dt id="term-ontology">Ontology</dt>
+  <dd><p>A formal specification of the types of things in a domain, their properties and the relations allowed between them, often with inheritance and constraints (for example in OWL). Stronger than a simple schema.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
+  <dt id="term-openie">OpenIE</dt>
+  <dd><p>Open information extraction: pulling (subject, relation, object) triples from text without a fixed schema of relation types. HippoRAG builds its graph from LLM-based OpenIE.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-overlap">Overlap</dt>
+  <dd><p>The number of tokens (or words) consecutive chunks share. Overlap keeps a sentence or relationship that straddles a boundary intact in at least one chunk, at the cost of duplicate extraction work.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-p">P</h2>
+<dl class="gloss">
+  <dt id="term-pagerank">PageRank</dt>
+  <dd><p>A node-importance score: the stationary probability that a random walker is at a node, where at each step it follows a random edge with probability &alpha; or jumps to a random node otherwise. Computed by power iteration: r = (1&minus;&alpha;)/N + &alpha; &middot; M r.</p><p class="see">See: <a href="04-graph-fundamentals.html">Chapter 4</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-pairwise-evaluation">Pairwise evaluation</dt>
+  <dd><p>Showing a judge two answers to the same question and asking which is better on a criterion. Relative judgments are more stable than absolute scores; swap positions to cancel order bias.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-path-retrieval">Path retrieval</dt>
+  <dd><p>Retrieving chains of edges that connect query entities, rather than isolated nodes or chunks, so the model sees how facts link. Marlow Dynamics &rarr; ACQUIRED &rarr; Deepcast &rarr; SUPPLIED &rarr; Kestrel Labs explains Project Tern.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dt id="term-pathrag">PathRAG</dt>
+  <dd><p>A graph RAG method (Chen et al., 2025) that retrieves relational paths between retrieved nodes, prunes them with flow-based pruning, and places paths in the prompt ordered by reliability.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dt id="term-pcst-prize-collecting-steiner-tree">PCST (prize-collecting Steiner tree)</dt>
+  <dd><p>An optimization that picks a connected subgraph maximizing the prizes of included nodes (relevance to the query) minus the costs of included edges. G-Retriever uses it to extract a compact, connected subgraph.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a></p></dd>
+  <dt id="term-personalized-pagerank-ppr">Personalized PageRank (PPR)</dt>
+  <dd><p>PageRank in which the walker restarts, with probability 1 &minus; &alpha;, at a chosen seed distribution instead of a uniform one. Mass concentrates on nodes close to and well connected with the seeds, which makes it a multi-hop relevance score.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-pgvector">pgvector</dt>
+  <dd><p>A PostgreSQL extension that adds a vector column type, distance operators and HNSW and IVFFlat indexes, so embeddings can live next to relational and edge tables.</p><p class="see">See: <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+  <dt id="term-plan-on-graph-pog">Plan-on-Graph (PoG)</dt>
+  <dd><p>A knowledge-graph reasoning method (Chen et al., 2024) that decomposes a question into sub-objectives, explores the graph adaptively, and uses memory and reflection to correct wrong exploration paths.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dt id="term-prompt-caching">Prompt caching</dt>
+  <dd><p>Reusing the provider-side computation for an identical prompt prefix across calls, which lowers cost and latency. Put static instructions and examples first and variable text last to benefit.</p><p class="see">See: <a href="26-cost-scaling.html">Chapter 26</a></p></dd>
+  <dt id="term-prompt-injection">Prompt injection</dt>
+  <dd><p>Text that tries to override a model's instructions. In GraphRAG it can arrive through indexed documents, be copied into entity descriptions and community reports, and reach many future queries.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a></p></dd>
+  <dt id="term-property-graph">Property graph</dt>
+  <dd><p>A graph model in which nodes and edges have labels or types and arbitrary key-value properties, such as a CTO_OF edge with since and until properties. Used by Neo4j and most GraphRAG tools.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
+  <dt id="term-provenance">Provenance</dt>
+  <dd><p>The record of where a fact came from: document, text unit, character span, extraction run and time. It enables citations, debugging bad edges, deletions and access control.</p><p class="see">See: <a href="07-chunking-text-units.html">Chapter 7</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a>, <a href="29-production-ops.html">Chapter 29</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-q">Q</h2>
+<dl class="gloss">
+  <dt id="term-query-focused-summarization-qfs">Query-focused summarization (QFS)</dt>
+  <dd><p>Summarizing a document collection with respect to a question. The GraphRAG paper frames global sensemaking questions such as "What are the main themes?" as QFS.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a>, <a href="15-global-search.html">Chapter 15</a></p></dd>
+  <dt id="term-query-routing">Query routing</dt>
+  <dd><p>Choosing a retrieval strategy per question, for example local search for entity questions, global search for themes, Text2Cypher for aggregates.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a>, <a href="29-production-ops.html">Chapter 29</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-r">R</h2>
+<dl class="gloss">
+  <dt id="term-rag-retrieval-augmented-generation">RAG (retrieval-augmented generation)</dt>
+  <dd><p>Answering with an LLM after retrieving relevant external information and placing it in the prompt. It adds fresh or private knowledge without retraining and makes answers citable.</p><p class="see">See: <a href="01-llms-and-context.html">Chapter 1</a>, <a href="02-vector-rag.html">Chapter 2</a></p></dd>
+  <dt id="term-raptor">RAPTOR</dt>
+  <dd><p>Recursive Abstractive Processing for Tree-Organized Retrieval (Sarthi et al., 2024). It clusters chunk embeddings, summarizes each cluster, and repeats on the summaries to build a tree; retrieval can search all levels at once.</p><p class="see">See: <a href="06-graph-shapes.html">Chapter 6</a>, <a href="12-community-reports.html">Chapter 12</a></p></dd>
+  <dt id="term-rating">Rating</dt>
+  <dd><p>The impact or importance score (0 to 10 in Microsoft GraphRAG) an LLM assigns to a community report, with a short explanation. It can be used to rank reports.</p><p class="see">See: <a href="12-community-reports.html">Chapter 12</a></p></dd>
+  <dt id="term-rdf">RDF</dt>
+  <dd><p>Resource Description Framework, the W3C model that represents knowledge as subject-predicate-object triples with IRIs as identifiers, queried with SPARQL.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
+  <dt id="term-recall-k">Recall@k</dt>
+  <dd><p>The fraction of relevant items that appear in the top k retrieved results.</p><p class="see">See: <a href="25-evaluation.html">Chapter 25</a></p></dd>
+  <dt id="term-reciprocal-rank-fusion-rrf">Reciprocal rank fusion (RRF)</dt>
+  <dd><p>A way to merge ranked lists without comparable scores: each item gets &Sigma; 1/(k + rank) over the lists it appears in, commonly with k = 60 (Cormack et al., 2009).</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-record-delimiter">Record delimiter</dt>
+  <dd><p>The separator between records in delimited extraction output; minigraphrag and Microsoft GraphRAG's default prompts use <code>##</code>, and the output ends with <code>&lt;|COMPLETE|&gt;</code>.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+  <dt id="term-reification">Reification</dt>
+  <dd><p>Turning a relationship into a node so that it can carry its own properties and links. The Series B becomes a FundingRound node connected to Brightwater Capital, Kestrel Labs, an amount and a date.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="31-multimodal-hypergraph.html">Chapter 31</a></p></dd>
+  <dt id="term-relationship">Relationship</dt>
+  <dd><p>A typed or described connection between two entities. In minigraphrag each extracted <code>Relationship</code> has a source, target, description, <code>strength</code> and one <code>source_id</code>; merging turns all mentions into one edge with a summed <code>weight</code> and a <code>source_ids</code> list. Example: Deepcast SUPPLIED Kestrel Labs from 2022 to 2025.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+  <dt id="term-relationship-strength">Relationship strength</dt>
+  <dd><p>The 1 to 10 score the extractor assigns to how strong a relationship is (<code>Relationship.strength</code>). Merging sums the strengths of all mentions into the edge's <code>weight</code>.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a>, <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dt id="term-reranker">Reranker</dt>
+  <dd><p>A second-stage model that reorders a short candidate list by relevance, usually a cross-encoder or an LLM.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-resolution-parameter">Resolution parameter</dt>
+  <dd><p>The &gamma; in modularity. Values above 1 favor more, smaller communities; values below 1 favor fewer, larger ones.</p><p class="see">See: <a href="11-community-detection.html">Chapter 11</a></p></dd>
+  <dt id="term-rog-reasoning-on-graphs">RoG (Reasoning on Graphs)</dt>
+  <dd><p>A method (Luo et al., 2024) that fine-tunes an LLM to generate relation paths as plans, retrieves the matching paths from the knowledge graph, and reasons over them to answer faithfully.</p><p class="see">See: <a href="23-graph-reasoning.html">Chapter 23</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-s">S</h2>
+<dl class="gloss">
+  <dt id="term-schema">Schema</dt>
+  <dd><p>The declared node labels, relationship types and properties a graph uses. A schema given to the extractor keeps types consistent; given to Text2Cypher it keeps queries valid.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+  <dt id="term-seed-entity">Seed entity</dt>
+  <dd><p>A node chosen as the starting point of retrieval because it matches the question, by embedding similarity or name match. Local search expands from seeds; PPR teleports to them.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-soft-prompt">Soft prompt</dt>
+  <dd><p>Learned continuous vectors inserted into the LLM's input embeddings in place of or alongside text tokens. G-Retriever and GraphToken pass a graph to the LLM this way.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="24-training-with-graphs.html">Chapter 24</a></p></dd>
+  <dt id="term-source-ids">source_ids</dt>
+  <dd><p>The list of text unit ids a merged entity or relationship was extracted from. Each extracted mention carries a single <code>source_id</code>; merging collects them into <code>source_ids</code>. It powers citations, lets you delete a document's facts cleanly, and tells incremental indexing what to recompute.</p><p class="see">See: <a href="07-chunking-text-units.html">Chapter 7</a>, <a href="09-entity-resolution.html">Chapter 9</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
+  <dt id="term-sparql">SPARQL</dt>
+  <dd><p>The W3C query language for RDF data, based on triple patterns such as <code>?person ex:ctoOf ex:KestrelLabs</code>.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a></p></dd>
+  <dt id="term-sparse-retrieval">Sparse retrieval</dt>
+  <dd><p>Retrieval with high-dimensional, mostly-zero term vectors, such as BM25 or learned sparse models. Strong on exact terms, names and codes.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-subgraph-assembly">Subgraph assembly</dt>
+  <dd><p>Building a small, connected subgraph that covers all the query's entities (for example via shortest paths or PCST) and giving it to the model as one coherent piece of evidence.</p><p class="see">See: <a href="19-subgraph-gnn.html">Chapter 19</a>, <a href="21-hybrid-design-patterns.html">Chapter 21</a></p></dd>
+  <dt id="term-summary-leakage">Summary leakage</dt>
+  <dd><p>When a generated summary (entity description or community report) exposes facts from sources the reader is not allowed to see, because it was built from mixed-permission data.</p><p class="see">See: <a href="29-production-ops.html">Chapter 29</a></p></dd>
+  <dt id="term-synonymy-edge">Synonymy edge</dt>
+  <dd><p>An edge HippoRAG adds between nodes whose names have very similar embeddings ("Tidewater" and "Tidewater Institute"), letting PPR flow across aliases that resolution missed.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-t">T</h2>
+<dl class="gloss">
+  <dt id="term-teleport">Teleport</dt>
+  <dd><p>In PageRank, the random jump to a node chosen from the teleport distribution, taken with probability 1 &minus; &alpha;. In Personalized PageRank the jump lands on seed nodes.</p><p class="see">See: <a href="17-ppr-hipporag.html">Chapter 17</a></p></dd>
+  <dt id="term-temporal-window">Temporal window</dt>
+  <dd><p>Restricting retrieval to facts valid in a time range. "Who supplied Kestrel's sonar in 2024?" should only see edges valid in 2024, which returns Deepcast.</p><p class="see">See: <a href="21-hybrid-design-patterns.html">Chapter 21</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
+  <dt id="term-text-unit">Text unit</dt>
+  <dd><p>Microsoft GraphRAG's name for a chunk: the span of text sent to extraction, with a stable id that every derived entity, relationship and claim cites.</p><p class="see">See: <a href="07-chunking-text-units.html">Chapter 7</a></p></dd>
+  <dt id="term-text2cypher">Text2Cypher</dt>
+  <dd><p>Generating a Cypher query from a natural-language question, given the graph schema, then validating, running and possibly repairing it. It answers precise and aggregate questions ("how many projects does Priya Nair lead?").</p><p class="see">See: <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+  <dt id="term-think-on-graph-tog">Think-on-Graph (ToG)</dt>
+  <dd><p>A method (Sun et al., 2023) in which the LLM acts as an agent on a knowledge graph, running a beam search that repeatedly explores and prunes relations and entities, until it judges that the collected paths answer the question. ToG 2.0 interleaves graph and text retrieval.</p><p class="see">See: <a href="18-paths-and-agents.html">Chapter 18</a></p></dd>
+  <dt id="term-token-budget">Token budget</dt>
+  <dd><p>The number of tokens allotted to retrieved context, often split across sections (entities, relationships, reports, source text). Builders rank items and add them until the budget is full.</p><p class="see">See: <a href="14-local-search.html">Chapter 14</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
+  <dt id="term-tool-calling">Tool calling</dt>
+  <dd><p>Letting an LLM request calls to declared functions with structured arguments, such as <code>expand_neighbors(entity, hops)</code>, and continue after reading the results. It is how agentic GraphRAG accesses the graph.</p><p class="see">See: <a href="30-agentic-graphrag.html">Chapter 30</a></p></dd>
+  <dt id="term-transaction-time">Transaction time</dt>
+  <dd><p>In a bi-temporal model, when the system recorded a fact or recorded that it had ended, regardless of when it was true in the world. minigraphrag and Capstone 3 call it record time (<code>recorded_at</code>, <code>invalidated_at</code>).</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
+  <dt id="term-triple">Triple</dt>
+  <dd><p>A (subject, predicate, object) statement, the atomic unit of RDF and a common linearization format: (Marlow Dynamics, ACQUIRED, Deepcast).</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="22-context-construction.html">Chapter 22</a></p></dd>
+  <dt id="term-tuple-delimiter">Tuple delimiter</dt>
+  <dd><p>The separator between fields of one extracted record. minigraphrag and Microsoft GraphRAG's default prompts use <code>&lt;|&gt;</code>, as in <code>("entity"&lt;|&gt;DEEPCAST&lt;|&gt;ORGANIZATION&lt;|&gt;Sonar supplier)</code>.</p><p class="see">See: <a href="08-entity-relation-extraction.html">Chapter 8</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-u">U</h2>
+<dl class="gloss">
+  <dt id="term-union-find">Union-find</dt>
+  <dd><p>A disjoint-set data structure with near-constant-time find and union operations. Entity resolution uses it to merge chains of matches: if A matches B and B matches C, all three end in one cluster.</p><p class="see">See: <a href="09-entity-resolution.html">Chapter 9</a></p></dd>
+  <dt id="term-upsert">Upsert</dt>
+  <dd><p>Insert a record if it does not exist, otherwise update it. Incremental graph updates upsert entities and edges by canonical key and append new source_ids.</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-v">V</h2>
+<dl class="gloss">
+  <dt id="term-valid-time">Valid time</dt>
+  <dd><p>In a bi-temporal model, the period during which a fact was true in the world. Jonas Vehl's CTO_OF edge is valid from 2021 to March 2026.</p><p class="see">See: <a href="10-claims-temporal.html">Chapter 10</a>, <a href="27-incremental-temporal.html">Chapter 27</a></p></dd>
+  <dt id="term-variable-length-path">Variable-length path</dt>
+  <dd><p>A Cypher pattern that matches paths of a range of lengths, such as <code>(a)-[*1..3]-(b)</code>. Always bound the upper length, since unbounded patterns can explode.</p><p class="see">See: <a href="05-knowledge-graphs.html">Chapter 5</a>, <a href="20-text2cypher.html">Chapter 20</a></p></dd>
+  <dt id="term-vector-store">Vector store</dt>
+  <dd><p>A system that stores embeddings with ids and metadata and answers nearest-neighbor queries, from an in-memory matrix to pgvector or a dedicated database.</p><p class="see">See: <a href="02-vector-rag.html">Chapter 2</a>, <a href="13-storage-indexing.html">Chapter 13</a></p></dd>
+</dl>
+</section>
+<section class="gloss-letter">
+<h2 id="letter-z">Z</h2>
+<dl class="gloss">
+  <dt id="term-zep">Zep</dt>
+  <dd><p>A memory service for AI agents whose core is Graphiti, a temporal knowledge graph that tracks episodes, entities and bi-temporal facts (Rasmussen et al., 2025).</p><p class="see">See: <a href="27-incremental-temporal.html">Chapter 27</a>, <a href="30-agentic-graphrag.html">Chapter 30</a></p></dd>
+</dl>
+</section>
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+<script>
+(function () {
+  var tools = document.getElementById("gloss-tools");
+  var input = document.getElementById("gloss-filter");
+  if (!tools || !input) return;
+  tools.hidden = false;
+  var count = document.getElementById("gloss-count");
+  var empty = document.getElementById("gloss-empty");
+  var dts = Array.prototype.slice.call(document.querySelectorAll("dl.gloss dt"));
+  var secs = Array.prototype.slice.call(document.querySelectorAll("section.gloss-letter"));
+  function run() {
+    var q = input.value.trim().toLowerCase();
+    var shown = 0;
+    dts.forEach(function (dt) {
+      var dd = dt.nextElementSibling;
+      var hit = !q || (dt.textContent + " " + (dd ? dd.textContent : "")).toLowerCase().indexOf(q) !== -1;
+      dt.hidden = !hit;
+      if (dd) dd.hidden = !hit;
+      if (hit) shown++;
+    });
+    secs.forEach(function (s) { s.hidden = !s.querySelector("dt:not([hidden])"); });
+    count.textContent = q ? shown + " of " + dts.length + " terms match" : dts.length + " terms";
+    empty.hidden = shown !== 0;
+  }
+  input.addEventListener("input", run);
+  run();
+})();
+</script>
+</body>
+</html>

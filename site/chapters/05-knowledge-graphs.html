@@ -1,0 +1,1100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knowledge graphs, schemas and query languages | Graph RAG from Scratch</title>
+<meta name="description" content="Triples, RDF and labeled property graphs, ontologies, n-ary facts and identity, then Cypher and SPARQL on the Kestrel Labs knowledge graph in Neo4j and NetworkX.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="05-knowledge-graphs" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Knowledge graphs, schemas and query languages</h1>
+  <p class="lede">A knowledge graph is a graph whose nodes and edges have agreed-upon meaning, so a program can ask it precise questions. This chapter turns the Kestrel Labs facts into a typed, time-aware knowledge graph, loads it into Neo4j and NetworkX, and answers the course's canonical questions with Cypher and SPARQL.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Express facts as triples and explain how RDF and labeled property graphs differ in practice</li>
+      <li>Design a small ontology with classes and relation domains and ranges, and use it to validate extracted facts</li>
+      <li>Model n-ary and time-bounded facts with edge properties, event nodes or reification, and choose between them</li>
+      <li>Write Cypher queries with patterns, filters, variable-length paths, OPTIONAL MATCH and aggregation, and translate them to SPARQL</li>
+      <li>Load a knowledge graph into Neo4j with idempotent MERGE statements and into a NetworkX MultiDiGraph</li>
+      <li>Decide when to use an existing knowledge graph and when to build one from text</li>
+    </ul>
+  </div>
+</header>
+
+<h2>From “a graph” to “a knowledge graph”</h2>
+<p>In <a href="04-graph-fundamentals.html">Chapter 4</a> the Kestrel graph was 16 nodes and 27 undirected edges. That is enough to compute PageRank, but not enough to answer “Who is the CTO of Kestrel Labs?”. The graph knows Jonas Vehl and Priya Nair are both connected to Kestrel Labs; it does not know <em>how</em>, or <em>when</em>.</p>
+<p>A <strong>knowledge graph</strong> (KG) adds three things:</p>
+<ul>
+  <li><strong>Types</strong>: Kestrel Labs is an Organization, Priya Nair is a Person.</li>
+  <li><strong>Typed, directed relations</strong>: Priya Nair CTO_OF Kestrel Labs rather than an untyped “connected to” edge.</li>
+  <li><strong>A schema</strong> that says which relations make sense between which types, plus identifiers that stay stable when names vary.</li>
+</ul>
+<p>With those in place a question becomes a <em>query</em>, and a query has one exact answer set. That precision is why knowledge graphs sit at one end of the GraphRAG design space. The other end is GraphRAG's text-heavy entity graph, where relations are free-text descriptions that an LLM reads. Most production systems borrow from both, which is why you need to understand the structured end before building the fuzzy one in Part 2.</p>
+
+<h2>Triples and the two data models</h2>
+
+<h3>The triple</h3>
+<p>The atomic unit of a knowledge graph is the <strong>triple</strong> <em>(subject, predicate, object)</em>: one directed, labeled edge. The subject is an entity, the predicate is a relation, and the object is either another entity or a <strong>literal</strong> value such as a string, number or date.</p>
+<table>
+  <thead><tr><th>Subject</th><th>Predicate</th><th>Object</th><th>Object kind</th></tr></thead>
+  <tbody>
+    <tr><td>Marlow Dynamics</td><td>ACQUIRED</td><td>Deepcast</td><td>Entity</td></tr>
+    <tr><td>Deepcast</td><td>SUPPLIED</td><td>Kestrel Labs</td><td>Entity</td></tr>
+    <tr><td>Kestrel Labs</td><td>RUNS</td><td>Project Tern</td><td>Entity</td></tr>
+    <tr><td>Project Tern</td><td>REPLACES</td><td>Deepcast</td><td>Entity</td></tr>
+    <tr><td>Kestrel Labs</td><td>type</td><td>Organization</td><td>Class</td></tr>
+    <tr><td>Kestrel Labs</td><td>founded_year</td><td>2021</td><td>Literal</td></tr>
+  </tbody>
+</table>
+<p>A graph is then just a set of triples. The first four rows are the chain behind canonical question 1, “Why did Kestrel Labs start Project Tern?”. Stored this way the chain is four hops you can query, instead of a sentence you hope a retriever finds.</p>
+<p>The same triple idea appears in two families of technology that grew up separately and still use different vocabularies.</p>
+
+<h3>RDF</h3>
+<p>The <strong>Resource Description Framework</strong> (RDF) is the W3C standard for triples. Every entity and predicate is named by an <strong>IRI</strong>, a globally unique web-style identifier such as <code>https://example.org/kestrel/deepcast</code>, usually abbreviated with a prefix as <code>kl:deepcast</code>. Literals carry datatypes (<code>"2025-09-23"^^xsd:date</code>). An RDF graph is formally a <em>set</em> of triples, so adding the same triple twice changes nothing. RDF data is written in formats like Turtle and queried with <strong>SPARQL</strong>. Schemas are written in RDFS and OWL, and data can be validated with SHACL.</p>
+<pre data-file="kestrel.ttl"><code>@prefix kl:   &lt;https://example.org/kestrel/&gt; .
+@prefix rdfs: &lt;http://www.w3.org/2000/01/rdf-schema#&gt; .
+@prefix xsd:  &lt;http://www.w3.org/2001/XMLSchema#&gt; .
+
+kl:marlow-dynamics a kl:Organization ;
+    rdfs:label "Marlow Dynamics" ;
+    kl:acquired kl:deepcast ;
+    kl:competesWith kl:kestrel-labs .
+
+kl:deepcast a kl:Organization ;
+    rdfs:label "Deepcast" ;
+    kl:supplied kl:kestrel-labs .
+
+kl:jonas-vehl a kl:Person ;
+    rdfs:label "Jonas Vehl" ;
+    kl:coFounded kl:kestrel-labs ;
+    kl:ctoOf kl:kestrel-labs .</code></pre>
+
+<h3>Labeled property graphs</h3>
+<p>A <strong>labeled property graph</strong> (LPG) is what Neo4j, Memgraph, Amazon Neptune (in its property-graph mode) and most graph libraries implement. Nodes have one or more <strong>labels</strong> (<code>:Person</code>) and a map of <strong>properties</strong>. Relationships have exactly one <strong>type</strong> (<code>:CTO_OF</code>), a direction, and <em>their own</em> properties. Two relationships of the same type between the same nodes are allowed and distinct. LPGs are queried with <strong>Cypher</strong> (and its standardized descendant, ISO GQL) or Gremlin.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 290" role="img" aria-labelledby="models-title">
+      <title id="models-title">The fact that Jonas Vehl was CTO of Kestrel Labs until March 2026, drawn as RDF triples on the left and as a labeled property graph on the right</title>
+      <defs>
+        <marker id="ch5-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <text class="d-text bold" x="16" y="24">RDF: everything is a triple</text>
+      <rect class="d-box node" x="16" y="50" width="130" height="36" rx="18"/>
+      <text class="d-text mono" x="81" y="73" text-anchor="middle">kl:jonas-vehl</text>
+      <rect class="d-box node" x="190" y="150" width="130" height="36" rx="18"/>
+      <text class="d-text mono" x="255" y="173" text-anchor="middle">kl:kestrel-labs</text>
+      <line class="d-line" x1="100" y1="86" x2="220" y2="148" marker-end="url(#ch5-arr)"/>
+      <text class="d-text small mono" x="170" y="110">kl:ctoOf</text>
+      <rect class="d-box" x="16" y="150" width="120" height="30" rx="3"/>
+      <text class="d-text small" x="76" y="170" text-anchor="middle">"Jonas Vehl"</text>
+      <line class="d-line" x1="60" y1="86" x2="66" y2="148" marker-end="url(#ch5-arr)"/>
+      <text class="d-text small mono" x="68" y="124">rdfs:label</text>
+      <rect class="d-box" x="190" y="50" width="120" height="30" rx="3"/>
+      <text class="d-text small" x="250" y="70" text-anchor="middle">kl:Person</text>
+      <line class="d-line" x1="146" y1="66" x2="188" y2="66" marker-end="url(#ch5-arr)"/>
+      <text class="d-text small mono" x="160" y="58">a</text>
+      <text class="d-text small" x="16" y="222">The end date has nowhere to go: a triple</text>
+      <text class="d-text small" x="16" y="238">cannot carry properties. You need an extra</text>
+      <text class="d-text small" x="16" y="254">node or RDF-star (see n-ary facts below).</text>
+
+      <line class="d-line faint" x1="350" y1="16" x2="350" y2="276"/>
+
+      <text class="d-text bold" x="370" y="24">Property graph: properties on both</text>
+      <rect class="d-box node" x="370" y="44" width="150" height="74" rx="8"/>
+      <text class="d-text bold" x="382" y="64">:Person</text>
+      <text class="d-text small mono" x="382" y="84">id: "jonas-vehl"</text>
+      <text class="d-text small mono" x="382" y="102">name: "Jonas Vehl"</text>
+      <rect class="d-box node" x="510" y="180" width="160" height="74" rx="8"/>
+      <text class="d-text bold" x="522" y="200">:Organization</text>
+      <text class="d-text small mono" x="522" y="220">id: "kestrel-labs"</text>
+      <text class="d-text small mono" x="522" y="238">name: "Kestrel Labs"</text>
+      <line class="d-line hot" x1="450" y1="118" x2="560" y2="178" marker-end="url(#ch5-arr)"/>
+      <line class="d-line dash" x1="440" y1="206" x2="500" y2="150"/>
+      <rect class="d-box edge" x="370" y="206" width="130" height="60" rx="6"/>
+      <text class="d-text bold" x="380" y="224">:CTO_OF</text>
+      <text class="d-text small mono" x="380" y="241">valid_from: 2021</text>
+      <text class="d-text small mono" x="380" y="257">valid_to: 2026-03</text>
+    </svg>
+  </div>
+  <figcaption>The same fact in both models. RDF is uniform: labels, types and relations are all triples. A property graph puts attributes directly on nodes and relationships, which makes time ranges and weights on edges natural.</figcaption>
+</figure>
+
+<h3>RDF vs labeled property graphs</h3>
+<table>
+  <thead><tr><th>Concern</th><th>RDF (triple stores)</th><th>Labeled property graph</th></tr></thead>
+  <tbody>
+    <tr><td>Identity</td><td>Global IRIs; merging datasets that share IRIs is trivial</td><td>Internal ids; you add your own <code>id</code> property and a uniqueness constraint</td></tr>
+    <tr><td>Properties on edges</td><td>Not directly; needs reification, an intermediate node, or RDF-star</td><td>Native: <code>[:CTO_OF {valid_to: ...}]</code></td></tr>
+    <tr><td>Duplicate edges</td><td>A set: the same triple twice is one triple</td><td>A multigraph: two INVESTED_IN edges (Series A, Series B) can coexist</td></tr>
+    <tr><td>Schema and reasoning</td><td>RDFS/OWL ontologies with formal inference; SHACL for validation</td><td>Mostly schema-optional; constraints on uniqueness, existence and types, logic in queries or application code</td></tr>
+    <tr><td>Query language</td><td>SPARQL 1.1 (W3C standard)</td><td>Cypher / openCypher, ISO GQL, Gremlin</td></tr>
+    <tr><td>Typical home</td><td>Open data (Wikidata, DBpedia), life sciences, publishing, enterprise data integration</td><td>Application backends, fraud, recommendations, and most GraphRAG tooling</td></tr>
+    <tr><td>LLM friendliness</td><td>Verbose IRIs cost tokens, and every generated query must get its prefixes right</td><td>Compact ASCII-art patterns; LLMs generate Cypher reasonably well (Chapter 20)</td></tr>
+  </tbody>
+</table>
+<p>Neither is “the” knowledge graph. The concepts in the rest of this chapter (schemas, identity, n-ary facts, pattern queries) apply to both; we show both syntaxes and use the property graph as our default because the GraphRAG ecosystem mostly does.</p>
+
+<h2>Ontologies and schemas</h2>
+<p>An <strong>ontology</strong> is an explicit, shared specification of the concepts in a domain and how they relate. In practice, for a RAG engineer, it is the answer to three questions: what <strong>classes</strong> of things exist, what <strong>relations</strong> may connect them, and what <strong>constraints</strong> hold.</p>
+<ul>
+  <li><strong>Classes</strong>, optionally in a hierarchy: <code>Organization</code>, with subclasses like <code>Company</code> and <code>ResearchInstitute</code>.</li>
+  <li><strong>Relations</strong> with a <strong>domain</strong> (the class of valid subjects) and a <strong>range</strong> (the class of valid objects). CTO_OF has domain Person and range Organization.</li>
+  <li><strong>Constraints</strong> such as cardinality (“an organization has at most one current CTO”), datatypes (“amount_usd is a non-negative integer”) and key properties (“id is unique”).</li>
+</ul>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 430" role="img" aria-labelledby="onto-title">
+      <title id="onto-title">A small Kestrel Labs ontology: six classes and the relations allowed between them</title>
+      <defs>
+        <marker id="ch5-arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box node" x="270" y="20" width="140" height="40" rx="8"/>
+      <text class="d-text bold" x="340" y="45" text-anchor="middle">Person</text>
+      <rect class="d-box node" x="40" y="190" width="150" height="40" rx="8"/>
+      <text class="d-text bold" x="115" y="215" text-anchor="middle">Organization</text>
+      <rect class="d-box node" x="490" y="190" width="150" height="40" rx="8"/>
+      <text class="d-text bold" x="565" y="215" text-anchor="middle">Project</text>
+      <rect class="d-box node" x="270" y="360" width="140" height="40" rx="8"/>
+      <text class="d-text bold" x="340" y="385" text-anchor="middle">Location</text>
+      <rect class="d-box comm" x="500" y="360" width="140" height="40" rx="8"/>
+      <text class="d-text bold" x="570" y="385" text-anchor="middle">Event</text>
+      <rect class="d-box comm" x="40" y="360" width="140" height="40" rx="8"/>
+      <text class="d-text bold" x="110" y="385" text-anchor="middle">Law</text>
+
+      <line class="d-line" x1="290" y1="60" x2="150" y2="188" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="20" y="84">CEO_OF · CTO_OF · CO_FOUNDED</text>
+      <text class="d-text small mono" x="20" y="100">DIRECTS · PARTNER_AT</text>
+      <text class="d-text small mono" x="20" y="116">BOARD_MEMBER_OF</text>
+      <text class="d-text small mono" x="20" y="132">FORMERLY_WORKED_AT</text>
+
+      <line class="d-line" x1="390" y1="60" x2="530" y2="188" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="480" y="110">LEADS · CO_LEADS</text>
+
+      <line class="d-line" x1="340" y1="60" x2="340" y2="358" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="346" y="160">LEADS_SURVEY_OF</text>
+
+      <line class="d-line" x1="190" y1="204" x2="488" y2="204" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="200" y="196">RUNS · PARTNERS_ON</text>
+      <line class="d-line dash" x1="488" y1="222" x2="192" y2="222" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="380" y="240">REPLACES</text>
+
+      <path class="d-line" d="M 70 230 C 30 290, 150 300, 150 232" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="16" y="296">ACQUIRED · SUPPLIED</text>
+      <text class="d-text small mono" x="16" y="312">INVESTED_IN · CONTRACTED</text>
+      <text class="d-text small mono" x="16" y="328">COMPETES_WITH</text>
+
+      <line class="d-line" x1="140" y1="230" x2="290" y2="358" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="232" y="298">LOCATED_IN</text>
+
+      <line class="d-line" x1="545" y1="230" x2="400" y2="358" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="400" y="300">MONITORS</text>
+      <line class="d-line" x1="590" y1="230" x2="580" y2="358" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="592" y="300">DETECTED</text>
+      <line class="d-line" x1="498" y1="380" x2="412" y2="380" marker-end="url(#ch5-arr2)"/>
+      <text class="d-text small mono" x="414" y="372">OCCURRED_AT</text>
+      <text class="d-text small" x="40" y="418">requires: text property</text>
+    </svg>
+  </div>
+  <figcaption>The Kestrel ontology. Each arrow is a relation with a domain (tail class) and range (head class). REPLACES (Project → Organization) is dashed: “Tern replaces Deepcast sonar” is a modeling shortcut you might later refine with a Product class.</figcaption>
+</figure>
+
+<p>Written as data, the same ontology is a few lines that code can check against:</p>
+<pre data-file="kestrel_schema.py"><code class="language-python">CLASSES = {"Organization", "Person", "Project", "Location", "Event", "Law"}
+
+# relation -&gt; (domain, range)
+RELATIONS = {
+    "CEO_OF": ("Person", "Organization"),          "CTO_OF": ("Person", "Organization"),
+    "CO_FOUNDED": ("Person", "Organization"),      "DIRECTS": ("Person", "Organization"),
+    "PARTNER_AT": ("Person", "Organization"),      "BOARD_MEMBER_OF": ("Person", "Organization"),
+    "FORMERLY_WORKED_AT": ("Person", "Organization"),
+    "LEADS": ("Person", "Project"),                "CO_LEADS": ("Person", "Project"),
+    "LEADS_SURVEY_OF": ("Person", "Location"),
+    "RUNS": ("Organization", "Project"),           "PARTNERS_ON": ("Organization", "Project"),
+    "ACQUIRED": ("Organization", "Organization"),  "SUPPLIED": ("Organization", "Organization"),
+    "INVESTED_IN": ("Organization", "Organization"), "COMPETES_WITH": ("Organization", "Organization"),
+    "CONTRACTED": ("Organization", "Organization"), "LOCATED_IN": ("Organization", "Location"),
+    "MONITORS": ("Project", "Location"),           "DETECTED": ("Project", "Event"),
+    "REPLACES": ("Project", "Organization"),       "OCCURRED_AT": ("Event", "Location"),
+}</code></pre>
+
+<h3>What a schema buys you in GraphRAG</h3>
+<ul>
+  <li><strong>Validation of LLM extraction.</strong> An extractor that emits <em>(Deepcast, CEO_OF, Kestrel Labs)</em> has violated the domain of CEO_OF. You can reject it, flag it, or retype the relation. Exercise 5.4 builds this check.</li>
+  <li><strong>Grounded query generation.</strong> Text2Cypher (<a href="20-text2cypher.html">Chapter 20</a>) puts the schema in the prompt so the model uses real labels and relation types, and a validator rejects queries that use relations that do not exist.</li>
+  <li><strong>Consistent extraction targets.</strong> The entity types in the extraction prompt of <a href="08-entity-relation-extraction.html">Chapter 8</a> are the class list of a lightweight ontology.</li>
+</ul>
+
+<div class="callout warn">
+  <span class="callout-title">In RDFS, domain and range infer; they do not reject</span>
+  <p>A common surprise: if an RDFS ontology says CEO_OF has domain Person and your data says Deepcast CEO_OF Kestrel Labs, an RDFS reasoner does not report an error. It <em>infers</em> that Deepcast is a Person. OWL behaves the same way under its open-world assumption. If you want “this triple is invalid”, use a validation language such as SHACL, or a check in your own code like the one above.</p>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Allemang and Sequeda, Ontologies to the Rescue (2024)</span>
+  <p>Building on their benchmark of LLM question answering over an enterprise SQL database, where routing questions through a knowledge graph had raised accuracy from 16% to 54%, the authors add two ontology-driven steps: an ontology-based query check that tests a generated SPARQL query against the ontology, and an LLM repair step that feeds the check's error explanation back to the model. Accuracy rises to 72%, of which 8 points are “I don't know” answers rather than wrong ones, leaving an error rate of 20%. The lesson for this course: a schema is documentation and a cheap, deterministic checker around a probabilistic generator.</p>
+</div>
+
+<h2>Facts with more than two participants</h2>
+<p>Many real facts do not fit one edge. Read the Series B press release: <em>Kestrel Labs raised a $40 million Series B on 23 September 2025, led by Brightwater Capital, with existing investors and two new infrastructure funds participating.</em> That single event has a company, a lead investor, other participants, an amount, a date and a source document. A binary edge <em>(Brightwater Capital, INVESTED_IN, Kestrel Labs)</em> keeps two of those six. Facts like this are called <strong>n-ary</strong> facts, and there are three standard ways to store them.</p>
+
+<h3>Option 1: properties on the edge</h3>
+<p>In a property graph, put the extra values on the relationship: <code>(brightwater)-[:INVESTED_IN {round: "Series B", amount_usd: 40000000, date: date("2025-09-23")}]-&gt;(kestrel)</code>. It is compact and handles time ranges well, which is why CTO_OF and SUPPLIED in our graph carry <code>valid_from</code> and <code>valid_to</code>. Its limit: an edge property cannot point to another node. You cannot say “and these two funds also participated” or “this came from document 10” as graph edges.</p>
+
+<h3>Option 2: promote the event to a node</h3>
+<p>Create a <code>:FundingRound</code> node and connect every participant to it: <code>(kestrel)-[:RAISED]-&gt;(round)</code>, <code>(brightwater)-[:LED]-&gt;(round)</code>, <code>(fund)-[:PARTICIPATED_IN]-&gt;(round)</code>, <code>(round)-[:REPORTED_IN]-&gt;(document)</code>. This is sometimes called an <strong>event node</strong> or an <em>n-ary relation pattern</em>, and it works identically in RDF and property graphs. It costs one extra hop in every query, and your extractor has to recognize events as entities. The running example already does this once: the 2024 Halden Reef bleaching event is a node precisely so it can connect a reef, a detector and a date.</p>
+
+<h3>Option 3: reification and statements about statements</h3>
+<p>Classic RDF <strong>reification</strong> creates a resource of type <code>rdf:Statement</code> with <code>rdf:subject</code>, <code>rdf:predicate</code> and <code>rdf:object</code>, then attaches metadata to it. It is verbose (four triples before any metadata) and rarely used today. <strong>RDF-star</strong>, which is being standardized as part of RDF 1.2 and is supported by several triple stores, lets you quote a triple directly as a subject: <code>&lt;&lt; kl:jonas-vehl kl:ctoOf kl:kestrel-labs &gt;&gt; kl:validTo "2026-03-01"^^xsd:date .</code>. <strong>Named graphs</strong> are the other RDF tool: put a group of triples in a graph named after its source document, so provenance is attached to the group.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 270" role="img" aria-labelledby="nary-title">
+      <title id="nary-title">The Series B funding fact modeled as an edge with properties and as an event node connecting company, lead investor, other participants and source document</title>
+      <defs>
+        <marker id="ch5-arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <text class="d-text bold" x="16" y="24">Edge with properties</text>
+      <circle class="d-node" cx="60" cy="80" r="26"/>
+      <text class="d-text small" x="60" y="124" text-anchor="middle">Brightwater</text>
+      <circle class="d-node" cx="260" cy="80" r="26"/>
+      <text class="d-text small" x="260" y="124" text-anchor="middle">Kestrel Labs</text>
+      <line class="d-line hot" x1="88" y1="80" x2="230" y2="80" marker-end="url(#ch5-arr3)"/>
+      <text class="d-text small mono" x="112" y="70">INVESTED_IN</text>
+      <rect class="d-box edge" x="16" y="150" width="290" height="70" rx="6"/>
+      <text class="d-text small mono" x="28" y="172">round: "Series B"</text>
+      <text class="d-text small mono" x="28" y="190">amount_usd: 40000000</text>
+      <text class="d-text small mono" x="28" y="208">date: 2025-09-23</text>
+      <text class="d-text small" x="16" y="248">Cannot link the other funds or the document</text>
+
+      <line class="d-line faint" x1="330" y1="16" x2="330" y2="256"/>
+
+      <text class="d-text bold" x="350" y="24">Event node</text>
+      <rect class="d-box comm" x="450" y="104" width="130" height="56" rx="8"/>
+      <text class="d-text bold" x="515" y="126" text-anchor="middle">:FundingRound</text>
+      <text class="d-text small mono" x="515" y="146" text-anchor="middle">Series B, $40M</text>
+      <circle class="d-node" cx="390" cy="60" r="22"/>
+      <text class="d-text small" x="390" y="100" text-anchor="middle">Brightwater</text>
+      <circle class="d-node" cx="640" cy="60" r="22"/>
+      <text class="d-text small" x="640" y="100" text-anchor="middle">Kestrel</text>
+      <circle class="d-node warm" cx="390" cy="220" r="22"/>
+      <text class="d-text small" x="390" y="258" text-anchor="middle">New fund</text>
+      <rect class="d-box ghost" x="580" y="200" width="90" height="36" rx="4"/>
+      <text class="d-text small" x="625" y="223" text-anchor="middle">doc 10</text>
+      <line class="d-line" x1="408" y1="72" x2="456" y2="104" marker-end="url(#ch5-arr3)"/>
+      <text class="d-text small mono" x="424" y="78">LED</text>
+      <line class="d-line" x1="622" y1="72" x2="574" y2="104" marker-end="url(#ch5-arr3)"/>
+      <text class="d-text small mono" x="600" y="118">RAISED</text>
+      <line class="d-line" x1="408" y1="206" x2="456" y2="162" marker-end="url(#ch5-arr3)"/>
+      <text class="d-text small mono" x="424" y="226">PARTICIPATED_IN</text>
+      <line class="d-line dash" x1="560" y1="160" x2="600" y2="198" marker-end="url(#ch5-arr3)"/>
+      <text class="d-text small mono" x="590" y="178">REPORTED_IN</text>
+    </svg>
+  </div>
+  <figcaption>Edge properties are enough for values like amounts and dates. When a fact involves more entities, or needs provenance you can traverse, promote it to a node.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Approach</th><th>Good for</th><th>Costs</th></tr></thead>
+  <tbody>
+    <tr><td>Edge properties</td><td>Time ranges, weights, amounts, confidence scores</td><td>Property graphs only; values cannot reference entities</td></tr>
+    <tr><td>Event node</td><td>Acquisitions, funding rounds, leadership changes, incidents with many participants</td><td>One more hop per query; extractor must emit events</td></tr>
+    <tr><td>RDF-star or reification</td><td>Provenance and validity on individual RDF triples</td><td>Tooling support varies; verbose in classic reification</td></tr>
+    <tr><td>Hyperedge</td><td>Native n-ary facts in hypergraph RAG</td><td>Different data structures and algorithms (<a href="31-multimodal-hypergraph.html">Chapter 31</a>)</td></tr>
+  </tbody>
+</table>
+<p>Time is the n-ary fact you will meet most. “Jonas Vehl was CTO from 2021 until March 2026” is a triple plus a validity interval. <a href="10-claims-temporal.html">Chapter 10</a> extracts such intervals from text and <a href="27-incremental-temporal.html">Chapter 27</a> adds a second time axis for when the system learned the fact.</p>
+
+<h2>Identity: names are not ids</h2>
+<p>The corpus calls the same person “Dr. Mira Okafor”, “Mira Okafor”, “Okafor” and “the CEO”. It calls one institute “Tidewater Institute”, “Tidewater” and “TWI”. If node identity is the display name, one person becomes four nodes and every query that starts from one of them misses the facts attached to the others.</p>
+<p>A knowledge graph separates three things:</p>
+<ul>
+  <li><strong>Canonical id</strong>: stable, opaque or slug-like, never changes. <code>mira-okafor</code>, or an IRI, or a Wikidata QID for public entities.</li>
+  <li><strong>Preferred label</strong>: what you display, <code>Dr. Mira Okafor</code>. In RDF, <code>rdfs:label</code> or <code>skos:prefLabel</code>.</li>
+  <li><strong>Aliases</strong>: other surface forms, <code>["Mira Okafor", "Okafor"]</code>, used for matching mentions to ids. In RDF, <code>skos:altLabel</code>. Context-dependent references like “the CEO” should be resolved at extraction time, not stored as aliases, because they change meaning over time.</li>
+</ul>
+<p>When two datasets use different ids for the same thing, RDF links them with <code>owl:sameAs</code>; in a property graph you either merge the nodes or add a SAME_AS relationship. Choosing ids for extracted entities is the heart of entity resolution, the subject of <a href="09-entity-resolution.html">Chapter 9</a>. For now, the practical rule: <strong>MERGE on ids, never on names</strong>, and put a uniqueness constraint on the id.</p>
+
+<div class="callout note">
+  <span class="callout-title">What GraphRAG does instead</span>
+  <p>Microsoft GraphRAG merges extracted entities by name (its default prompt asks for names in capitals), so “KESTREL LABS” from two text units becomes one node, and it assigns ids in its output tables afterwards. It deliberately does no further alias resolution by default. That is why “Sentinel” and “Project Sentinel” can end up as separate nodes, and why Chapter 9 adds a resolution step to <code>minigraphrag</code>.</p>
+</div>
+
+<h2>Querying with Cypher</h2>
+<p>Cypher describes the <em>shape</em> of what you want in ASCII art, and the database finds every subgraph that matches. Nodes are in parentheses, relationships in square brackets with arrows:</p>
+<pre><code class="language-cypher">(p:Person {name: "Priya Nair"})-[r:CTO_OF]-&gt;(o:Organization)</code></pre>
+<p>Here <code>p</code>, <code>r</code> and <code>o</code> are variables, <code>:Person</code> is a label, <code>:CTO_OF</code> a relationship type, and <code>{name: ...}</code> an inline property filter. A query is a pipeline of clauses: <code>MATCH</code> finds patterns, <code>WHERE</code> filters, <code>RETURN</code> projects, and <code>WITH</code> passes results to the next stage. All examples below assume the graph loaded later in this chapter, where every node also has the label <code>:Entity</code> and an <code>id</code>.</p>
+
+<h3>Pattern matching</h3>
+<p>Canonical question 2: “Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?” It is one pattern with five nodes:</p>
+<pre data-file="queries/q2_board_member.cypher"><code class="language-cypher">MATCH (e:Event {name: "2024 Halden Reef bleaching event"})&lt;-[:DETECTED]-(p:Project)
+      &lt;-[:RUNS]-(c:Organization)
+MATCH (m:Person)-[:BOARD_MEMBER_OF]-&gt;(c),
+      (m)-[:PARTNER_AT]-&gt;(inv:Organization)-[:INVESTED_IN]-&gt;(c)
+RETURN DISTINCT inv.name AS investor, m.name AS board_member, p.name AS project, c.name AS company</code></pre>
+<p>Result: one row, <code>Brightwater Capital | Lena Park | Project Sentinel | Kestrel Labs</code>. <code>DISTINCT</code> matters: Brightwater has two INVESTED_IN edges (Series A and B), so without it the same row appears twice.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "How a Cypher pattern binds",
+  "subtitle": "Canonical question 2, clause by clause",
+  "height": 400,
+  "directed": true,
+  "nodes": [
+    {"id": "bleaching", "label": "Bleaching 2024", "group": 5, "x": 12, "y": 45},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 36, "y": 45},
+    {"id": "tidewater", "label": "Tidewater", "group": 1, "x": 10, "y": 78},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 64, "y": 45},
+    {"id": "lena", "label": "Lena Park", "group": 2, "x": 72, "y": 12},
+    {"id": "brightwater", "label": "Brightwater", "group": 1, "x": 90, "y": 24},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 90, "y": 62},
+    {"id": "mira", "label": "Mira Okafor", "group": 2, "x": 52, "y": 86},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 24, "y": 12}
+  ],
+  "edges": [
+    {"source": "sentinel", "target": "bleaching", "label": "DETECTED"},
+    {"source": "kestrel", "target": "sentinel", "label": "RUNS"},
+    {"source": "tidewater", "target": "sentinel", "label": "PARTNERS_ON"},
+    {"source": "lena", "target": "kestrel", "label": "BOARD_MEMBER_OF"},
+    {"source": "lena", "target": "brightwater", "label": "PARTNER_AT"},
+    {"source": "brightwater", "target": "kestrel", "label": "INVESTED_IN"},
+    {"source": "deepcast", "target": "kestrel", "label": "SUPPLIED"},
+    {"source": "mira", "target": "kestrel", "label": "CEO_OF"},
+    {"source": "sentinel", "target": "halden", "label": "MONITORS"},
+    {"source": "bleaching", "target": "halden", "label": "OCCURRED_AT"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project", "4": "Location", "5": "Event"},
+  "steps": [
+    {"caption": "Before matching: a fragment of the Kestrel knowledge graph with typed, directed relationships.", "dim": false, "showAllLabels": true},
+    {"caption": "<code>(e:Event {name: ...})</code> binds <strong>e</strong> to the bleaching event. Index lookups on name or id make this the cheap starting point.", "active": ["bleaching"]},
+    {"caption": "<code>&lt;-[:DETECTED]-(p:Project)</code> follows DETECTED edges <em>into</em> e. Only Project Sentinel qualifies, so <strong>p</strong> = Project Sentinel.", "active": ["sentinel"], "visited": ["bleaching"], "edges": ["sentinel>bleaching"]},
+    {"caption": "<code>&lt;-[:RUNS]-(c:Organization)</code>. Tidewater is also connected to Sentinel, but through PARTNERS_ON, so the relationship type rules it out. <strong>c</strong> = Kestrel Labs.", "active": ["kestrel"], "visited": ["bleaching", "sentinel", "tidewater"], "edges": ["kestrel>sentinel"], "visitedEdges": ["sentinel>bleaching", "tidewater>sentinel"]},
+    {"caption": "<code>(m:Person)-[:BOARD_MEMBER_OF]-&gt;(c)</code>. Mira Okafor is a Person linked to Kestrel, but by CEO_OF, so she does not bind. <strong>m</strong> = Lena Park.", "active": ["lena"], "visited": ["bleaching", "sentinel", "kestrel", "mira"], "edges": ["lena>kestrel"], "visitedEdges": ["sentinel>bleaching", "kestrel>sentinel", "mira>kestrel"]},
+    {"caption": "<code>(m)-[:PARTNER_AT]-&gt;(inv)-[:INVESTED_IN]-&gt;(c)</code> must close the loop back to the <em>same</em> c. Brightwater does; Deepcast connects to Kestrel but not to Lena. Answer: <strong>Brightwater Capital, via Lena Park</strong>.", "active": ["brightwater"], "visited": ["bleaching", "sentinel", "kestrel", "lena"], "edges": ["lena>brightwater", "brightwater>kestrel"], "visitedEdges": ["sentinel>bleaching", "kestrel>sentinel", "lena>kestrel"]}
+  ]
+}
+</script>
+</div>
+
+<p>Canonical question 1 is also a single pattern. Notice how <code>d</code> appears twice, which forces both mentions to be the same node, and how the relationship variables let you return edge properties as evidence:</p>
+<pre data-file="queries/q1_why_tern.cypher"><code class="language-cypher">MATCH (m:Organization {name: "Marlow Dynamics"})-[acq:ACQUIRED]-&gt;(d:Organization)
+      -[sup:SUPPLIED]-&gt;(k:Organization {name: "Kestrel Labs"})-[run:RUNS]-&gt;(t:Project),
+      (t)-[:REPLACES]-&gt;(d)
+RETURN d.name AS supplier, acq.date AS acquired_on, sup.valid_to AS supply_ended,
+       t.name AS project, run.valid_from AS project_started</code></pre>
+<p>Result: <code>Deepcast | 2025-04-17 | 2025-06-30 | Project Tern | 2025-06-30</code>. The acquisition in April precedes the end of supply on 30 June, and Tern starts the day the supply ends. That is the causal story, recovered from structure, with dates as evidence.</p>
+
+<h3>Filtering with WHERE, including time</h3>
+<p><code>WHERE</code> takes boolean expressions over variables. Canonical question 6, “Who is the CTO of Kestrel Labs?”, needs a filter on the validity interval:</p>
+<pre data-file="queries/q6_q7_temporal.cypher"><code class="language-cypher">// Current CTO: the CTO_OF edge that has not ended
+MATCH (p:Person)-[r:CTO_OF]-&gt;(:Organization {name: "Kestrel Labs"})
+WHERE r.valid_to IS NULL
+RETURN p.name AS cto, r.valid_from AS since;
+// -&gt; Priya Nair, 2026-03-01
+
+// CTO as of a given date: intervals are [valid_from, valid_to)
+WITH date("2024-06-01") AS asOf
+MATCH (p:Person)-[r:CTO_OF]-&gt;(:Organization {name: "Kestrel Labs"})
+WHERE r.valid_from &lt;= asOf AND (r.valid_to IS NULL OR r.valid_to &gt; asOf)
+RETURN p.name AS cto;
+// -&gt; Jonas Vehl
+
+// Canonical question 7: who supplied Kestrel during 2024? (interval overlap)
+MATCH (s:Organization)-[r:SUPPLIED]-&gt;(:Organization {name: "Kestrel Labs"})
+WHERE r.valid_from &lt; date("2025-01-01")
+  AND (r.valid_to IS NULL OR r.valid_to &gt;= date("2024-01-01"))
+RETURN s.name AS supplier, r.valid_from, r.valid_to;
+// -&gt; Deepcast, 2022-08-09, 2025-06-30</code></pre>
+<p>Without the interval, “Who is the CTO?” has two answers and an LLM would have to guess which is current. With it, the query is exact. This is the strongest argument for typed, time-aware edges in domains where facts change.</p>
+
+<h3>Variable-length paths</h3>
+<p>When you do not know how many hops separate two entities, use a variable-length relationship: <code>-[*1..3]-</code> means one to three relationships of any type, in either direction. Canonical question 3, “What connects Priya Nair to Deepcast?”:</p>
+<pre data-file="queries/q3_paths.cypher"><code class="language-cypher">MATCH path = (a:Person {name: "Priya Nair"})-[*1..2]-(b:Organization {name: "Deepcast"})
+RETURN [n IN nodes(path) | n.name] AS entities,
+       [r IN relationships(path) | type(r)] AS relations;
+
+// entities                                   relations
+// [Priya Nair, Kestrel Labs, Deepcast]       [CTO_OF, SUPPLIED]
+// [Priya Nair, Marlow Dynamics, Deepcast]    [FORMERLY_WORKED_AT, ACQUIRED]
+// [Priya Nair, Project Tern, Deepcast]       [CO_LEADS, REPLACES]
+
+// Every shortest path (allShortestPaths returns all ties, never one arbitrary pick):
+MATCH path = allShortestPaths((a:Person {name: "Priya Nair"})-[*..4]-(b:Organization {name: "Deepcast"}))
+RETURN [n IN nodes(path) | n.name] AS entities;</code></pre>
+<p>You can restrict types and direction too: <code>-[:ACQUIRED|SUPPLIED*1..3]-&gt;</code>. Always set an upper bound. As <a href="04-graph-fundamentals.html">Chapter 4</a> showed, the number of paths grows explosively through hubs, and an unbounded <code>-[*]-</code> on a large graph can run for a very long time. In a match, Cypher will not reuse the same relationship twice in one path, which prevents infinite loops but not exponential blow-up.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Variable-length paths from Marlow Dynamics",
+  "subtitle": "Untyped [*1..2] vs a typed, directed chain",
+  "height": 380,
+  "directed": true,
+  "nodes": [
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 1, "x": 12, "y": 50},
+    {"id": "deepcast", "label": "Deepcast", "group": 1, "x": 40, "y": 82},
+    {"id": "priya", "label": "Priya Nair", "group": 2, "x": 40, "y": 16},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 68, "y": 50},
+    {"id": "tern", "label": "Project Tern", "group": 3, "x": 90, "y": 16},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 3, "x": 90, "y": 82}
+  ],
+  "edges": [
+    {"source": "marlow", "target": "deepcast", "label": "ACQUIRED"},
+    {"source": "priya", "target": "marlow", "label": "FORMERLY_WORKED_AT"},
+    {"source": "marlow", "target": "kestrel", "label": "COMPETES_WITH"},
+    {"source": "deepcast", "target": "kestrel", "label": "SUPPLIED"},
+    {"source": "tern", "target": "deepcast", "label": "REPLACES"},
+    {"source": "kestrel", "target": "tern", "label": "RUNS"},
+    {"source": "priya", "target": "tern", "label": "CO_LEADS"},
+    {"source": "kestrel", "target": "sentinel", "label": "RUNS"},
+    {"source": "priya", "target": "kestrel", "label": "CTO_OF"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "3": "Project"},
+  "steps": [
+    {"caption": "<code>(m {name: \"Marlow Dynamics\"})-[*1]-(x)</code>: one hop in any direction reaches Deepcast, Priya Nair and Kestrel Labs.", "active": ["deepcast", "priya", "kestrel"], "visited": ["marlow"], "edges": ["marlow>deepcast", "priya>marlow", "marlow>kestrel"]},
+    {"caption": "<code>-[*1..2]-</code>: two hops in any direction reach every node here, by many routes, including through the COMPETES_WITH edge and through Priya's employment history. Untyped expansion answers “what is nearby?”, not “why?”.", "active": ["tern", "sentinel"], "visited": ["marlow", "deepcast", "priya", "kestrel"], "edges": ["deepcast>tern", "kestrel>tern", "priya>tern", "kestrel>sentinel", "deepcast>kestrel", "priya>kestrel"], "visitedEdges": ["marlow>deepcast", "priya>marlow", "marlow>kestrel"]},
+    {"caption": "Typed and directed: <code>(m)-[:ACQUIRED]-&gt;(d)-[:SUPPLIED]-&gt;(k)-[:RUNS]-&gt;(t)-[:REPLACES]-&gt;(d)</code>. Exactly one match, and it is the causal chain behind canonical question 1.", "active": ["tern"], "visited": ["marlow", "deepcast", "kestrel"], "edges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>tern", "tern>deepcast"]}
+  ]
+}
+</script>
+</div>
+
+<h3>OPTIONAL MATCH</h3>
+<p><code>MATCH</code> drops a row if any part of the pattern is missing. <code>OPTIONAL MATCH</code> keeps the row and fills the missing variables with <code>null</code>, like a SQL left join:</p>
+<pre data-file="queries/optional.cypher"><code class="language-cypher">MATCH (p:Person)
+OPTIONAL MATCH (p)-[:LEADS|CO_LEADS]-&gt;(proj:Project)
+RETURN p.name AS person, collect(proj.name) AS projects
+ORDER BY person;
+
+// Dr. Ana Ruiz     []
+// Dr. Mira Okafor  []
+// Jonas Vehl       [Project Tern]
+// Lena Park        []
+// Priya Nair       [Project Sentinel, Project Tern]   (list order may vary)</code></pre>
+<p>With a plain <code>MATCH</code>, three of the five people would disappear from the result. <code>collect()</code> skips nulls, which is why they show empty lists.</p>
+
+<h3>Aggregation</h3>
+<p>Cypher has no <code>GROUP BY</code>: any non-aggregated expression in <code>RETURN</code> or <code>WITH</code> is automatically a grouping key.</p>
+<pre data-file="queries/aggregation.cypher"><code class="language-cypher">// Total raised from each investor
+MATCH (inv:Organization)-[r:INVESTED_IN]-&gt;(:Organization {name: "Kestrel Labs"})
+RETURN inv.name AS investor, count(r) AS rounds, sum(r.amount_usd) AS total_usd;
+// -&gt; Brightwater Capital, 2, 52000000
+
+// Degree of each entity, top 3 (the "rank" from Chapter 4, now on a directed multigraph)
+MATCH (e:Entity)-[r]-()
+RETURN e.name AS entity, count(r) AS degree
+ORDER BY degree DESC LIMIT 3;
+// -&gt; Kestrel Labs 14, Project Sentinel 5, then a three-way tie at 4
+//    (Priya Nair, Project Tern, Tidewater Institute): add a tie-breaker such as e.name
+
+// Relationship types and how often each occurs (a quick schema profile)
+MATCH ()-[r]-&gt;()
+RETURN type(r) AS relation, count(*) AS n
+ORDER BY n DESC;</code></pre>
+
+<h2>The same questions in SPARQL</h2>
+<p>SPARQL matches <strong>triple patterns</strong>: triples where any position can be a variable (<code>?x</code>). A semicolon repeats the subject; a period ends a triple. Here are the queries side by side, over the Turtle data from earlier (predicates are camel-cased versions of our relation names, and names are <code>rdfs:label</code>s).</p>
+
+<table>
+  <thead><tr><th>Idea</th><th>Cypher</th><th>SPARQL</th></tr></thead>
+  <tbody>
+    <tr><td>Match an edge</td><td><code>(a)-[:SUPPLIED]-&gt;(b)</code></td><td><code>?a kl:supplied ?b .</code></td></tr>
+    <tr><td>Type</td><td><code>(a:Organization)</code></td><td><code>?a a kl:Organization .</code></td></tr>
+    <tr><td>Property</td><td><code>a.name</code></td><td><code>?a rdfs:label ?name .</code></td></tr>
+    <tr><td>Filter</td><td><code>WHERE r.amount_usd &gt; 1e7</code></td><td><code>FILTER(?amount &gt; 10000000)</code></td></tr>
+    <tr><td>Alternatives</td><td><code>[:LEADS|CO_LEADS]</code></td><td><code>kl:leads|kl:coLeads</code></td></tr>
+    <tr><td>Variable length</td><td><code>[:SUPPLIED*1..3]</code> (bounded)</td><td><code>kl:supplied+</code> (property path; no numeric bounds in SPARQL 1.1)</td></tr>
+    <tr><td>Optional</td><td><code>OPTIONAL MATCH</code></td><td><code>OPTIONAL { ... }</code></td></tr>
+    <tr><td>Aggregation</td><td>implicit grouping</td><td><code>GROUP BY</code> with <code>COUNT</code>, <code>SUM</code></td></tr>
+  </tbody>
+</table>
+
+<pre data-file="queries/kestrel.rq"><code># Canonical question 2
+PREFIX kl:   &lt;https://example.org/kestrel/&gt;
+PREFIX rdfs: &lt;http://www.w3.org/2000/01/rdf-schema#&gt;
+
+SELECT ?investorName ?memberName WHERE {
+  ?event rdfs:label "2024 Halden Reef bleaching event" .
+  ?project kl:detected ?event .
+  ?company kl:runs ?project .
+  ?member kl:boardMemberOf ?company ;
+          kl:partnerAt ?investor ;
+          rdfs:label ?memberName .
+  ?investor kl:investedIn ?company ;
+            rdfs:label ?investorName .
+}
+# -&gt; "Brightwater Capital", "Lena Park"
+
+# Canonical question 1: the causal chain
+SELECT ?supplier ?project WHERE {
+  kl:marlow-dynamics kl:acquired ?supplier .
+  ?supplier kl:supplied kl:kestrel-labs .
+  kl:kestrel-labs kl:runs ?project .
+  ?project kl:replaces ?supplier .
+}
+# -&gt; kl:deepcast, kl:project-tern
+
+# OPTIONAL: people and the projects they lead or co-lead
+SELECT ?name ?projectName WHERE {
+  ?p a kl:Person ; rdfs:label ?name .
+  OPTIONAL { ?p kl:leads|kl:coLeads ?proj . ?proj rdfs:label ?projectName }
+}
+ORDER BY ?name
+
+# Reified funding round (event node) with typed literals
+PREFIX xsd: &lt;http://www.w3.org/2001/XMLSchema#&gt;
+SELECT ?amount ?leadName WHERE {
+  ?round a kl:FundingRound ;
+         kl:raisedBy kl:kestrel-labs ;
+         kl:amountUsd ?amount ;
+         kl:announced ?date ;
+         kl:ledBy ?lead .
+  ?lead rdfs:label ?leadName .
+  FILTER(?date &gt;= "2025-01-01"^^xsd:date)
+}</code></pre>
+<p>(In a real <code>.rq</code> file each query is separate; the PREFIX lines must be repeated at the top of each.)</p>
+<p>One difference matters in practice. In the RDF version, Brightwater's Series A and Series B investments are the <em>same</em> triple <code>kl:brightwater-capital kl:investedIn kl:kestrel-labs</code>, so the set semantics of RDF silently collapse them into one. That is why the SPARQL example uses a <code>kl:FundingRound</code> node: in RDF, repeated or dated facts require the event-node pattern, RDF-star, or named graphs.</p>
+
+<h3>SPARQL against a real, given knowledge graph</h3>
+<p>Wikidata exposes a public SPARQL endpoint at <code>query.wikidata.org</code>. Entities have ids like <code>Q2283</code> (Microsoft) and properties like <code>P169</code> (chief executive officer):</p>
+<pre><code># Who is the chief executive officer of Microsoft, according to Wikidata?
+SELECT ?ceo ?ceoLabel WHERE {
+  wd:Q2283 wdt:P169 ?ceo .
+  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+}</code></pre>
+<p>The <code>wdt:</code> prefix gives only the “truthy” current statement. Wikidata stores qualifiers such as start and end times on full statement nodes (the <code>p:</code> and <code>ps:</code>/<code>pq:</code> prefixes), which is Wikidata's version of the event-node pattern for time-bounded facts.</p>
+
+<h2>Loading Kestrel Labs into Neo4j and NetworkX</h2>
+
+<h3>Start Neo4j</h3>
+<pre data-file="terminal"><code class="language-bash">docker run --rm --name kestrel-neo4j \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/kestrel-demo \
+  neo4j:5
+
+# Browser UI:  http://localhost:7474   (user neo4j, password kestrel-demo)
+# Bolt:        bolt://localhost:7687
+pip install neo4j</code></pre>
+<p>Port 7474 serves the browser UI, 7687 the Bolt protocol that drivers use. <code>--rm</code> discards the data when the container stops, which is what you want while experimenting; mount a volume at <code>/data</code> to keep it. Neo4j 5 requires a password of at least 8 characters.</p>
+
+<h3>Constraints first, then idempotent MERGE</h3>
+<p><code>CREATE</code> always creates. <code>MERGE</code> matches the whole pattern and creates it only if it does not exist, so you can rerun a load script without duplicating the graph. Two rules make MERGE safe:</p>
+<ol>
+  <li><strong>MERGE nodes on their key only</strong>, then <code>SET</code> the other properties. <code>MERGE (n:Entity {id: "deepcast", name: "Deepcast Inc"})</code> would create a second node when the name changes.</li>
+  <li><strong>MERGE relationships between already-bound nodes.</strong> <code>MERGE (a:Entity {id: "x"})-[:R]-&gt;(b:Entity {id: "y"})</code> as one pattern creates <em>both</em> nodes again if the full pattern is missing. MATCH or MERGE the nodes first, then MERGE the relationship.</li>
+</ol>
+
+<pre data-file="load/kestrel.cypher"><code class="language-cypher">CREATE CONSTRAINT entity_id IF NOT EXISTS
+FOR (e:Entity) REQUIRE e.id IS UNIQUE;
+
+// Nodes: MERGE on id, then SET a type label and properties
+MERGE (n:Entity {id: "kestrel-labs"})       SET n:Organization, n.name = "Kestrel Labs", n.founded_year = 2021;
+MERGE (n:Entity {id: "mira-okafor"})        SET n:Person, n.name = "Dr. Mira Okafor", n.aliases = ["Mira Okafor", "Okafor"];
+MERGE (n:Entity {id: "jonas-vehl"})         SET n:Person, n.name = "Jonas Vehl", n.aliases = ["Vehl"];
+MERGE (n:Entity {id: "priya-nair"})         SET n:Person, n.name = "Priya Nair";
+MERGE (n:Entity {id: "tidewater-institute"}) SET n:Organization, n.name = "Tidewater Institute", n.aliases = ["Tidewater", "TWI"];
+MERGE (n:Entity {id: "ana-ruiz"})           SET n:Person, n.name = "Dr. Ana Ruiz";
+MERGE (n:Entity {id: "project-sentinel"})   SET n:Project, n.name = "Project Sentinel", n.aliases = ["Sentinel", "Sentinel drones"];
+MERGE (n:Entity {id: "project-tern"})       SET n:Project, n.name = "Project Tern", n.aliases = ["Tern"];
+MERGE (n:Entity {id: "halden-reef"})        SET n:Location, n.name = "Halden Reef";
+MERGE (n:Entity {id: "port-avalon"})        SET n:Location, n.name = "Port Avalon";
+MERGE (n:Entity {id: "halden-bleaching-2024"}) SET n:Event, n.name = "2024 Halden Reef bleaching event";
+MERGE (n:Entity {id: "brightwater-capital"}) SET n:Organization, n.name = "Brightwater Capital";
+MERGE (n:Entity {id: "lena-park"})          SET n:Person, n.name = "Lena Park";
+MERGE (n:Entity {id: "marlow-dynamics"})    SET n:Organization, n.name = "Marlow Dynamics";
+MERGE (n:Entity {id: "deepcast"})           SET n:Organization, n.name = "Deepcast";
+MERGE (n:Entity {id: "ocean-health-act"})   SET n:Law, n.name = "Ocean Health Act", n.requires = "quarterly reef monitoring";
+MERGE (n:Entity {id: "port-avalon-city-council"}) SET n:Organization, n.name = "Port Avalon City Council";
+
+// Relationships: bind both endpoints, then MERGE the edge
+MATCH (a:Entity {id: "marlow-dynamics"}), (b:Entity {id: "deepcast"})
+MERGE (a)-[r:ACQUIRED]-&gt;(b) SET r.date = date("2025-04-17");
+
+MATCH (a:Entity {id: "deepcast"}), (b:Entity {id: "kestrel-labs"})
+MERGE (a)-[r:SUPPLIED]-&gt;(b) SET r.valid_from = date("2022-08-09"), r.valid_to = date("2025-06-30");
+
+MATCH (a:Entity {id: "jonas-vehl"}), (b:Entity {id: "kestrel-labs"})
+MERGE (a)-[r:CTO_OF]-&gt;(b) SET r.valid_from = date("2021-01-01"), r.valid_to = date("2026-03-01");
+
+MATCH (a:Entity {id: "priya-nair"}), (b:Entity {id: "kestrel-labs"})
+MERGE (a)-[r:CTO_OF]-&gt;(b) SET r.valid_from = date("2026-03-01");
+
+// Two INVESTED_IN edges between the same nodes: include the distinguishing key in the MERGE
+MATCH (a:Entity {id: "brightwater-capital"}), (b:Entity {id: "kestrel-labs"})
+MERGE (a)-[r1:INVESTED_IN {round: "Series A"}]-&gt;(b) SET r1.amount_usd = 12000000, r1.date = date("2022-03-15")
+MERGE (a)-[r2:INVESTED_IN {round: "Series B"}]-&gt;(b) SET r2.amount_usd = 40000000, r2.date = date("2025-09-23");
+
+// ... the remaining relationships follow the same shape (see load_kestrel.py below)</code></pre>
+
+<div class="callout tip">
+  <span class="callout-title">Date precision</span>
+  <p>The corpus gives some dates to the day (the Series B press release) and some only to the month or year (“CTO from 2021”). We store the first day of the known period and would, in production, add a <code>valid_from_precision</code> property such as <code>"year"</code>. Otherwise a query “as of 2021-06-01” silently treats a year-level fact as day-exact.</p>
+</div>
+
+<p>Writing hundreds of statements by hand does not scale. The Python loader below batches rows with <code>UNWIND</code>. Relationship types cannot be query parameters in classic Cypher (recent Neo4j releases add a dynamic-type syntax, but it is not portable), so the type is formatted into the query string, and it is checked against the schema first to prevent injection:</p>
+
+<pre data-file="load/load_kestrel.py"><code class="language-python">from datetime import date
+from neo4j import GraphDatabase
+
+from kestrel_schema import RELATIONS                     # relation -&gt; (domain, range)
+
+ENTITIES = [  # (id, name, type)
+    ("kestrel-labs", "Kestrel Labs", "Organization"), ("mira-okafor", "Dr. Mira Okafor", "Person"),
+    ("jonas-vehl", "Jonas Vehl", "Person"), ("priya-nair", "Priya Nair", "Person"),
+    ("tidewater-institute", "Tidewater Institute", "Organization"), ("ana-ruiz", "Dr. Ana Ruiz", "Person"),
+    ("project-sentinel", "Project Sentinel", "Project"), ("project-tern", "Project Tern", "Project"),
+    ("halden-reef", "Halden Reef", "Location"), ("port-avalon", "Port Avalon", "Location"),
+    ("halden-bleaching-2024", "2024 Halden Reef bleaching event", "Event"),
+    ("brightwater-capital", "Brightwater Capital", "Organization"), ("lena-park", "Lena Park", "Person"),
+    ("marlow-dynamics", "Marlow Dynamics", "Organization"), ("deepcast", "Deepcast", "Organization"),
+    ("ocean-health-act", "Ocean Health Act", "Law"),
+    ("port-avalon-city-council", "Port Avalon City Council", "Organization"),
+]
+
+RELATIONSHIPS = [  # (source, type, target, properties)
+    ("mira-okafor", "CO_FOUNDED", "kestrel-labs", {"year": 2021}),
+    ("jonas-vehl", "CO_FOUNDED", "kestrel-labs", {"year": 2021}),
+    ("mira-okafor", "CEO_OF", "kestrel-labs", {"valid_from": "2021-01-01"}),
+    ("jonas-vehl", "CTO_OF", "kestrel-labs", {"valid_from": "2021-01-01", "valid_to": "2026-03-01"}),
+    ("priya-nair", "CTO_OF", "kestrel-labs", {"valid_from": "2026-03-01"}),
+    ("mira-okafor", "FORMERLY_WORKED_AT", "tidewater-institute", {"valid_from": "2015-01-01", "valid_to": "2021-01-01"}),
+    ("priya-nair", "FORMERLY_WORKED_AT", "marlow-dynamics", {"valid_to": "2023-01-01"}),
+    ("ana-ruiz", "DIRECTS", "tidewater-institute", {}),
+    ("kestrel-labs", "RUNS", "project-sentinel", {"valid_from": "2023-02-21"}),
+    ("tidewater-institute", "PARTNERS_ON", "project-sentinel", {}),
+    ("priya-nair", "LEADS", "project-sentinel", {}),
+    ("project-sentinel", "MONITORS", "halden-reef", {}),
+    ("project-sentinel", "DETECTED", "halden-bleaching-2024", {"date": "2024-08-01"}),
+    ("halden-bleaching-2024", "OCCURRED_AT", "halden-reef", {}),
+    ("ana-ruiz", "LEADS_SURVEY_OF", "halden-reef", {}),
+    ("brightwater-capital", "INVESTED_IN", "kestrel-labs", {"round": "Series A", "amount_usd": 12_000_000, "date": "2022-03-15"}),
+    ("brightwater-capital", "INVESTED_IN", "kestrel-labs", {"round": "Series B", "amount_usd": 40_000_000, "date": "2025-09-23"}),
+    ("lena-park", "PARTNER_AT", "brightwater-capital", {}),
+    ("lena-park", "BOARD_MEMBER_OF", "kestrel-labs", {}),
+    ("deepcast", "SUPPLIED", "kestrel-labs", {"valid_from": "2022-08-09", "valid_to": "2025-06-30"}),
+    ("marlow-dynamics", "ACQUIRED", "deepcast", {"date": "2025-04-17"}),
+    ("marlow-dynamics", "COMPETES_WITH", "kestrel-labs", {}),
+    ("kestrel-labs", "RUNS", "project-tern", {"valid_from": "2025-06-30"}),
+    ("jonas-vehl", "CO_LEADS", "project-tern", {}),
+    ("priya-nair", "CO_LEADS", "project-tern", {}),
+    ("project-tern", "REPLACES", "deepcast", {"what": "Deepcast sonar in Project Sentinel"}),
+    ("port-avalon-city-council", "CONTRACTED", "kestrel-labs", {"date": "2025-11-18"}),
+    ("kestrel-labs", "LOCATED_IN", "port-avalon", {}),
+    ("tidewater-institute", "LOCATED_IN", "port-avalon", {}),
+    ("port-avalon-city-council", "LOCATED_IN", "port-avalon", {}),
+]
+
+DATE_KEYS = {"date", "valid_from", "valid_to"}
+LABELS = {"Organization", "Person", "Project", "Location", "Event", "Law"}
+
+def to_neo4j(props: dict) -&gt; dict:
+    # Python date objects become Cypher Date values, so date comparisons work in queries.
+    return {k: date.fromisoformat(v) if k in DATE_KEYS else v for k, v in props.items()}
+
+def load(driver) -&gt; None:
+    driver.execute_query("CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE")
+    for label in LABELS:
+        rows = [{"id": i, "name": n} for i, n, t in ENTITIES if t == label]
+        driver.execute_query(
+            f"UNWIND $rows AS row MERGE (n:Entity {{id: row.id}}) SET n:{label}, n.name = row.name",
+            rows=rows,
+        )
+    for rel_type in {r[1] for r in RELATIONSHIPS}:
+        if rel_type not in RELATIONS:                    # never format unchecked strings into Cypher
+            raise ValueError(f"relation {rel_type!r} is not in the schema")
+        rows = [{"source": s, "target": t, "key": p.get("round", ""), "props": to_neo4j(p)}
+                for s, r, t, p in RELATIONSHIPS if r == rel_type]
+        driver.execute_query(
+            f"""UNWIND $rows AS row
+                MATCH (a:Entity {{id: row.source}}), (b:Entity {{id: row.target}})
+                MERGE (a)-[r:{rel_type} {{key: row.key}}]-&gt;(b)
+                SET r += row.props""",
+            rows=rows,
+        )
+
+if __name__ == "__main__":
+    with GraphDatabase.driver("bolt://localhost:7687", auth=("neo4j", "kestrel-demo")) as driver:
+        load(driver)
+        records, _, _ = driver.execute_query(
+            "MATCH (p:Person)-[r:CTO_OF]-&gt;(:Organization {name: $org}) WHERE r.valid_to IS NULL RETURN p.name AS cto",
+            org="Kestrel Labs",
+        )
+        print([rec["cto"] for rec in records])           # ['Priya Nair']</code></pre>
+<p>The <code>key</code> property on relationships is what lets MERGE keep Series A and Series B apart while still being idempotent: rerunning the script matches the existing edges instead of adding copies.</p>
+
+<h3>The same graph in NetworkX</h3>
+<p>You do not need a database to use a knowledge graph. A <code>MultiDiGraph</code> keeps direction and allows parallel typed edges; a “query” is a few lines of Python. <code>minigraphrag</code>'s <code>build_graph</code> produces an undirected <code>nx.Graph</code> for GraphRAG-style retrieval, and you can keep a typed MultiDiGraph alongside it when you need exact answers.</p>
+<pre data-file="load/kestrel_nx.py"><code class="language-python">from datetime import date
+import networkx as nx
+
+from load_kestrel import ENTITIES, RELATIONSHIPS, DATE_KEYS
+
+def build_kg() -&gt; nx.MultiDiGraph:
+    kg = nx.MultiDiGraph()
+    for eid, name, etype in ENTITIES:
+        kg.add_node(eid, name=name, type=etype)
+    for s, rel, t, props in RELATIONSHIPS:
+        attrs = {k: date.fromisoformat(v) if k in DATE_KEYS else v for k, v in props.items()}
+        kg.add_edge(s, t, key=f"{rel}:{props.get('round', '')}", type=rel, **attrs)
+    return kg
+
+def out_edges(kg, node, rel):
+    """Targets of edges of type `rel` leaving `node`, with edge attributes."""
+    return [(v, d) for _, v, d in kg.out_edges(node, data=True) if d["type"] == rel]
+
+def in_edges(kg, node, rel):
+    return [(u, d) for u, _, d in kg.in_edges(node, data=True) if d["type"] == rel]
+
+def valid_at(d: dict, when: date) -&gt; bool:
+    start, end = d.get("valid_from"), d.get("valid_to")
+    return (start is None or start &lt;= when) and (end is None or when &lt; end)
+
+kg = build_kg()
+
+# Canonical question 6 as of two dates
+for when in (date(2024, 6, 1), date(2026, 9, 1)):
+    ctos = [kg.nodes[p]["name"] for p, d in in_edges(kg, "kestrel-labs", "CTO_OF") if valid_at(d, when)]
+    print(when, ctos)                          # 2024-06-01 ['Jonas Vehl'] / 2026-09-01 ['Priya Nair']
+
+# Canonical question 2 as nested pattern matching
+answers = set()
+for proj, _ in in_edges(kg, "halden-bleaching-2024", "DETECTED"):
+    for company, _ in in_edges(kg, proj, "RUNS"):
+        for member, _ in in_edges(kg, company, "BOARD_MEMBER_OF"):
+            for investor, _ in out_edges(kg, member, "PARTNER_AT"):
+                if any(v == company for v, _ in out_edges(kg, investor, "INVESTED_IN")):
+                    answers.add((kg.nodes[investor]["name"], kg.nodes[member]["name"]))
+print(answers)                                 # {('Brightwater Capital', 'Lena Park')}</code></pre>
+<p>Each nested loop is one hop of the Cypher pattern. That is all a pattern-matching engine does conceptually; a database adds indexes, a cost-based planner that picks the cheapest starting point, and transactions.</p>
+
+<h2>Given knowledge graphs vs graphs built from text</h2>
+<p>Everything so far assumed someone had already written down clean triples. Sometimes someone has.</p>
+<table>
+  <thead><tr><th></th><th>Given (curated) KG</th><th>Built from text (this course)</th></tr></thead>
+  <tbody>
+    <tr><td>Examples</td><td>Wikidata, DBpedia, UMLS and other biomedical ontologies, product catalogs, enterprise KGs over CRM and HR data</td><td>GraphRAG, LightRAG and HippoRAG indexes over your documents</td></tr>
+    <tr><td>Precision</td><td>High; facts are curated and typed</td><td>Noisy; depends on extraction and resolution</td></tr>
+    <tr><td>Coverage of your documents</td><td>Low for private or recent information (Kestrel Labs will never be in Wikidata)</td><td>Exactly your corpus</td></tr>
+    <tr><td>Schema</td><td>Fixed, detailed, sometimes huge</td><td>Light entity types plus free-text descriptions</td></tr>
+    <tr><td>Best retrieval style</td><td>Structured queries (SPARQL, Cypher, Text2Cypher), path reasoning</td><td>Semantic search over entities, neighborhoods, community summaries</td></tr>
+    <tr><td>Cost to get started</td><td>Access and learning the schema</td><td>LLM calls over every chunk</td></tr>
+  </tbody>
+</table>
+<p>Research on knowledge-graph question answering, such as Think-on-Graph (<a href="18-paths-and-agents.html">Chapter 18</a>) and Reasoning on Graphs, mostly assumes a given KG like Freebase or Wikidata. GraphRAG assumes only documents. Enterprise systems often have both: a curated KG of customers, products and contracts, and a pile of documents that mention them. The strongest designs link them, using the curated ids as the canonical identities that text extraction resolves into. Capstone 4 builds exactly that.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Pan et al., Unifying Large Language Models and Knowledge Graphs: A Roadmap (2023)</span>
+  <p>This survey organizes the field into three frameworks: <em>KG-enhanced LLMs</em>, which use knowledge graphs during pre-training or inference (retrieval from a KG is here); <em>LLM-augmented KGs</em>, which use LLMs for KG tasks such as construction, completion, embedding and question answering (extraction from text is here); and <em>synergized LLMs + KGs</em>, where the two work together in both directions. GraphRAG spans the first two: an LLM builds the graph, and the graph then grounds the LLM. It is a useful map for placing any paper you read later in the course.</p>
+</div>
+
+<p>The rest of this course is about the right-hand column: building a graph from text when no one has built one for you, and retrieving from it well. Keep this chapter's tools in mind, though. Typed relations, time intervals, stable ids and schema validation are exactly what separates a graph you can query from a graph you can only summarize.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 5.1 <span class="level">Warm-up</span></h4>
+  <p>Convert this passage into triples using the Kestrel ontology. Mark which facts do not fit a single binary triple and say how you would store them: <em>“In late 2025 the Port Avalon City Council contracted Kestrel Labs to provide Ocean Health Act compliance monitoring. The Ocean Health Act, passed in 2025, requires quarterly reef monitoring.”</em></p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <table>
+      <thead><tr><th>Subject</th><th>Predicate</th><th>Object</th></tr></thead>
+      <tbody>
+        <tr><td>port-avalon-city-council</td><td>CONTRACTED</td><td>kestrel-labs</td></tr>
+        <tr><td>port-avalon-city-council</td><td>type</td><td>Organization</td></tr>
+        <tr><td>kestrel-labs</td><td>type</td><td>Organization</td></tr>
+        <tr><td>ocean-health-act</td><td>type</td><td>Law</td></tr>
+        <tr><td>ocean-health-act</td><td>requires</td><td>"quarterly reef monitoring" (literal)</td></tr>
+        <tr><td>ocean-health-act</td><td>passed_year</td><td>2025 (literal)</td></tr>
+      </tbody>
+    </table>
+    <p>Facts that do not fit: the contract has a date (late 2025, November in the minutes), a purpose (Ocean Health Act compliance monitoring) and a link to a second entity, the law. Date and purpose text could be edge properties on CONTRACTED. But “the contract is <em>for compliance with</em> the Ocean Health Act” connects three entities (council, Kestrel, law), so the clean model is an event node: <code>(:Contract {date: 2025-11-18})</code> with <code>(council)-[:AWARDED]-&gt;(contract)</code>, <code>(kestrel)-[:HOLDS]-&gt;(contract)</code>, <code>(contract)-[:FOR_COMPLIANCE_WITH]-&gt;(ocean-health-act)</code>. Our ontology has no Contract class, so this exercise also shows how schemas grow when you meet real text.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 5.2 <span class="level">Core</span></h4>
+  <p>Using the graph loaded by <code>load_kestrel.py</code>, write Cypher for: (a) every project Kestrel Labs runs, with the names of the people who lead or co-lead it; (b) every organization located in Port Avalon together with how many relationships it has in total; (c) all people who have ever held a C-level role (CEO_OF or CTO_OF) at Kestrel Labs, with start and end dates, ordered by start date. Give the expected results.</p>
+  <details class="hint"><summary>Hint</summary><p>For (a), people are optional in general, so think about OPTIONAL MATCH. For (b), bind the organization first with <code>WITH</code>, then count.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-cypher">// (a)
+MATCH (:Organization {name: "Kestrel Labs"})-[:RUNS]-&gt;(p:Project)
+OPTIONAL MATCH (person:Person)-[:LEADS|CO_LEADS]-&gt;(p)
+RETURN p.name AS project, collect(person.name) AS leads
+ORDER BY project;
+// Project Sentinel  [Priya Nair]
+// Project Tern      [Jonas Vehl, Priya Nair]   (order within the list may vary)
+
+// (b)
+MATCH (o:Organization)-[:LOCATED_IN]-&gt;(:Location {name: "Port Avalon"})
+WITH o
+MATCH (o)-[r]-()
+RETURN o.name AS organization, count(r) AS relationships
+ORDER BY relationships DESC;
+// Kestrel Labs              14
+// Tidewater Institute        4
+// Port Avalon City Council   2
+
+// (c)
+MATCH (p:Person)-[r:CEO_OF|CTO_OF]-&gt;(:Organization {name: "Kestrel Labs"})
+RETURN p.name AS person, type(r) AS role, r.valid_from AS start, r.valid_to AS end
+ORDER BY start;
+// Dr. Mira Okafor  CEO_OF  2021-01-01  null
+// Jonas Vehl       CTO_OF  2021-01-01  2026-03-01
+// Priya Nair       CTO_OF  2026-03-01  null</code></pre>
+    <p>Checks on (b), counted by hand from the loader's data: Kestrel's 14 are CO_FOUNDED ×2, CEO_OF, CTO_OF ×2, RUNS ×2, INVESTED_IN ×2, BOARD_MEMBER_OF, SUPPLIED, COMPETES_WITH, CONTRACTED and LOCATED_IN. Tidewater's 4 are Mira Okafor's FORMERLY_WORKED_AT, Ana Ruiz's DIRECTS, PARTNERS_ON Project Sentinel and LOCATED_IN Port Avalon. The council's 2 are CONTRACTED and LOCATED_IN. Counting a few results by hand is a good habit: it catches query bugs that still return plausible-looking numbers. In (c), Mira and Jonas tie on start date, so their relative order is not guaranteed unless you add a second sort key such as <code>person</code>.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 5.3 <span class="level">Core</span></h4>
+  <p>Translate canonical question 3, “What connects Priya Nair to Deepcast?”, into SPARQL over the Turtle model: return every intermediate entity <code>?mid</code> and the two predicates used, for paths of exactly two hops in either direction. Then explain why the Cypher version needed no direction handling.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code>PREFIX kl:   &lt;https://example.org/kestrel/&gt;
+PREFIX rdfs: &lt;http://www.w3.org/2000/01/rdf-schema#&gt;
+
+SELECT ?midName ?p1 ?p2 WHERE {
+  { kl:priya-nair ?p1 ?mid } UNION { ?mid ?p1 kl:priya-nair }
+  { ?mid ?p2 kl:deepcast }   UNION { kl:deepcast ?p2 ?mid }
+  ?mid rdfs:label ?midName .
+  FILTER(?p1 != rdfs:label &amp;&amp; ?p2 != rdfs:label)
+}
+# Kestrel Labs      kl:ctoOf               kl:supplied
+# Marlow Dynamics   kl:formerlyWorkedAt    kl:acquired
+# Project Tern      kl:coLeads             kl:replaces</code></pre>
+    <p>In the data, Priya is the subject of all three first-hop triples and Deepcast is the subject of <code>kl:supplied</code> but the object of <code>kl:acquired</code> and <code>kl:replaces</code>, so a single direction would miss results. The <code>UNION</code> blocks try both directions for each hop. The <code>FILTER</code> is defensive; <code>?mid</code> must also have a label, which excludes literals. In Cypher, <code>-[*1..2]-</code> without arrowheads matches relationships in either direction, so the same question needs no union. SPARQL property paths can express reverse direction with <code>^</code> (for example <code>(kl:ctoOf|^kl:acquired)</code>), but they cannot return which predicate was used, which is why this answer uses explicit triple patterns.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 5.4 <span class="level">Core</span></h4>
+  <p>LLM extraction produced these triples, with entity types taken from the resolved graph. Write <code>validate(triples, types)</code> using <code>RELATIONS</code> from <code>kestrel_schema.py</code> that returns each triple with a status: <code>ok</code>, <code>unknown_relation</code>, <code>bad_domain</code> or <code>bad_range</code>. Say what each flagged triple most likely means.</p>
+  <pre><code>("deepcast", "CEO_OF", "kestrel-labs")
+("priya-nair", "CO_LEADS", "project-tern")
+("project-sentinel", "DETECTED", "halden-reef")
+("marlow-dynamics", "BOUGHT", "deepcast")
+("lena-park", "INVESTED_IN", "kestrel-labs")</code></pre>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from kestrel_schema import RELATIONS
+
+def validate(triples, types):
+    results = []
+    for s, rel, o in triples:
+        if rel not in RELATIONS:
+            status = "unknown_relation"
+        else:
+            domain, range_ = RELATIONS[rel]
+            if types.get(s) != domain:
+                status = "bad_domain"
+            elif types.get(o) != range_:
+                status = "bad_range"
+            else:
+                status = "ok"
+        results.append(((s, rel, o), status))
+    return results
+
+types = {"deepcast": "Organization", "kestrel-labs": "Organization", "priya-nair": "Person",
+         "project-tern": "Project", "project-sentinel": "Project", "halden-reef": "Location",
+         "marlow-dynamics": "Organization", "lena-park": "Person"}
+for triple, status in validate([
+        ("deepcast", "CEO_OF", "kestrel-labs"), ("priya-nair", "CO_LEADS", "project-tern"),
+        ("project-sentinel", "DETECTED", "halden-reef"), ("marlow-dynamics", "BOUGHT", "deepcast"),
+        ("lena-park", "INVESTED_IN", "kestrel-labs")], types):
+    print(status, triple)</code></pre>
+    <ul>
+      <li><code>bad_domain</code> (Deepcast CEO_OF Kestrel): an organization cannot be a CEO. Likely a wrong subject from a sentence like “Deepcast's supply deal was signed by the Kestrel CEO”. Reject.</li>
+      <li><code>ok</code> (Priya CO_LEADS Tern).</li>
+      <li><code>bad_range</code> (Sentinel DETECTED Halden Reef): the model skipped the event. The fix is to route it to the event (2024 Halden Reef bleaching event) or map it to MONITORS. Flag for review rather than reject.</li>
+      <li><code>unknown_relation</code> (Marlow BOUGHT Deepcast): a synonym of ACQUIRED. Normalize with a synonym map before validating.</li>
+      <li><code>bad_domain</code> (Lena Park INVESTED_IN Kestrel): Lena is a partner at the investor, not the investor. It is a plausible but wrong reading of “Lena Park, who led the investment”. Reject, or rewrite to the organization she is PARTNER_AT, which needs a graph lookup.</li>
+    </ul>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 5.5 <span class="level">Stretch</span></h4>
+  <p>Remodel leadership as event nodes instead of CTO_OF edges with intervals: a <code>:RoleAssignment</code> node with properties <code>role</code>, <code>valid_from</code>, <code>valid_to</code>, connected by <code>(person)-[:HOLDS]-&gt;(assignment)-[:AT]-&gt;(org)</code> and <code>(assignment)-[:SOURCE]-&gt;(doc:Document)</code>. Write the Cypher to create Jonas Vehl's and Priya Nair's CTO assignments with document 12 (the March 2026 interview) as the source of the change, and the query for “Who was CTO on 2025-12-31, and which document supports the end of the previous CTO's tenure?”. Compare the two models.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-cypher">MERGE (doc:Document {id: "12_interview_leadership_change_2026"})
+  SET doc.title = "We Stopped Being a Startup the Day Deepcast Said No", doc.date = date("2026-03-26")
+WITH doc
+MATCH (jonas:Entity {id: "jonas-vehl"}), (priya:Entity {id: "priya-nair"}), (k:Entity {id: "kestrel-labs"})
+MERGE (a1:RoleAssignment {id: "jonas-vehl:CTO:kestrel-labs:2021"})
+  SET a1.role = "CTO", a1.valid_from = date("2021-01-01"), a1.valid_to = date("2026-03-01")
+MERGE (a2:RoleAssignment {id: "priya-nair:CTO:kestrel-labs:2026"})
+  SET a2.role = "CTO", a2.valid_from = date("2026-03-01")
+MERGE (jonas)-[:HOLDS]-&gt;(a1)-[:AT]-&gt;(k)
+MERGE (priya)-[:HOLDS]-&gt;(a2)-[:AT]-&gt;(k)
+MERGE (a1)-[:SOURCE]-&gt;(doc)
+MERGE (a2)-[:SOURCE]-&gt;(doc);</code></pre>
+    <p>Careful with the chained <code>MERGE (jonas)-[:HOLDS]-&gt;(a1)-[:AT]-&gt;(k)</code>: all three nodes are already bound, so only the relationships can be created, which is safe.</p>
+    <pre><code class="language-cypher">WITH date("2025-12-31") AS asOf
+MATCH (p:Person)-[:HOLDS]-&gt;(a:RoleAssignment {role: "CTO"})-[:AT]-&gt;(:Entity {id: "kestrel-labs"})
+WHERE a.valid_from &lt;= asOf AND (a.valid_to IS NULL OR a.valid_to &gt; asOf)
+OPTIONAL MATCH (prev:Person)-[:HOLDS]-&gt;(b:RoleAssignment {role: "CTO"})-[:AT]-&gt;(:Entity {id: "kestrel-labs"})
+WHERE b.valid_to IS NOT NULL AND b.valid_to &lt;= asOf
+OPTIONAL MATCH (b)-[:SOURCE]-&gt;(d:Document)
+RETURN p.name AS cto, prev.name AS previous_cto, d.id AS evidence;
+// -&gt; Jonas Vehl, null, null</code></pre>
+    <p>On 2025-12-31 Jonas Vehl was still CTO, and no earlier CTO tenure had ended, so both optional parts are null. Run it with <code>asOf = date("2026-06-01")</code> and you get <code>Priya Nair, Jonas Vehl, 12_interview_leadership_change_2026</code>.</p>
+    <p>Comparison: the edge model is shorter to query and fine when the only extra data is a time range. The event-node model costs an extra hop and more nodes, but gives every assignment an id you can cite, multiple sources, a place for the role title (“Chief Scientist” next) without adding relation types, and room for the “recorded at” timestamps that bi-temporal models need in Chapter 27.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">You load the triple <code>kl:brightwater-capital kl:investedIn kl:kestrel-labs</code> twice into an RDF store, once for the Series A and once for the Series B. How many investedIn triples does the store now contain?</p>
+  <ol>
+    <li data-correct>One, because an RDF graph is a set of triples; you need an event node or statement-level metadata to keep the rounds apart</li>
+    <li>Two, one per load</li>
+    <li>Two, but only if the store supports RDF-star</li>
+    <li>Zero, because the second insert conflicts with the first</li>
+  </ol>
+  <div class="explain">Identical triples are the same element of a set. Property graphs, by contrast, allow parallel relationships of the same type.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">An RDFS ontology gives CEO_OF the domain Person. The data contains “Deepcast CEO_OF Kestrel Labs”. What does an RDFS reasoner do?</p>
+  <ol>
+    <li>Rejects the triple as invalid</li>
+    <li>Deletes the triple</li>
+    <li data-correct>Infers that Deepcast is a Person</li>
+    <li>Raises a warning but keeps the triple</li>
+  </ol>
+  <div class="explain">RDFS domain and range are inference rules. To detect violations you need a validation language such as SHACL, or explicit checks in your pipeline.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which Cypher load statement is safe to rerun without creating duplicate nodes when a node's display name changes?</p>
+  <ol>
+    <li><code>CREATE (n:Entity {id: "deepcast", name: $name})</code></li>
+    <li><code>MERGE (n:Entity {id: "deepcast", name: $name})</code></li>
+    <li><code>MERGE (a:Entity {id: "marlow-dynamics"})-[:ACQUIRED]-&gt;(b:Entity {id: "deepcast", name: $name})</code></li>
+    <li data-correct><code>MERGE (n:Entity {id: "deepcast"}) SET n.name = $name</code></li>
+  </ol>
+  <div class="explain">MERGE matches the entire pattern given. Merge on the key only, then SET mutable properties. Merging a whole path can recreate its nodes if any part is missing.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does the query for “Who is the CTO of Kestrel Labs?” filter on <code>r.valid_to IS NULL</code>?</p>
+  <ol>
+    <li>Because CTO_OF edges without dates are invalid</li>
+    <li data-correct>Because the graph holds both the ended tenure of Jonas Vehl and the current one of Priya Nair, and only the open interval is current</li>
+    <li>Because Cypher cannot compare dates</li>
+    <li>Because NULL values are indexed faster</li>
+  </ol>
+  <div class="explain">Temporal edges let one graph hold the history. The question “currently” selects intervals that have not ended; “as of a date” checks that the date falls inside the interval.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A MATCH query lists people and their projects, but Lena Park and Dr. Ana Ruiz are missing from the results. What is the most likely fix?</p>
+  <ol>
+    <li>Add DISTINCT to the RETURN clause</li>
+    <li>Use a variable-length relationship</li>
+    <li>Add an index on Person.name</li>
+    <li data-correct>Use OPTIONAL MATCH for the project part of the pattern</li>
+  </ol>
+  <div class="explain">MATCH drops rows where any part of the pattern fails. OPTIONAL MATCH keeps the person and binds the project variable to null.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A team has a curated enterprise KG of customers and contracts, and 50,000 support documents that mention them. Which design is usually strongest?</p>
+  <ol>
+    <li>Ignore the KG and extract a new graph from the documents</li>
+    <li>Ignore the documents and answer only with SPARQL or Cypher</li>
+    <li data-correct>Extract entities from documents and resolve them to the curated KG's ids, so structured queries and text evidence connect</li>
+    <li>Convert the KG to text and embed it with the documents in a vector store</li>
+  </ol>
+  <div class="explain">Curated ids give precise identity and structure; documents give coverage and nuance. Linking them gets both, which is the approach of Capstone 4.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I learn Cypher or SPARQL?</summary>
+  <div><p>For GraphRAG work, start with Cypher: most GraphRAG tooling (neo4j-graphrag, LlamaIndex's property graph index, Text2Cypher research) uses property graphs, and Cypher's ideas carry over to ISO GQL. Learn enough SPARQL to query Wikidata or an RDF enterprise KG when you meet one. The mental model, matching patterns of typed edges, is the same.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Do I need an OWL ontology to build GraphRAG?</summary>
+  <div><p>No. Microsoft GraphRAG uses a list of entity types and free-text relationships. A lightweight schema, like the Python dictionary in this chapter, gets most of the benefit: consistent types, validation and a schema to show an LLM. Formal ontologies pay off when you integrate many sources, need inference, or already have one in your domain (biomedicine, finance, standards bodies).</p></div>
+</details>
+
+<details class="qa">
+  <summary>Fixed relation types or free-text descriptions?</summary>
+  <div><p>Both have a role. Fixed types enable exact queries like the ones in this chapter; free-text descriptions preserve nuance (“supplied transducers and signal boards since 2022”) that an LLM can use when summarizing. Many systems store a typed label and a description on the same edge. Chapter 8 discusses how to prompt for either.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is NetworkX enough, or do I need Neo4j?</summary>
+  <div><p>For a corpus the size of Kestrel Labs, or for offline indexing experiments, NetworkX is enough and much simpler. Move to a database when the graph no longer fits comfortably in memory, when several services must read and update it concurrently, or when you want ad hoc queries (including LLM-generated ones) with a planner and indexes. <a href="13-storage-indexing.html">Chapter 13</a> compares the options, including Postgres.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How is a knowledge graph different from a relational database with foreign keys?</summary>
+  <div><p>Anything a graph stores can be stored in tables, and the Ontologies to the Rescue line of work is literally a KG layer over SQL data. The difference is ergonomics and performance for connected questions: variable-length paths, unknown numbers of joins, and heterogeneous relation types are natural in graph queries and awkward as SQL joins. A graph also makes the schema's meaning explicit, which helps both humans and LLMs write correct queries.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: the Kestrel knowledge graph, queryable two ways</h3>
+  <p>Build a typed, temporal Kestrel Labs knowledge graph that later chapters can use as a gold standard: when you extract a graph from text in Part 2, you will compare it against this one.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A schema module (classes, relations with domain and range) and a validator that reports violations</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A loader that builds the graph idempotently in Neo4j (running it twice leaves node and relationship counts unchanged) and a NetworkX MultiDiGraph from the same data</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Cypher queries answering canonical questions 1, 2, 3, 6 and 7, each with its expected result checked in a test</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The Series B modeled as a <code>:FundingRound</code> event node with a source document link, plus a query that returns amount, date, lead and source</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A Turtle export and at least two of the same questions answered in SPARQL (rdflib runs SPARQL locally without a server)</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An <code>export_gold.json</code> of all triples with ids, for evaluating extraction in Chapters 8 and 9</span></li>
+  </ul>
+  <p><strong>Done when</strong> <code>pytest</code> passes against both Neo4j and NetworkX backends and returns Priya Nair for the current CTO, Jonas Vehl for the CTO on 2024-06-01, and Deepcast for the 2024 supplier.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>A knowledge graph is typed, directed triples plus a schema and stable identities; that is what makes exact queries possible.</li>
+    <li>RDF uses global IRIs and set semantics; property graphs put properties on nodes and edges and allow parallel edges.</li>
+    <li>Ontologies define classes and relation domains and ranges; use them to validate extraction and to ground query generation, remembering that RDFS infers rather than rejects.</li>
+    <li>Store simple n-ary data as edge properties and promote multi-participant facts (funding rounds, contracts, role changes) to event nodes.</li>
+    <li>Merge on canonical ids, never on names; aliases are data, not identities.</li>
+    <li>Cypher and SPARQL both match patterns; bound variable-length paths, use OPTIONAL for missing data, and filter intervals for temporal questions.</li>
+    <li>Curated KGs are precise but rarely cover your documents; this course builds graphs from text, and the best systems link the two.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Pan, Luo, Wang, Chen, Wang and Wu. <a href="https://arxiv.org/abs/2306.08302">Unifying Large Language Models and Knowledge Graphs: A Roadmap</a>. <span class="venue">IEEE TKDE 2024; arXiv 2306.08302, 2023</span></li>
+  <li>Allemang and Sequeda. <a href="https://arxiv.org/abs/2405.11706">Increasing the LLM Accuracy for Question Answering: Ontologies to the Rescue!</a> <span class="venue">arXiv 2405.11706, 2024</span></li>
+  <li>Sequeda, Allemang and Jacob. <a href="https://arxiv.org/abs/2311.07509">A Benchmark to Understand the Role of Knowledge Graphs on Large Language Model's Accuracy for Question Answering on Enterprise SQL Databases</a>. <span class="venue">arXiv 2311.07509, 2023</span></li>
+  <li>Hogan et al. <a href="https://arxiv.org/abs/2003.02320">Knowledge Graphs</a>. <span class="venue">ACM Computing Surveys, 2021</span></li>
+  <li>W3C. <a href="https://www.w3.org/TR/rdf11-concepts/">RDF 1.1 Concepts and Abstract Syntax</a> and <a href="https://www.w3.org/TR/sparql11-query/">SPARQL 1.1 Query Language</a>. <span class="venue">W3C Recommendations, 2013–2014</span></li>
+  <li>W3C. <a href="https://www.w3.org/TR/shacl/">Shapes Constraint Language (SHACL)</a>. <span class="venue">W3C Recommendation, 2017</span></li>
+  <li>Neo4j. <a href="https://neo4j.com/docs/cypher-manual/current/">Cypher Manual</a> and <a href="https://neo4j.com/docs/python-manual/current/">Python Driver Manual</a>. <span class="venue">Documentation</span></li>
+  <li>Vrandečić and Krötzsch. <a href="https://cacm.acm.org/research/wikidata/">Wikidata: A Free Collaborative Knowledgebase</a>. <span class="venue">Communications of the ACM, 2014</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

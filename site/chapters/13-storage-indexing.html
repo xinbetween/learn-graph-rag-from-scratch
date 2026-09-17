@@ -1,0 +1,913 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storing and indexing the graph | Graph RAG from Scratch</title>
+<meta name="description" content="Design the artifact set a GraphRAG index leaves behind, decide what to embed, choose between files, Neo4j and Postgres, and build an indexing pipeline that caches every step.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="13-storage-indexing" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Storing and indexing the graph</h1>
+  <p class="lede">Everything you built in Part 2 is expensive to compute and cheap to read. This chapter turns it into a durable index: a small set of tables with stable ids, the right things embedded, a storage backend that fits your queries, and a pipeline you can re-run without paying for it twice.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Describe the eight artifacts a GraphRAG index produces, their columns and how they join</li>
+      <li>Decide what text to embed for entities, relationships, text units and reports, and justify each choice</li>
+      <li>Compare files plus NetworkX, Neo4j, Postgres with pgvector or Apache AGE, and a split vector and graph store</li>
+      <li>Structure indexing as a cached DAG with idempotent ids so re-runs only redo what changed</li>
+      <li>Load the Kestrel index into Neo4j with constraints, MERGE and a vector index, and run a two-hop query in Postgres</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why the index is a set of tables</h2>
+<p>By the end of <a href="12-community-reports.html">Chapter 12</a> the Kestrel Labs pipeline has made hundreds of LLM calls: extraction and gleaning per text unit, claim extraction, description summaries per merged entity and relationship, and one report per community. On a real corpus that is hours of work and a noticeable bill. Query time is the opposite: <a href="14-local-search.html">local search</a> makes one generation call, and even <a href="15-global-search.html">global search</a> only reads reports that already exist.</p>
+<p>That asymmetry drives the design. Indexing is a batch job that writes <strong>artifacts</strong>: plain, inspectable tables. Query engines load those tables and never re-derive them. Separating the two gives you three things you will want in production:</p>
+<ul>
+  <li><strong>Debuggability.</strong> When local search cites a wrong relationship, you open <code>relationships.json</code>, find id 16 and follow its <code>source_ids</code> back to the sentence that produced it.</li>
+  <li><strong>Swappable serving.</strong> The same artifacts can be served from memory with NetworkX, loaded into Neo4j, or copied into Postgres. The retrieval algorithm does not change, only the queries that fetch neighbors and vectors.</li>
+  <li><strong>Incremental work.</strong> If each step's output is keyed by its inputs, a re-run after a prompt tweak only redoes the steps downstream of that prompt.</li>
+</ul>
+
+<h3>The eight artifacts</h3>
+<p>Microsoft GraphRAG writes its index as parquet files, one per table. <code>minigraphrag</code> writes the same information as JSON (so you can read it in an editor), GraphML for the graph, and a <code>.npz</code>/<code>.json</code> pair per vector store. The names differ slightly; the shapes are the same.</p>
+
+<table>
+  <thead><tr><th>Artifact</th><th>One row per</th><th>Microsoft GraphRAG output</th><th><code>minigraphrag</code> file</th><th>Joins to</th></tr></thead>
+  <tbody>
+    <tr><td>documents</td><td>input file</td><td><code>documents.parquet</code></td><td>(implicit: <code>doc_id</code> is the file stem)</td><td>text units by document id</td></tr>
+    <tr><td>text_units</td><td>chunk</td><td><code>text_units.parquet</code></td><td><code>text_units.json</code></td><td>documents; entities and relationships through their source ids</td></tr>
+    <tr><td>entities</td><td>resolved entity</td><td><code>entities.parquet</code></td><td><code>entities.json</code></td><td>text units, communities</td></tr>
+    <tr><td>relationships</td><td>merged edge</td><td><code>relationships.parquet</code></td><td><code>relationships.json</code></td><td>entities by name; text units</td></tr>
+    <tr><td>claims</td><td>dated claim</td><td><code>covariates.parquet</code> (optional)</td><td><code>claims.json</code></td><td>entities by subject and object; one text unit</td></tr>
+    <tr><td>communities</td><td>community at a level</td><td><code>communities.parquet</code></td><td><code>communities.json</code></td><td>entities, relationships, parent and children</td></tr>
+    <tr><td>community_reports</td><td>report</td><td><code>community_reports.parquet</code></td><td><code>community_reports.json</code></td><td>communities by community id</td></tr>
+    <tr><td>embeddings</td><td>embedded text</td><td>a vector store (LanceDB by default), not a parquet table</td><td><code>entity_embeddings</code>, <code>relationship_embeddings</code>, <code>text_unit_embeddings</code>, <code>report_embeddings</code> (<code>.npz</code> + <code>.json</code>)</td><td>the row whose id it stores</td></tr>
+  </tbody>
+</table>
+
+<p>Two more files round out a <code>minigraphrag</code> index: <code>config.json</code>, which records the <code>IndexConfig</code> and the embedder name so <code>load_index</code> can rebuild the same embedder, and <code>graph.graphml</code>, an export you can open in Gephi or yEd.</p>
+
+<h3>Schemas, column by column</h3>
+<p>The tables below list the columns that matter for retrieval. GraphRAG names come from its output documentation; the right-hand column shows where the same fact lives in <code>minigraphrag</code>.</p>
+
+<table>
+  <thead><tr><th colspan="3">text_units</th></tr><tr><th>GraphRAG column</th><th>Meaning</th><th><code>minigraphrag</code> field</th></tr></thead>
+  <tbody>
+    <tr><td><code>id</code></td><td>Stable id (a content hash in GraphRAG)</td><td><code>id</code>, for example <code>07_marlow_acquires_deepcast-000</code></td></tr>
+    <tr><td><code>human_readable_id</code></td><td>Short integer used in citations</td><td>(the <code>id</code> is already readable)</td></tr>
+    <tr><td><code>text</code>, <code>n_tokens</code></td><td>Chunk content and its token count</td><td><code>text</code>, <code>n_tokens</code></td></tr>
+    <tr><td><code>document_id</code></td><td>Parent document</td><td><code>doc_id</code>, plus <code>start</code>/<code>end</code> character offsets</td></tr>
+    <tr><td><code>entity_ids</code>, <code>relationship_ids</code>, <code>covariate_ids</code></td><td>What was extracted from this chunk</td><td>stored the other way round, as <code>source_ids</code> on entities and relationships</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead><tr><th colspan="3">entities</th></tr><tr><th>GraphRAG column</th><th>Meaning</th><th><code>minigraphrag</code> field</th></tr></thead>
+  <tbody>
+    <tr><td><code>id</code>, <code>human_readable_id</code></td><td>Global id and short citation id</td><td><code>name</code> is the key; <code>human_id</code> is the citation id</td></tr>
+    <tr><td><code>title</code></td><td>Entity name</td><td><code>name</code> (uppercase, resolved)</td></tr>
+    <tr><td><code>type</code></td><td>Entity type</td><td><code>type</code> (majority vote across mentions)</td></tr>
+    <tr><td><code>description</code></td><td>Summarized description</td><td><code>description</code>, plus the raw <code>descriptions</code> list and <code>aliases</code></td></tr>
+    <tr><td><code>text_unit_ids</code></td><td>Chunks that mention it</td><td><code>source_ids</code></td></tr>
+    <tr><td><code>frequency</code>, <code>degree</code></td><td>Mention count and number of graph neighbors</td><td><code>frequency</code>, <code>degree</code>, and <code>rank</code> (= degree)</td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead><tr><th colspan="3">relationships</th></tr><tr><th>GraphRAG column</th><th>Meaning</th><th><code>minigraphrag</code> field</th></tr></thead>
+  <tbody>
+    <tr><td><code>id</code>, <code>human_readable_id</code></td><td>Global id and short citation id</td><td><code>human_id</code></td></tr>
+    <tr><td><code>source</code>, <code>target</code></td><td>Entity names</td><td><code>source</code>, <code>target</code> (undirected in <code>minigraphrag</code>)</td></tr>
+    <tr><td><code>description</code></td><td>Summarized description</td><td><code>description</code> and raw <code>descriptions</code></td></tr>
+    <tr><td><code>weight</code></td><td>Summed extraction strength</td><td><code>weight</code></td></tr>
+    <tr><td><code>combined_degree</code></td><td>Degree of source plus degree of target</td><td><code>combined_degree</code> and <code>rank</code></td></tr>
+    <tr><td><code>text_unit_ids</code></td><td>Supporting chunks</td><td><code>source_ids</code></td></tr>
+  </tbody>
+</table>
+
+<table>
+  <thead><tr><th colspan="3">claims, communities and community_reports</th></tr><tr><th>GraphRAG column</th><th>Meaning</th><th><code>minigraphrag</code> field</th></tr></thead>
+  <tbody>
+    <tr><td><code>subject_id</code>, <code>object_id</code>, <code>type</code>, <code>status</code></td><td>Claim about an entity; status TRUE, FALSE or SUSPECTED</td><td><code>subject</code>, <code>object</code>, <code>type</code>, <code>status</code></td></tr>
+    <tr><td><code>start_date</code>, <code>end_date</code>, <code>source_text</code>, <code>text_unit_id</code></td><td>When it held, the quoted evidence and its chunk</td><td><code>start_date</code>, <code>end_date</code>, <code>source_text</code>, <code>source_id</code></td></tr>
+    <tr><td><code>community</code>, <code>level</code>, <code>parent</code>, <code>children</code></td><td>Position in the hierarchy</td><td><code>id</code>, <code>level</code>, <code>parent</code>, <code>children</code></td></tr>
+    <tr><td><code>entity_ids</code>, <code>relationship_ids</code>, <code>size</code></td><td>Membership</td><td><code>nodes</code>, <code>edges</code></td></tr>
+    <tr><td><code>title</code>, <code>summary</code>, <code>full_content</code></td><td>Generated report text</td><td><code>title</code>, <code>summary</code>, <code>full_content</code> (rendered from findings)</td></tr>
+    <tr><td><code>rank</code>, <code>rating_explanation</code>, <code>findings</code></td><td>Importance rating, its reason, 5 to 10 insights</td><td><code>rating</code>, <code>rating_explanation</code>, <code>findings</code></td></tr>
+  </tbody>
+</table>
+
+<div class="callout note">
+  <span class="callout-title">Two ids per row, on purpose</span>
+  <p>GraphRAG keeps a long globally unique <code>id</code> for joins and a small <code>human_readable_id</code> for prompts. The model cites <code>[Data: Relationships (16)]</code>, which costs a few tokens and is easy to verify, rather than a 128-character hash it might mangle. Keep both kinds of id in your own schema: one for machines, one for the LLM.</p>
+</div>
+
+<h3>The schema as a graph</h3>
+<p>The artifacts form three layers stacked on each other. The <em>lexical</em> layer is documents and chunks. The <em>entity</em> layer is what extraction found. The <em>community</em> layer is what clustering and summarization added. Provenance edges tie the layers together, and they are what make citations possible. Step through one slice of the Kestrel index.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Lexical, entity and community layers",
+  "subtitle": "One slice of the Kestrel Labs index",
+  "height": 420,
+  "directed": true,
+  "nodes": [
+    {"id": "d07", "label": "Doc 07: Marlow buys Deepcast", "group": 7, "x": 14, "y": 10},
+    {"id": "d09", "label": "Doc 09: Introducing Tern", "group": 7, "x": 72, "y": 10},
+    {"id": "u07", "label": "Chunk 07-000", "group": 8, "x": 14, "y": 32},
+    {"id": "u09", "label": "Chunk 09-000", "group": 8, "x": 72, "y": 32},
+    {"id": "marlow", "label": "MARLOW DYNAMICS", "group": 1, "x": 10, "y": 60},
+    {"id": "deepcast", "label": "DEEPCAST", "group": 1, "x": 36, "y": 60},
+    {"id": "tern", "label": "PROJECT TERN", "group": 4, "x": 62, "y": 60},
+    {"id": "kestrel", "label": "KESTREL LABS", "group": 1, "x": 88, "y": 60},
+    {"id": "claim", "label": "Claim: ACQUISITION 2025-04", "group": 6, "x": 36, "y": 30},
+    {"id": "c3", "label": "Community 3", "group": 3, "x": 24, "y": 88},
+    {"id": "c2", "label": "Community 2", "group": 3, "x": 56, "y": 88},
+    {"id": "c0", "label": "Community 0 (level 0)", "group": 3, "x": 86, "y": 86}
+  ],
+  "edges": [
+    {"source": "d07", "target": "u07", "label": "HAS_CHUNK"},
+    {"source": "d09", "target": "u09", "label": "HAS_CHUNK"},
+    {"source": "u07", "target": "marlow", "label": "MENTIONS"},
+    {"source": "u07", "target": "deepcast", "label": "MENTIONS"},
+    {"source": "u09", "target": "tern", "label": "MENTIONS"},
+    {"source": "u09", "target": "kestrel", "label": "MENTIONS"},
+    {"source": "marlow", "target": "deepcast", "label": "RELATED (id 5)"},
+    {"source": "tern", "target": "deepcast", "label": "RELATED (id 6)"},
+    {"source": "kestrel", "target": "tern", "label": "RELATED (id 21)"},
+    {"source": "claim", "target": "marlow", "label": "SUBJECT"},
+    {"source": "u07", "target": "claim", "label": "SOURCE_OF"},
+    {"source": "marlow", "target": "c3", "label": "IN"},
+    {"source": "deepcast", "target": "c3", "label": "IN"},
+    {"source": "tern", "target": "c2", "label": "IN"},
+    {"source": "c3", "target": "c0", "label": "PARENT"},
+    {"source": "c2", "target": "c0", "label": "PARENT"}
+  ],
+  "legend": {"7": "Document", "8": "Text unit", "1": "Organization", "4": "Project", "6": "Claim", "3": "Community"},
+  "steps": [
+    {"caption": "<strong>Lexical layer.</strong> Each document is split into text units. Their ids never change unless the text changes, so they are the anchor for everything else.", "active": ["d07", "d09"], "visited": ["u07", "u09"], "edges": ["d07>u07", "d09>u09"]},
+    {"caption": "<strong>Provenance.</strong> Every entity keeps the ids of the chunks that mention it (<code>source_ids</code>). This is how local search pulls source text for an entity, and how you debug a bad node.", "active": ["u07", "u09"], "visited": ["marlow", "deepcast", "tern", "kestrel"], "edges": ["u07>marlow", "u07>deepcast", "u09>tern", "u09>kestrel"]},
+    {"caption": "<strong>Entity layer.</strong> Relationships connect entities across documents. RELATED id 6 (Tern replaces Deepcast sonar) links a fact from document 09 to an entity first seen in document 07.", "active": ["marlow", "deepcast", "tern", "kestrel"], "edges": ["marlow>deepcast", "tern>deepcast", "kestrel>tern"]},
+    {"caption": "<strong>Claims.</strong> A claim is a dated statement about an entity with its own provenance: Marlow Dynamics acquired Deepcast, April 2025, quoted from chunk 07-000.", "active": ["claim"], "visited": ["marlow", "u07"], "edges": ["claim>marlow", "u07>claim"]},
+    {"caption": "<strong>Community layer.</strong> Entities belong to leaf communities, which roll up into parents. Each community has a report (not drawn) keyed by the same id. Global search reads this layer; local search reads the entity layer and borrows a few reports.", "active": ["c3", "c2", "c0"], "visited": ["marlow", "deepcast", "tern"], "edges": ["marlow>c3", "deepcast>c3", "tern>c2", "c3>c0", "c2>c0"]}
+  ]
+}
+</script>
+</div>
+
+<h2>What gets embedded, and why</h2>
+<p>Vectors are how a query enters the graph. A query has no node id; it has words. Every retrieval method in Part 3 starts by embedding something about the query and comparing it with something stored. So the indexing question is: <em>which text, for which row, will a future query need to be close to?</em></p>
+
+<table>
+  <thead><tr><th>Store</th><th>Text embedded in <code>minigraphrag</code></th><th>Why this text</th><th>Used by</th></tr></thead>
+  <tbody>
+    <tr><td>Entities</td><td><code>"{name}: {description}"</code></td><td>Queries often describe things by role (“the sonar supplier”) rather than by name. The description carries those words.</td><td>Local search seeds (<a href="14-local-search.html">Ch. 14</a>), LightRAG low-level keywords (<a href="16-lightrag.html">Ch. 16</a>), HippoRAG seeds (<a href="17-ppr-hipporag.html">Ch. 17</a>)</td></tr>
+    <tr><td>Relationships</td><td><code>"{source} {target}: {description}"</code></td><td>Themes such as “supply-chain risk” live on edges, not nodes. Including endpoint names keeps the vector anchored.</td><td>LightRAG high-level keywords (Ch. 16)</td></tr>
+    <tr><td>Text units</td><td>The chunk text</td><td>The baseline and fallback: exact wording, numbers and quotes.</td><td>Basic search, hybrid retrieval (<a href="21-hybrid-design-patterns.html">Ch. 21</a>)</td></tr>
+    <tr><td>Reports</td><td><code>full_content</code> (title, summary and findings)</td><td>Lets a query find the right region of the corpus without reading every report.</td><td>DRIFT primer (<a href="15-global-search.html">Ch. 15</a>)</td></tr>
+  </tbody>
+</table>
+
+<p>Microsoft GraphRAG's current defaults embed three of these: entity <code>title:description</code>, community report <code>full_content</code>, and text unit <code>text</code>. It does not embed relationship descriptions by default, because none of its built-in search methods query them. LightRAG does, because its global mode is relationship-first. Embed what your retrieval methods read, and nothing else: every extra store costs embedding calls on every re-index and has to stay in sync with the rows it points at.</p>
+
+<p>Here is the relevant part of <code>build_index</code>. The metadata stored next to each vector is exactly what the caller needs to jump back into the graph: a <code>human_id</code> for entities, endpoints for relationships, a <code>doc_id</code> for chunks, a level for reports.</p>
+
+<pre data-file="minigraphrag/indexer.py"><code class="language-python">def entity_embedding_text(name: str, data: dict) -&gt; str:
+    return f"{name}: {data.get('description', '')}"
+
+
+def relationship_embedding_text(u: str, v: str, data: dict) -&gt; str:
+    return f"{u} {v}: {data.get('description', '')}"
+
+
+# inside build_index(...), after reports are generated
+entity_store = _embed_store(
+    embedder, list(G.nodes()), [entity_embedding_text(n, d) for n, d in G.nodes(data=True)],
+    [{"human_id": d["human_id"]} for _, d in G.nodes(data=True)])
+relationship_store = _embed_store(
+    embedder, [str(d["human_id"]) for _, _, d in G.edges(data=True)],
+    [relationship_embedding_text(u, v, d) for u, v, d in G.edges(data=True)],
+    [{"source": u, "target": v} for u, v in G.edges()])
+text_unit_store = _embed_store(embedder, [u.id for u in units], [u.text for u in units],
+                               [{"doc_id": u.doc_id} for u in units])
+report_store = _embed_store(embedder, [str(r.community_id) for r in reports],
+                            [r.full_content for r in reports], [{"level": r.level} for r in reports])</code></pre>
+
+<h3>Why the description matters</h3>
+<p>Try it on Kestrel. The query “Who designed the sonar array on the drones?” shares no words with the string <code>JONAS VEHL</code>. It shares several with his summarized description, “Co-founder of Kestrel Labs and its CTO from 2021 to March 2026; designed the Sentinel sonar array; co-leads Project Tern.” Embedding <code>name: description</code> lets the name match name-style queries and the description match role-style ones. The cost is that a wrong or bloated description drags the vector away from the entity. That is one more reason the summarization step in <a href="09-entity-resolution.html">Chapter 9</a> caps description length.</p>
+
+<h3>What the vectors cost</h3>
+<p>Embedding tokens are cheap next to extraction tokens, so cost is rarely the constraint. Memory and index build time are. A vector of <em>d</em> float32 dimensions takes 4<em>d</em> bytes before any index overhead. A mid-size corpus with 40,000 entities, 90,000 relationships, 60,000 chunks and 3,000 reports has 193,000 vectors; at 1,536 dimensions that is 193,000 × 6,144 bytes ≈ 1.19 GB of raw floats, and an HNSW graph adds more on top. Halving dimensions or using half-precision storage halves that. <code>minigraphrag</code>'s default <code>HashingEmbedder</code> uses 512 dimensions, which is why its stores are tiny.</p>
+
+<div class="callout warn">
+  <span class="callout-title">The embedding model is part of the index</span>
+  <p>Vectors from two different models are not comparable, even at the same dimension. <code>save_index</code> writes the embedder name into <code>config.json</code>, and <code>load_index</code> rebuilds the same embedder from it. If you change models, re-embed every store. A query embedded with model B against vectors from model A returns confident nonsense, not an error.</p>
+</div>
+
+<h2>Choosing a storage backend</h2>
+<p>Retrieval needs a handful of primitive operations, whatever the algorithm on top:</p>
+<ol>
+  <li><strong>Vector top-k</strong>: nearest entities, relationships, chunks or reports to a query vector.</li>
+  <li><strong>Neighbor expansion</strong>: the edges of a set of nodes, sometimes to two or three hops.</li>
+  <li><strong>Lookup by id</strong>: the text units, claims and reports for a set of ids.</li>
+  <li><strong>Upsert</strong>: add or replace rows when documents change (<a href="27-incremental-temporal.html">Chapter 27</a>).</li>
+</ol>
+<p>The backends below differ in how well they do each, and in how many systems you have to run to get all four.</p>
+
+<table>
+  <thead><tr><th>Option</th><th>Vector top-k</th><th>Multi-hop traversal</th><th>Updates and concurrency</th><th>Operations</th><th>Good fit</th></tr></thead>
+  <tbody>
+    <tr><td>Files (JSON or parquet) + NetworkX in memory</td><td>Brute force with numpy; exact and fast to roughly 10<sup>5</sup> rows; add FAISS or LanceDB beyond</td><td>Python loops over adjacency dicts; fine for small hops</td><td>Rewrite files; one writer; reload to see changes</td><td>None: a folder</td><td>Learning, research, CI, corpora that fit in RAM, read-only serving</td></tr>
+    <tr><td>Neo4j with vector indexes</td><td>Native HNSW indexes on node and relationship properties</td><td>Excellent: variable-length patterns and graph algorithms</td><td>ACID transactions, MERGE for idempotent upserts</td><td>One more database to run; Cypher skills</td><td>Graph-heavy retrieval, Text2Cypher (<a href="20-text2cypher.html">Ch. 20</a>), path queries, many concurrent users</td></tr>
+    <tr><td>Postgres + pgvector + recursive CTEs</td><td>HNSW or IVFFlat indexes; filters in the same SQL</td><td>Recursive CTEs: fine for 2 to 3 hops with indexed edge columns, clumsy beyond</td><td>ACID; joins with your existing app tables and permissions</td><td>Usually already running</td><td>Teams already on Postgres, access control joined to data (<a href="29-production-ops.html">Ch. 29</a>)</td></tr>
+    <tr><td>Postgres + Apache AGE (+ pgvector)</td><td>pgvector alongside</td><td>openCypher inside SQL via <code>cypher()</code></td><td>ACID</td><td>Extension to install and upgrade; smaller community</td><td>Cypher on Postgres without a second database</td></tr>
+    <tr><td>Dedicated vector DB + graph DB</td><td>Best-in-class ANN, filtering, sharding</td><td>Best-in-class in the graph DB</td><td>Two systems to keep consistent; no cross-store transaction</td><td>Highest</td><td>Very large corpora, separate teams owning search and graph</td></tr>
+  </tbody>
+</table>
+
+<p>A useful rule: stay with files and NetworkX until one of three things happens: the graph no longer fits comfortably in memory, several processes need to write, or you need queries that are painful to hand-code (variable-length paths, graph algorithms at query time). LightRAG's documentation makes the same point about its own defaults: its file-backed stores are meant for testing, and it recommends PostgreSQL for production.</p>
+
+<h3>Loading the Kestrel index into Neo4j</h3>
+<p>A good loader has three properties. It declares uniqueness constraints first, so duplicates are impossible and <code>MERGE</code> lookups hit an index. It uses <code>MERGE</code> on the key and <code>SET</code> for everything else, so running it twice changes nothing. And it sends rows in batches through <code>UNWIND $rows</code> with parameters, never by pasting values into query strings.</p>
+
+<pre data-file="neo4j/schema.cypher"><code class="language-cypher">// Uniqueness constraints also create the lookup indexes MERGE needs.
+CREATE CONSTRAINT document_id IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE;
+CREATE CONSTRAINT chunk_id IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE;
+CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE;
+CREATE CONSTRAINT community_id IF NOT EXISTS FOR (c:Community) REQUIRE c.id IS UNIQUE;
+
+// Vector indexes: dimensions must match the embedder (512 for HashingEmbedder).
+CREATE VECTOR INDEX entity_embedding IF NOT EXISTS
+FOR (e:Entity) ON e.embedding
+OPTIONS { indexConfig: {
+  `vector.dimensions`: 512,
+  `vector.similarity_function`: 'cosine'
+}};
+
+CREATE VECTOR INDEX related_embedding IF NOT EXISTS
+FOR ()-[r:RELATED]-() ON (r.embedding)
+OPTIONS { indexConfig: {
+  `vector.dimensions`: 512,
+  `vector.similarity_function`: 'cosine'
+}};</code></pre>
+
+<p><code>minigraphrag</code> already ships a minimal exporter, <code>graph_to_cypher_statements(G)</code> in <code>search/text2cypher.py</code>, which emits one <code>MERGE</code> statement per node and edge as text. That is handy for pasting into Neo4j Browser. For a real load you want parameters and batches, plus the lexical and community layers. The script below does that using the official <code>neo4j</code> Python driver (<code>pip install minigraphrag[neo4j]</code>).</p>
+
+<pre data-file="examples/load_neo4j.py"><code class="language-python">from neo4j import GraphDatabase
+from minigraphrag.indexer import load_index
+
+CHUNKS = """
+UNWIND $rows AS row
+MERGE (d:Document {id: row.doc_id})
+MERGE (c:Chunk {id: row.id})
+SET c.text = row.text, c.n_tokens = row.n_tokens, c.embedding = row.embedding
+MERGE (d)-[:HAS_CHUNK]-&gt;(c)
+"""
+
+ENTITIES = """
+UNWIND $rows AS row
+MERGE (e:Entity {name: row.name})
+SET e.human_id = row.human_id, e.type = row.type, e.description = row.description,
+    e.degree = row.degree, e.embedding = row.embedding
+WITH e, row
+UNWIND row.source_ids AS uid
+MATCH (c:Chunk {id: uid})
+MERGE (c)-[:MENTIONS]-&gt;(e)
+"""
+
+RELATIONSHIPS = """
+UNWIND $rows AS row
+MATCH (a:Entity {name: row.source}), (b:Entity {name: row.target})
+MERGE (a)-[r:RELATED]-(b)
+SET r.human_id = row.human_id, r.description = row.description,
+    r.weight = row.weight, r.source_ids = row.source_ids, r.embedding = row.embedding
+"""
+
+COMMUNITIES = """
+UNWIND $rows AS row
+MERGE (c:Community {id: row.id})
+SET c.level = row.level, c.title = row.title, c.summary = row.summary,
+    c.full_content = row.full_content, c.rating = row.rating
+WITH c, row
+UNWIND row.nodes AS name
+MATCH (e:Entity {name: name})
+MERGE (e)-[:IN_COMMUNITY]-&gt;(c)
+"""
+
+PARENTS = """
+UNWIND $rows AS row
+MATCH (child:Community {id: row.id}), (parent:Community {id: row.parent})
+MERGE (child)-[:PARENT]-&gt;(parent)
+"""
+
+
+def batched(rows, size=500):
+    for i in range(0, len(rows), size):
+        yield rows[i:i + size]
+
+
+def export_to_neo4j(index_dir, uri="bolt://localhost:7687", auth=("neo4j", "password")):
+    index = load_index(index_dir)
+    G = index.graph
+    ent_vec = dict(zip(index.entity_store.ids, index.entity_store.matrix.tolist()))
+    rel_vec = dict(zip(index.relationship_store.ids, index.relationship_store.matrix.tolist()))
+    unit_vec = dict(zip(index.text_unit_store.ids, index.text_unit_store.matrix.tolist()))
+    reports = {r.community_id: r for r in index.reports}
+
+    chunks = [{**u.to_dict(), "embedding": unit_vec.get(u.id)} for u in index.text_units.values()]
+    entities = [{"name": n, "human_id": d["human_id"], "type": d.get("type", ""),
+                 "description": d.get("description", ""), "degree": d.get("degree", 0),
+                 "source_ids": d.get("source_ids", []), "embedding": ent_vec.get(n)}
+                for n, d in G.nodes(data=True)]
+    relationships = [{"source": u, "target": v, "human_id": d["human_id"],
+                      "description": d.get("description", ""), "weight": d.get("weight", 1.0),
+                      "source_ids": d.get("source_ids", []), "embedding": rel_vec.get(str(d["human_id"]))}
+                     for u, v, d in G.edges(data=True)]
+    communities = []
+    for c in index.communities:
+        r = reports.get(c.id)
+        communities.append({"id": c.id, "level": c.level, "parent": c.parent, "nodes": c.nodes,
+                            "title": r.title if r else "", "summary": r.summary if r else "",
+                            "full_content": r.full_content if r else "", "rating": r.rating if r else 0.0})
+
+    with GraphDatabase.driver(uri, auth=auth) as driver:
+        # Order matters: chunks before MENTIONS, entities before RELATED and IN_COMMUNITY.
+        for query, rows in [(CHUNKS, chunks), (ENTITIES, entities), (RELATIONSHIPS, relationships),
+                            (COMMUNITIES, communities),
+                            (PARENTS, [c for c in communities if c["parent"] is not None])]:
+            for batch in batched(rows):
+                driver.execute_query(query, rows=batch)</code></pre>
+
+<p>Setting a property to a list of floats is enough for the vector index to pick it up. Neo4j also has the procedure <code>db.create.setNodeVectorProperty</code>, which checks that the value is a valid vector before storing it, and Neo4j 2025.10 added a native <code>VECTOR</code> property type under Cypher 25; any of these works with the index above.</p>
+
+<p>Now local search's first two steps are one query. Find the five entities nearest the query vector, then fetch their relationships and the chunks that mention them:</p>
+
+<pre data-file="neo4j/local_seed.cypher"><code class="language-cypher">CALL db.index.vector.queryNodes('entity_embedding', 5, $query_vector)
+YIELD node AS e, score
+OPTIONAL MATCH (e)-[r:RELATED]-(nbr:Entity)
+WITH e, score, r, nbr ORDER BY r.weight DESC
+WITH e, score, collect({id: r.human_id, other: nbr.name, description: r.description})[..10] AS rels
+OPTIONAL MATCH (c:Chunk)-[:MENTIONS]-&gt;(e)
+RETURN e.human_id AS id, e.name AS entity, score, rels, collect(c.id) AS chunk_ids
+ORDER BY score DESC</code></pre>
+
+<div class="callout note">
+  <span class="callout-title">The SEARCH subclause in newer Neo4j</span>
+  <p>Neo4j 2026.01 introduced a Cypher 25 <code>SEARCH</code> subclause for <code>MATCH</code>, and the documentation marks <code>db.index.vector.queryNodes</code> as deprecated from 2026.04, though it still runs. The equivalent seed step is <code>MATCH (e:Entity) SEARCH e IN (VECTOR INDEX entity_embedding FOR $query_vector LIMIT 5) SCORE AS score</code>. Check which Cypher version your server defaults to before choosing.</p>
+</div>
+
+<h3>Two hops in Postgres</h3>
+<p>If you already run Postgres, the same index fits in three tables. <code>pgvector</code> adds a <code>vector(n)</code> column type, a cosine distance operator <code>&lt;=&gt;</code> and HNSW indexes. Traversal is a recursive common table expression.</p>
+
+<pre data-file="postgres/schema.sql"><code class="language-sql">CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE text_units (
+  id        text PRIMARY KEY,
+  doc_id    text NOT NULL,
+  text      text NOT NULL,
+  n_tokens  int,
+  embedding vector(512)
+);
+
+CREATE TABLE entities (
+  name        text PRIMARY KEY,
+  human_id    int UNIQUE,
+  type        text,
+  description text,
+  degree      int,
+  source_ids  text[],
+  embedding   vector(512)
+);
+
+CREATE TABLE relationships (
+  human_id    int PRIMARY KEY,
+  source      text NOT NULL REFERENCES entities(name),
+  target      text NOT NULL REFERENCES entities(name),
+  description text,
+  weight      real,
+  source_ids  text[],
+  embedding   vector(512)
+);
+CREATE INDEX ON relationships (source);
+CREATE INDEX ON relationships (target);
+CREATE INDEX ON entities USING hnsw (embedding vector_cosine_ops);
+
+-- The graph is undirected: expose each edge in both directions once.
+CREATE VIEW edges AS
+  SELECT source AS a, target AS b, human_id, weight FROM relationships
+  UNION ALL
+  SELECT target AS a, source AS b, human_id, weight FROM relationships;</code></pre>
+
+<pre data-file="postgres/two_hops.sql"><code class="language-sql">-- Every entity within two hops of PROJECT TERN, with its distance.
+WITH RECURSIVE hops(name, depth, path) AS (
+    SELECT 'PROJECT TERN'::text, 0, ARRAY['PROJECT TERN']::text[]
+  UNION ALL
+    SELECT e.b, h.depth + 1, h.path || e.b
+    FROM hops h
+    JOIN edges e ON e.a = h.name
+    WHERE h.depth &lt; 2
+      AND NOT e.b = ANY(h.path)          -- no cycles
+)
+SELECT name, min(depth) AS distance
+FROM hops
+GROUP BY name
+ORDER BY distance, name;</code></pre>
+
+<p>On the Kestrel graph (17 entities, 31 relationships) this returns 16 rows: Project Tern itself, five neighbors at distance 1 (Deepcast, Jonas Vehl, Kestrel Labs, Priya Nair, Project Sentinel) and ten entities at distance 2. Only Dr. Ana Ruiz is missing. Two hops from one project touched almost the whole graph, because one of its neighbors is the hub Kestrel Labs with 11 edges. Keep that in mind for <a href="14-local-search.html">local search</a>: raw hop count is a poor relevance signal once a hub is involved.</p>
+
+<p>The recursive CTE enumerates <em>paths</em>, not nodes, so its intermediate result grows roughly as the product of degrees along the way. That is fine at two hops with indexed <code>a</code> columns and a <code>LIMIT</code>; at four hops on a real graph it can explode. Vector search and traversal can share one statement, which is the main ergonomic win of keeping both in Postgres:</p>
+
+<pre data-file="postgres/seed_and_expand.sql"><code class="language-sql">WITH seeds AS (
+  SELECT name, 1 - (embedding &lt;=&gt; $1) AS similarity
+  FROM entities
+  ORDER BY embedding &lt;=&gt; $1
+  LIMIT 5
+)
+SELECT s.name AS seed, s.similarity, r.human_id, r.source, r.target, r.description, r.weight
+FROM seeds s
+JOIN relationships r ON r.source = s.name OR r.target = s.name
+ORDER BY s.similarity DESC, r.weight DESC;</code></pre>
+
+<p>Apache AGE takes the other route: it adds a graph catalog to Postgres and lets you run openCypher inside SQL. After <code>CREATE EXTENSION age;</code> and <code>SELECT create_graph('kestrel');</code>, each session runs <code>LOAD 'age';</code> and puts <code>ag_catalog</code> on the search path, and a two-hop query looks like this:</p>
+
+<pre data-file="postgres/age_two_hops.sql"><code class="language-sql">LOAD 'age';
+SET search_path = ag_catalog, "$user", public;
+
+SELECT * FROM cypher('kestrel', $$
+  MATCH (t:Entity {name: 'PROJECT TERN'})-[:RELATED*1..2]-(other:Entity)
+  RETURN DISTINCT other.name
+$$) AS (name agtype);</code></pre>
+
+<h2>The indexing pipeline as a cached DAG</h2>
+<p>Indexing is a directed acyclic graph of steps: each step reads some artifacts and writes one. Seeing it as a DAG answers two practical questions: what can run in parallel, and what must re-run when something changes.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "The full indexing pipeline",
+  "subtitle": "What build_index does, in order",
+  "perRow": 4,
+  "stages": [
+    {"label": "Load documents", "detail": "<code>load_documents(docs_dir)</code> reads every <code>*.md</code> file into <code>{doc_id: text}</code>. The doc id is the file stem, so renaming a file changes every downstream id."},
+    {"label": "Chunk", "detail": "<code>chunk_documents</code> cuts each document into text units of 300 words with 50 words of overlap by default. Kestrel's 12 documents become 24 text units. No LLM calls."},
+    {"label": "Extract entities", "detail": "<code>extract_from_unit</code> per text unit, with gleaning. Calls: units × (1 + gleaning rounds), plus loop checks. This is usually the largest cost in the whole index."},
+    {"label": "Extract claims", "detail": "<code>extract_claims</code> per text unit: one call each. Independent of entity extraction, so the two can run in parallel."},
+    {"label": "Resolve aliases", "detail": "<code>resolve_entities</code> maps raw names like OKAFOR to canonical ones. Pure Python in <code>minigraphrag</code>, so cheap to re-run while you tune thresholds."},
+    {"label": "Build graph", "detail": "<code>build_graph</code> merges mentions, sums weights and summarizes multi-description nodes and edges with the LLM. Adds degree, rank and <code>human_id</code>."},
+    {"label": "Communities", "detail": "<code>hierarchical_communities</code>: Leiden if graspologic is installed, else recursive Louvain. Seeded, so the same graph gives the same partition."},
+    {"label": "Reports", "detail": "<code>generate_all_reports</code>, deepest level first, one LLM call per community with at least two members."},
+    {"label": "Embed", "detail": "Four stores: entities, relationships, text units, reports. Text units could be embedded right after chunking; the other three wait for their rows."},
+    {"label": "Save artifacts", "detail": "<code>save_index</code> writes JSON tables, GraphML, the vector stores and <code>config.json</code>. <code>load_index</code> reverses it without any LLM calls."}
+  ]
+}
+</script>
+</div>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 370" role="img" aria-labelledby="dag-title">
+      <title id="dag-title">Indexing steps as a DAG with the artifact each step writes; dashed arrows are dependencies that only carry names</title>
+      <defs>
+        <marker id="dag-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box" x="10" y="20" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="22" y="40">Load docs</text>
+      <text class="d-text small mono" x="22" y="58">doc_id, text</text>
+      <rect class="d-box" x="145" y="20" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="157" y="40">Chunk</text>
+      <text class="d-text small mono" x="157" y="58">text_units</text>
+      <rect class="d-box edge" x="280" y="20" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="292" y="40">Extract E/R</text>
+      <text class="d-text small mono" x="292" y="58">raw mentions</text>
+      <rect class="d-box" x="415" y="20" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="427" y="40">Resolve</text>
+      <text class="d-text small mono" x="427" y="58">name_map</text>
+      <rect class="d-box edge" x="550" y="20" width="120" height="48" rx="6"/>
+      <text class="d-text bold" x="562" y="40">Build graph</text>
+      <text class="d-text small mono" x="562" y="58">entities, rels</text>
+
+      <rect class="d-box edge" x="280" y="130" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="292" y="150">Extract claims</text>
+      <text class="d-text small mono" x="292" y="168">claims</text>
+      <rect class="d-box node" x="145" y="130" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="157" y="150">Embed chunks</text>
+      <text class="d-text small mono" x="157" y="168">text_unit_emb</text>
+      <rect class="d-box node" x="415" y="130" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="427" y="150">Embed E and R</text>
+      <text class="d-text small mono" x="427" y="168">entity/rel_emb</text>
+      <rect class="d-box comm" x="550" y="130" width="120" height="48" rx="6"/>
+      <text class="d-text bold" x="562" y="150">Communities</text>
+      <text class="d-text small mono" x="562" y="168">communities</text>
+
+      <rect class="d-box edge" x="550" y="240" width="120" height="48" rx="6"/>
+      <text class="d-text bold" x="562" y="260">Reports</text>
+      <text class="d-text small mono" x="562" y="278">reports</text>
+      <rect class="d-box node" x="415" y="240" width="112" height="48" rx="6"/>
+      <text class="d-text bold" x="427" y="260">Embed reports</text>
+      <text class="d-text small mono" x="427" y="278">report_emb</text>
+
+      <line class="d-line" x1="122" y1="44" x2="143" y2="44" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="257" y1="44" x2="278" y2="44" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="392" y1="44" x2="413" y2="44" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="527" y1="44" x2="548" y2="44" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="201" y1="68" x2="201" y2="128" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="240" y1="68" x2="300" y2="128" marker-end="url(#dag-arrow)"/>
+      <line class="d-line dash" x1="392" y1="140" x2="440" y2="70" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="610" y1="68" x2="610" y2="128" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="570" y1="68" x2="490" y2="128" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="610" y1="178" x2="610" y2="238" marker-end="url(#dag-arrow)"/>
+      <line class="d-line" x1="550" y1="264" x2="529" y2="264" marker-end="url(#dag-arrow)"/>
+
+      <rect class="d-box ghost" x="10" y="310" width="660" height="50" rx="6"/>
+      <text class="d-text small" x="22" y="330">Box color: orange = LLM calls (cache the responses), teal = embedding calls, purple = deterministic but seeded.</text>
+      <text class="d-text small" x="22" y="348">Cache key per step = hash(step name, step version, relevant config, hashes of its input artifacts).</text>
+      <text class="d-text small" x="22" y="228">Change chunk_size: everything</text>
+      <text class="d-text small" x="22" y="244">below Chunk re-runs.</text>
+      <text class="d-text small" x="22" y="266">Change the report prompt: only</text>
+      <text class="d-text small" x="22" y="282">Reports and Embed reports re-run.</text>
+    </svg>
+  </div>
+  <figcaption>The indexing DAG. Claims and entity extraction both read text units and can run side by side; chunk embeddings need nothing but chunks. The dashed arrow is a light dependency: claims only need the alias map to rename their subjects. A change invalidates exactly the steps reachable from it.</figcaption>
+</figure>
+
+<h3>Two layers of caching</h3>
+<p>The first layer caches <strong>LLM responses</strong>. <code>CachedLLM</code> wraps any client and keys each response by a SHA-256 hash of the model name, system prompt, prompt and JSON flag. Because extraction runs at temperature 0 and the prompt contains the chunk text, re-running the pipeline after an unrelated code change makes zero paid calls. You get it from the CLI with <code>--cache-dir</code>:</p>
+
+<pre data-file="terminal"><code class="language-bash">python -m minigraphrag index --input data/corpus --output .index --llm openai --cache-dir .cache/llm
+# edit the community report prompt, then re-run: extraction and summaries are cache hits,
+# only the report calls go to the API
+python -m minigraphrag index --input data/corpus --output .index --llm openai --cache-dir .cache/llm</code></pre>
+
+<p>The second layer caches <strong>step outputs</strong>. A response cache still re-runs the Python around every call: parsing, resolution, graph building. For large corpora you also want to skip a whole step when its inputs have not changed. The recipe is the same one build systems use: hash the inputs, look for an artifact stored under that hash, and only compute on a miss. Exercise 13.5 builds this for <code>minigraphrag</code>.</p>
+
+<table>
+  <thead><tr><th>Step</th><th>Inputs that belong in its cache key</th><th>LLM or embedding calls</th></tr></thead>
+  <tbody>
+    <tr><td>Chunk</td><td>document text hashes, <code>chunk_size</code>, <code>chunk_overlap</code>, tokenizer</td><td>none</td></tr>
+    <tr><td>Extract entities</td><td>text unit hash, entity types, <code>max_gleanings</code>, prompt version, model</td><td>units × (1 + rounds) + loop checks</td></tr>
+    <tr><td>Extract claims</td><td>text unit hash, claim description, prompt version, model</td><td>one per unit</td></tr>
+    <tr><td>Resolve</td><td>hash of all raw entity names and types, <code>alias_threshold</code></td><td>none (or embeddings if enabled)</td></tr>
+    <tr><td>Build graph</td><td>resolved mentions, <code>summarize_max_tokens</code>, summary prompt version</td><td>one per node or edge with several descriptions</td></tr>
+    <tr><td>Communities</td><td>graph structure and weights, <code>max_cluster_size</code>, <code>seed</code></td><td>none</td></tr>
+    <tr><td>Reports</td><td>community membership plus member descriptions, <code>report_max_tokens</code>, prompt version</td><td>one per community</td></tr>
+    <tr><td>Embed</td><td>the exact embedded strings, embedder name</td><td>one batch per store</td></tr>
+  </tbody>
+</table>
+
+<h3>Idempotent ids</h3>
+<p>Caching only works if the same input produces the same ids. Otherwise every re-run looks like new data, and loaders that <code>MERGE</code> on id create duplicates. There are three kinds of id in play, and they behave differently:</p>
+<ul>
+  <li><strong>Content-derived ids</strong> are stable by construction. GraphRAG derives document and text unit ids from a SHA-512 hash of their content. Change one character and you get a new id, which is exactly what a cache wants.</li>
+  <li><strong>Position-derived ids</strong> are stable until something shifts. <code>minigraphrag</code> names chunks <code>{doc_id}-{i:03d}</code>. Readable, and stable if a document is unchanged, but inserting a paragraph near the top renumbers every later chunk of that document.</li>
+  <li><strong>Run-derived ids</strong> are not stable at all. GraphRAG assigns entities, relationships and communities fresh UUIDs on each run, and <code>minigraphrag</code>'s <code>human_id</code> is an entity's position in sorted order, so adding one entity named “AARDVARK” renumbers every other entity.</li>
+</ul>
+<p>For entities, the natural stable key is the canonical name after resolution (that is what <code>minigraphrag</code> uses as the node key and what the Neo4j loader merges on). For relationships, use the sorted pair of endpoint names. Keep <code>human_id</code> for prompts only, and regenerate it at load time rather than storing it as a foreign key anywhere.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Resolution decisions change ids</span>
+  <p>If a new document makes resolution merge “SENTINEL” into “PROJECT SENTINEL”, the key for that entity changes. A name-keyed store needs an explicit merge operation: re-point edges and <code>MENTIONS</code> from the old node to the survivor, then delete the old node. <a href="27-incremental-temporal.html">Chapter 27</a> builds this. Log every merge so you can undo a bad one.</p>
+</div>
+
+<h3>Reading the index back</h3>
+<p><code>load_index</code> is the other half of the contract. It rebuilds the NetworkX graph from the entity and relationship tables, the dataclasses from their JSON, and the four vector stores from disk, and it makes no model calls except to construct the embedder named in <code>config.json</code>:</p>
+
+<pre data-file="minigraphrag/indexer.py"><code class="language-python">def load_index(out_dir: str | Path, embedder: Embedder | None = None) -&gt; Index:
+    """Load artifacts written by `build_index`. The embedder is rebuilt from config unless given."""
+    out = Path(out_dir)
+    load = lambda name: json.loads((out / name).read_text())  # noqa: E731
+    cfg = load("config.json")
+    embedder_name = cfg.pop("embedder", "hashing")
+    config = IndexConfig(**{k: v for k, v in cfg.items() if k in IndexConfig.__dataclass_fields__})
+    embedder = embedder or get_embedder(embedder_name)
+
+    G = nx.Graph()
+    for e in load("entities.json"):
+        G.add_node(e.pop("name"), **e)
+    for r in load("relationships.json"):
+        G.add_edge(r.pop("source"), r.pop("target"), **r)
+
+    communities = [Community(**{**c, "edges": [tuple(e) for e in c["edges"]]}) for c in load("communities.json")]
+    reports = [CommunityReport(**{k: v for k, v in r.items() if k != "full_content"})
+               for r in load("community_reports.json")]
+    claims = [Claim(**c) for c in load("claims.json")]
+    units = {u["id"]: TextUnit(**u) for u in load("text_units.json")}
+    stores = {name: VectorStore.load(out / f"{name}_embeddings")
+              for name in ("entity", "relationship", "text_unit", "report")}
+    return Index(G, units, communities, reports, claims, stores["entity"], stores["relationship"],
+                 stores["text_unit"], stores["report"], embedder, config)</code></pre>
+
+<p>The returned <code>Index</code> is what every search function in Part 3 takes as its first argument. It also has three helpers you will use constantly: <code>index.report(community_id)</code>, <code>index.community(community_id)</code> and <code>index.communities_of(entity)</code>.</p>
+
+<pre data-file="terminal"><code class="language-python">from minigraphrag.indexer import build_index, load_index
+from minigraphrag.llm import MockLLM
+
+index = build_index("data/corpus", ".index", MockLLM(), log=print)
+# chunked 12 documents into 24 text units
+# ... graph, communities and reports lines ...
+again = load_index(".index")
+assert set(again.graph.nodes) == set(index.graph.nodes)
+print(again.communities_of("PROJECT TERN"))</code></pre>
+
+<h2>Trade-offs and failure modes</h2>
+<table>
+  <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+  <tbody>
+    <tr><td>Duplicate nodes after a second load into Neo4j</td><td><code>CREATE</code> instead of <code>MERGE</code>, or merging on a run-derived id</td><td>Constraint on the natural key; <code>MERGE</code> on that key only; <code>SET</code> the rest</td></tr>
+    <tr><td><code>MERGE</code> gets slower as the graph grows</td><td>No index behind the merge key</td><td>Create uniqueness constraints before loading</td></tr>
+    <tr><td>Local search returns unrelated entities after an upgrade</td><td>Query and stored vectors from different embedding models</td><td>Record the embedder in the index; refuse to load on mismatch; re-embed</td></tr>
+    <tr><td>Citations point at the wrong row after re-indexing</td><td>Position-based <code>human_id</code> shifted</td><td>Store answers with stable ids; map human ids only inside one prompt</td></tr>
+    <tr><td>Re-index costs as much as the first run</td><td>No response cache, or prompts contain run-specific text such as timestamps</td><td><code>CachedLLM</code>; keep prompts deterministic</td></tr>
+    <tr><td>Recursive CTE times out</td><td>Path explosion through hubs; missing edge index</td><td>Index edge columns; cap depth; exclude hub nodes or filter by weight inside the recursion</td></tr>
+    <tr><td>Vector store and graph disagree</td><td>Two systems updated separately, one write failed</td><td>Write graph first, vectors second, with a reconciliation job keyed on ids</td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 13.1 <span class="level">Warm-up</span></h4>
+  <p>Your company corpus indexes to 25,000 entities, 60,000 relationships, 80,000 text units and 2,000 community reports. You plan to embed entities, text units and reports (GraphRAG's defaults) with a 1,536-dimension model, stored as float32. (a) How much raw vector memory is that? (b) How much does adding relationship embeddings cost? (c) What if you store everything as half-precision (float16) instead?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Each float32 vector takes 1,536 × 4 = 6,144 bytes.</p>
+    <p>(a) 25,000 + 80,000 + 2,000 = 107,000 vectors. 107,000 × 6,144 = 657,408,000 bytes ≈ 627 MiB (about 0.66 GB).</p>
+    <p>(b) Relationships add 60,000 × 6,144 = 368,640,000 bytes ≈ 352 MiB, a 56% increase, bringing the total to 167,000 vectors ≈ 979 MiB. Worth it only if a retrieval method (LightRAG's global mode, Chapter 16) actually queries them.</p>
+    <p>(c) Half precision halves each vector to 3,072 bytes: 167,000 × 3,072 ≈ 489 MiB for all four stores. The HNSW graph structure is extra in every case and depends on the <code>m</code> parameter, so budget headroom beyond these raw numbers.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 13.2 <span class="level">Core</span></h4>
+  <p>Canonical question 3 asks “What connects Priya Nair to Deepcast?” Write a Postgres recursive CTE over the <code>edges</code> view that returns every simple path of at most three hops from <code>PRIYA NAIR</code> to <code>DEEPCAST</code>, shortest first. Then, by hand on the Kestrel graph, list the two-hop paths it returns. Which one actually answers the question?</p>
+  <details class="hint"><summary>Hint</summary><p>Carry the path array in the recursion, stop expanding once you reach the target or depth 3, and filter the final rows on the last element.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-sql">WITH RECURSIVE walk(name, depth, path) AS (
+    SELECT 'PRIYA NAIR'::text, 0, ARRAY['PRIYA NAIR']::text[]
+  UNION ALL
+    SELECT e.b, w.depth + 1, w.path || e.b
+    FROM walk w
+    JOIN edges e ON e.a = w.name
+    WHERE w.depth &lt; 3
+      AND w.name &lt;&gt; 'DEEPCAST'           -- do not walk past the target
+      AND NOT e.b = ANY(w.path)
+)
+SELECT depth AS hops, array_to_string(path, ' -&gt; ') AS path
+FROM walk
+WHERE name = 'DEEPCAST'
+ORDER BY hops, path;</code></pre>
+    <p>The Kestrel graph has three two-hop paths:</p>
+    <ul>
+      <li>PRIYA NAIR → KESTREL LABS → DEEPCAST (she works at Kestrel, which Deepcast supplied)</li>
+      <li>PRIYA NAIR → MARLOW DYNAMICS → DEEPCAST (she formerly worked at Marlow, which acquired Deepcast)</li>
+      <li>PRIYA NAIR → PROJECT TERN → DEEPCAST (she co-leads Tern, which replaces Deepcast sonar)</li>
+    </ul>
+    <p>and six three-hop paths (for example PRIYA NAIR → PROJECT SENTINEL → PROJECT TERN → DEEPCAST). The canonical answer uses the Marlow and Tern paths together; the Kestrel path is true but generic, because it goes through the hub. A database gives you all paths; deciding which ones matter is a ranking problem, which is what Chapter 18 on path retrieval tackles.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 13.3 <span class="level">Core</span></h4>
+  <p>Make text unit and relationship ids idempotent. Write <code>stable_unit_id(doc_text, start, end)</code> and <code>stable_relationship_id(source, target)</code> so that (a) re-chunking an unchanged document gives identical ids, (b) inserting a paragraph at the top of a document changes the ids only of chunks whose text changed, and (c) the relationship id is the same whichever endpoint is listed first. Explain why (b) is only partly achievable with a fixed-size sliding window.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import hashlib
+
+def _h(s: str, n: int = 16) -&gt; str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()[:n]
+
+def stable_unit_id(doc_text: str, start: int, end: int) -&gt; str:
+    # Hash only the chunk's own text, not its position or document offset.
+    return "tu-" + _h(doc_text[start:end])
+
+def stable_relationship_id(source: str, target: str) -&gt; str:
+    a, b = sorted((source, target))
+    return "rel-" + _h(a + "␟" + b)   # a separator that never occurs in names
+
+assert stable_relationship_id("DEEPCAST", "MARLOW DYNAMICS") == stable_relationship_id("MARLOW DYNAMICS", "DEEPCAST")</code></pre>
+    <p>(a) holds because the same text gives the same hash. (c) holds because the pair is sorted before hashing, and the separator prevents <code>("AB", "C")</code> colliding with <code>("A", "BC")</code>.</p>
+    <p>(b) is only partly achievable because a fixed word window is anchored to the start of the document. Inserting 40 words at the top shifts every window boundary by 40 words, so every chunk's text changes and every hash changes, even though most of the content is the same. Two remedies: chunk on structure (headings and paragraphs, Chapter 7), so an insertion only changes the section it lands in; or use content-defined chunking, where boundaries are chosen where a rolling hash of the text hits a pattern, so boundaries move with the content instead of with the offset. Either way, identical text keeps its id, which is what makes the extraction cache hit.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 13.4 <span class="level">Core</span></h4>
+  <p>Load the Kestrel index into a local Neo4j with the loader from this chapter. Write the Cypher that checks (a) node counts per label, (b) that no two <code>RELATED</code> relationships connect the same pair of entities, and (c) that every entity is <code>MENTIONS</code>-linked to at least one chunk. Then run the loader a second time and explain why all counts stay the same.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-cypher">// (a) counts per label
+MATCH (n) UNWIND labels(n) AS label
+RETURN label, count(*) AS nodes ORDER BY label;
+
+// (b) duplicate edges between the same pair (either direction)
+MATCH (a:Entity)-[r:RELATED]-(b:Entity)
+WHERE elementId(a) &lt; elementId(b)
+WITH a, b, count(r) AS n WHERE n &gt; 1
+RETURN a.name, b.name, n;
+
+// (c) entities without provenance
+MATCH (e:Entity) WHERE NOT (:Chunk)-[:MENTIONS]-&gt;(e)
+RETURN e.name;</code></pre>
+    <p>For a clean index, (a) shows one <code>Document</code> per file, one <code>Chunk</code> per text unit, one <code>Entity</code> per node and one <code>Community</code> per community; (b) returns no rows; (c) returns no rows, unless extraction created entities only from relationship mentions, which <code>build_graph</code> allows and which leave <code>source_ids</code> empty. That is a real finding worth inspecting.</p>
+    <p>A second run is a no-op on counts because every write is a <code>MERGE</code> on a key protected by a uniqueness constraint (<code>Document.id</code>, <code>Chunk.id</code>, <code>Entity.name</code>, <code>Community.id</code>) and every relationship <code>MERGE</code> matches the existing pattern between the same two already-matched nodes. The undirected <code>MERGE (a)-[r:RELATED]-(b)</code> matches an existing edge in either direction, so it never adds a reverse copy. Properties are overwritten with <code>SET</code>, which is idempotent for identical values.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 13.5 <span class="level">Stretch</span></h4>
+  <p>Add a step-level cache to indexing. Write <code>cached_step(cache_dir, name, version, key_parts, compute)</code> that returns a stored JSON result when the hash of <code>(name, version, key_parts)</code> has been seen and otherwise calls <code>compute()</code> and stores the result. Wrap chunking, resolution and community detection with it. Then predict which of the three recompute when you change (i) <code>alias_threshold</code>, (ii) <code>chunk_overlap</code>, (iii) <code>seed</code>.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import hashlib, json
+from pathlib import Path
+
+def _digest(obj) -&gt; str:
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()
+
+def cached_step(cache_dir, name, version, key_parts, compute):
+    path = Path(cache_dir) / name / f"{_digest([name, version, key_parts])}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    result = compute()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result))
+    return result
+
+# usage inside a custom build function
+from minigraphrag.chunking import chunk_documents, TextUnit
+from minigraphrag.resolution import resolve_entities
+from minigraphrag.communities import hierarchical_communities, Community
+
+docs_key = {d: _digest(t) for d, t in docs.items()}
+units = [TextUnit(**u) for u in cached_step(
+    ".cache/steps", "chunk", 1, [docs_key, config.chunk_size, config.chunk_overlap],
+    lambda: [u.to_dict() for u in chunk_documents(docs, config.chunk_size, config.chunk_overlap)])]
+
+mentions_key = sorted((e.name, e.type) for e in raw_entities)
+name_map = cached_step(".cache/steps", "resolve", 1, [mentions_key, config.alias_threshold],
+                       lambda: resolve_entities(raw_entities, alias_threshold=config.alias_threshold))
+
+graph_key = sorted((u, v, d["weight"]) for u, v, d in G.edges(data=True))
+communities = [Community(**{**c, "edges": [tuple(e) for e in c["edges"]]}) for c in cached_step(
+    ".cache/steps", "communities", 1, [graph_key, config.max_cluster_size, config.seed],
+    lambda: [c.to_dict() for c in hierarchical_communities(G, config.max_cluster_size, config.seed)])]</code></pre>
+    <p>Predictions:</p>
+    <ul>
+      <li>(i) <code>alias_threshold</code>: chunking is a hit. Resolution misses. Communities recompute only if the new name map actually changes the graph; if no additional merges happen, the graph key is identical and it is a hit. That is the benefit of keying on the <em>output</em> of the previous step, not on the config of every earlier step.</li>
+      <li>(ii) <code>chunk_overlap</code>: chunking misses, units change, so extraction (through <code>CachedLLM</code>) misses for every changed chunk, raw mentions change, and resolution and communities almost certainly miss too.</li>
+      <li>(iii) <code>seed</code>: chunking and resolution hit; communities miss. Reports downstream then miss only for communities whose membership changed.</li>
+    </ul>
+    <p>Bump <code>version</code> whenever you change a step's code in a way that changes its output; the inputs alone cannot tell the cache that the function changed.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why do GraphRAG tables carry both a long <code>id</code> and a short <code>human_readable_id</code>?</p>
+  <ol>
+    <li>Parquet requires two key columns</li>
+    <li>The short id is a checksum of the long id</li>
+    <li data-correct>The long id is for joins and uniqueness; the short one is cheap for the LLM to cite and for people to check</li>
+    <li>The short id is used for vector search</li>
+  </ol>
+  <div class="explain">Prompts show <code>[Data: Relationships (16)]</code>-style ids. A small integer costs few tokens and is hard to mistype, while the long id keeps rows unique across runs and systems.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which text does <code>minigraphrag</code> embed for an entity, and what is the main reason?</p>
+  <ol>
+    <li data-correct><code>name: description</code>, so queries that describe an entity's role can match it even when they do not name it</li>
+    <li>Only the name, because descriptions change</li>
+    <li>The concatenated text of every chunk that mentions it</li>
+    <li>The community report of its community</li>
+  </ol>
+  <div class="explain">“Who designed the sonar array?” shares no words with JONAS VEHL but several with his description. Local search seeds rely on that.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">You change only the community report prompt and re-run indexing with a response cache. Which steps make new paid LLM calls?</p>
+  <ol>
+    <li>All of them, because the pipeline re-runs top to bottom</li>
+    <li>Extraction and reports</li>
+    <li>Description summarization and reports</li>
+    <li data-correct>Only report generation (and then report embeddings, which are embedding calls)</li>
+  </ol>
+  <div class="explain">Every other prompt is byte-identical, so its cache key is unchanged. Reports have new prompts and miss; their new text then changes what gets embedded for the report store.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A loader runs <code>MERGE (e:Entity {name: row.name, description: row.description})</code>. After the description summary changes, what happens on the next load?</p>
+  <ol>
+    <li>The existing node's description is updated</li>
+    <li data-correct>A second node with the same name is created, because MERGE matches on the whole pattern including description</li>
+    <li>Neo4j raises a syntax error</li>
+    <li>Nothing, because MERGE ignores properties</li>
+  </ol>
+  <div class="explain">MERGE matches the entire pattern. Put only the key in the pattern and set other properties with SET. A uniqueness constraint on <code>name</code> would turn this silent duplicate into a loud error, which is another reason to create constraints first.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A two-hop recursive CTE from PROJECT TERN returns 16 of the 17 Kestrel entities. What is the most useful conclusion?</p>
+  <ol>
+    <li>The CTE has a bug in its cycle check</li>
+    <li>Two hops is always the right radius for local search</li>
+    <li>Postgres cannot handle graphs</li>
+    <li data-correct>A hub (Kestrel Labs, degree 11) makes hop distance a weak relevance signal, so retrieval needs ranking as well as expansion</li>
+  </ol>
+  <div class="explain">Through the hub, two hops reaches almost everything. Local search ranks relationships and text units instead of taking whole neighborhoods, and HippoRAG uses PageRank-style scores for the same reason.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">When is files plus NetworkX in memory a reasonable production choice?</p>
+  <ol>
+    <li>Never; production requires a graph database</li>
+    <li data-correct>When the index fits in memory, is rebuilt in batch, and is served read-only</li>
+    <li>Only when you have no embeddings</li>
+    <li>When many users update the graph concurrently</li>
+  </ol>
+  <div class="explain">A read-only index reloaded after each batch build needs no transactions. Concurrent writers, graphs larger than memory, or complex query-time traversals are the signals to move to a database.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Why parquet in GraphRAG but JSON in minigraphrag?</summary>
+  <div><p>Parquet is columnar, typed and compressed, and pandas reads it quickly, which matters when an entity table has hundreds of thousands of rows with list columns. JSON is slower and larger but readable in any editor, which matters more when you are learning what each step produced. Converting is a few lines with pandas, so choose by audience: JSON for inspection, parquet for scale.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should entity descriptions live in the graph database or only in the vector store?</summary>
+  <div><p>In the graph, with the vector next to them if your database supports it. The description is what the LLM reads in the context tables, so you need it at query time anyway. Many vector databases can store it as metadata too, but then you have two copies to keep in sync. Store text once, where you read it from.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Do I need a graph database to use Cypher-style queries during development?</summary>
+  <div><p>No. For the Kestrel-sized graph, NetworkX functions such as <code>single_source_shortest_path_length</code> or <code>all_simple_paths</code> cover the same questions in a few lines. Load into Neo4j when you want to explore interactively in Neo4j Browser, practice Text2Cypher (Chapter 20), or test query plans before production.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should relationships be directed?</summary>
+  <div><p>Extraction produces a source and a target, but many relations are symmetric or were extracted in an arbitrary order (“Kestrel competes with Marlow”). <code>minigraphrag</code> and GraphRAG's community detection treat the graph as undirected, which makes neighbor expansion simpler. If you add typed relations such as ACQUIRED or CTO_OF, store direction, because “Marlow acquired Deepcast” is not symmetric; traversals can still ignore it with undirected patterns like <code>-[:RELATED]-</code>.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How big does a graph have to be before HNSW beats brute force?</summary>
+  <div><p>Brute-force cosine is one matrix multiplication; with numpy it stays fast into the tens or low hundreds of thousands of vectors per query on a laptop, and it is exact. Approximate indexes win when you have millions of vectors, many queries per second, or you need filtering and persistence from a database. Measure latency at your size before adding an index you have to tune.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: one index, two backends</h3>
+  <p>Prove that storage is swappable by serving the same Kestrel index from memory and from a database, with a parity test between them.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A small interface with three methods: <code>nearest_entities(vector, k)</code>, <code>neighbors(names, hops)</code> and <code>text_units(ids)</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An in-memory implementation over <code>load_index</code> and a Neo4j or Postgres implementation over the loaders from this chapter</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A parity test that runs all seven canonical questions' seed entities through both implementations and asserts identical neighbor sets</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An idempotency test: load twice, assert identical counts</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A timing table for each method on the Kestrel index and on a synthetic graph 100 times larger</span></li>
+  </ul>
+  <p><strong>Done when</strong> the parity and idempotency tests pass and you can say, with numbers, at what graph size the database implementation becomes faster than the in-memory one for two-hop expansion, or that it never does for your data.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>An index is a set of tables: documents, text units, entities, relationships, claims, communities, reports and embeddings, joined by ids and provenance lists.</li>
+    <li>Embed the text each retrieval method will compare against: entity name plus description, relationship descriptions if you search edges, chunk text, and report content.</li>
+    <li>Files plus NetworkX are enough until size, concurrent writes or query-time traversal push you to Neo4j or Postgres; pick the backend by the four primitives you need.</li>
+    <li>Treat indexing as a DAG. Cache LLM responses by prompt hash and step outputs by input hash so a change only re-runs what depends on it.</li>
+    <li>Stable, content-derived ids and MERGE on natural keys make re-runs and reloads idempotent; keep short ids for prompts only.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://microsoft.github.io/graphrag/index/outputs/">GraphRAG documentation: outputs</a>. <span class="venue">GraphRAG docs</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>. <span class="venue">GitHub</span></li>
+  <li>Neo4j. <a href="https://neo4j.com/docs/cypher-manual/current/indexes/semantic-indexes/vector-indexes/">Cypher manual: vector indexes</a> and <a href="https://neo4j.com/docs/cypher-manual/current/clauses/search/">the SEARCH subclause</a>. <span class="venue">Neo4j docs</span></li>
+  <li>Neo4j. <a href="https://github.com/neo4j/neo4j-graphrag-python">neo4j-graphrag-python</a>. <span class="venue">GitHub</span></li>
+  <li>pgvector contributors. <a href="https://github.com/pgvector/pgvector">pgvector: open-source vector similarity search for Postgres</a>. <span class="venue">GitHub</span></li>
+  <li>Apache Software Foundation. <a href="https://age.apache.org/age-manual/master/intro/overview.html">Apache AGE manual</a>. <span class="venue">Apache AGE docs</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a> (see its repository for storage backend options). <span class="venue">arXiv 2410.05779, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

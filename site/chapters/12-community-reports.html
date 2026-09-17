@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Community reports and hierarchical summaries | Graph RAG from Scratch</title>
+<meta name="description" content="Build report context from ranked entity and relationship tables within a token budget, generate structured community reports bottom-up through the hierarchy, and compare them with RAPTOR's summary trees.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="12-community-reports" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Community reports and hierarchical summaries</h1>
+  <p class="lede">A community is just a list of entities until someone explains what it is about. This chapter builds that explanation: ranked context tables that fit a token budget, a structured report prompt, bottom-up generation through the hierarchy, and the checks that keep reports specific and grounded.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Describe the parts of a GraphRAG community report and why pre-computed reports make global questions answerable</li>
+      <li>Build report context from entity, relationship and claim tables ranked by degree and trimmed to a token budget</li>
+      <li>Generate reports bottom-up, substituting sub-community reports when a community is too large to fit</li>
+      <li>Parse and validate report JSON, including its data references, and embed reports for retrieval</li>
+      <li>Compare community reports with RAPTOR's recursive summary tree and choose between them</li>
+      <li>Estimate report cost and recognize generic, hallucinated and stale reports</li>
+    </ul>
+  </div>
+</header>
+
+<h2>What a report is and why it exists</h2>
+<p>At the end of <a href="11-community-detection.html">Chapter 11</a> the Kestrel graph had a two-level hierarchy. Level 0 split it into “Kestrel business” and “reef and regulation”; level 1 split those into five tighter communities, including the supply-chain community C2 = {Deepcast, Marlow Dynamics, Priya Nair, Project Tern}. Canonical question 5, <em>“What risks does Kestrel Labs face?”</em>, cannot be answered from any single entity: the supply shock lives in C2, the dependency on regulation in the regulation community, the concentration on one reef and one partner in the reef science community.</p>
+<p>A <strong>community report</strong> is an LLM-written summary of one community, produced at indexing time. Global search (<a href="15-global-search.html">Chapter 15</a>) never reads the raw graph; it reads reports. The idea from the GraphRAG paper is a division of labor: pay once, offline, to summarize every part of the corpus at several granularities, so that a question about the whole corpus becomes a map-reduce over a few hundred summaries instead of an impossible read of millions of tokens.</p>
+
+<h3>Anatomy</h3>
+<p>Microsoft GraphRAG's report prompt asks for five things, returned as JSON. <code>minigraphrag</code> uses the same schema:</p>
+<table>
+  <thead><tr><th>Field</th><th>Content</th><th>Used by</th></tr></thead>
+  <tbody>
+    <tr><td>title</td><td>Short, specific name that includes representative entities</td><td>Human browsing, report lists, dynamic community selection</td></tr>
+    <tr><td>summary</td><td>Executive summary of the community's structure and key facts</td><td>Parent-level context when substituting sub-community reports</td></tr>
+    <tr><td>rating</td><td>Float 0 to 10: the “impact severity” or importance of the community</td><td>Ranking and filtering reports in global search</td></tr>
+    <tr><td>rating_explanation</td><td>One sentence justifying the rating</td><td>Auditing the rating</td></tr>
+    <tr><td>findings</td><td>5 to 10 insights, each with a short summary and a multi-paragraph explanation citing data references</td><td>The substance global search maps over</td></tr>
+  </tbody>
+</table>
+<p>The citation format is part of the contract: “Points supported by data should list their data references as [Data: &lt;dataset name&gt; (record ids)]”, with no more than five ids per reference (adding “+more” when there are more). The ids are the short human-readable ids of the rows in the context tables, which is why every entity and relationship gets a stable <code>human_id</code> in <code>add_rank_attributes</code>.</p>
+
+<h3>A realistic report for the supply-chain community</h3>
+<p>Here is the kind of report a capable model produces for C2 from the context shown in the next section. Entity ids: Deepcast 2, Marlow Dynamics 9, Priya Nair 13, Project Tern 15. Relationship ids: 5 (Deepcast–Marlow), 6 (Deepcast–Tern), 21 (Marlow–Nair), 27 (Nair–Tern).</p>
+
+<pre><code class="language-json">{
+  "title": "Deepcast, Marlow Dynamics and Project Tern: sonar supply shock",
+  "summary": "This community connects Kestrel Labs' former sonar supplier Deepcast, its new owner Marlow Dynamics, and Kestrel's response, Project Tern, through Priya Nair, who worked at Marlow Dynamics before co-leading Tern. Marlow Dynamics acquired Deepcast in April 2025 and stopped outside supply contracts, which removed the source of every sonar module in Kestrel's fleet. Project Tern is Kestrel's in-house replacement, scheduled to replace Deepcast sonar in all Sentinel drones by the end of 2026.",
+  "rating": 7.5,
+  "rating_explanation": "The loss of a single-source supplier to a competitor directly threatens Kestrel Labs' core product and growth, mitigated by an in-house replacement that is still in development.",
+  "findings": [
+    {
+      "summary": "Marlow Dynamics' acquisition of Deepcast ended outside supply",
+      "explanation": "Marlow Dynamics, a builder of defense-focused underwater vehicles, acquired sonar supplier Deepcast in April 2025 and reserved Deepcast's production for its internal programs [Data: Entities (9, 2); Relationships (5)]. Deepcast had supplied every Kestrel Labs sonar module since 2022, so the acquisition turned a routine supplier relationship into a supply shock [Data: Entities (2)]."
+    },
+    {
+      "summary": "Project Tern is Kestrel's direct response",
+      "explanation": "Project Tern, started in June 2025, is an in-house sonar module intended to replace Deepcast sonar in every Sentinel drone by the end of 2026 [Data: Entities (15); Relationships (6)]. Its success determines whether the Sentinel fleet can keep operating and grow once spare Deepcast modules run out."
+    },
+    {
+      "summary": "Priya Nair links the competitor and the response",
+      "explanation": "Priya Nair spent seven years at Marlow Dynamics before joining Kestrel Labs in 2023 [Data: Relationships (21)]. She co-leads Project Tern and, as CTO since March 2026, has made finishing it her priority [Data: Entities (13); Relationships (27)]. Her experience at Marlow Dynamics gives Kestrel insight into the competitor that now controls its former supplier."
+    },
+    {
+      "summary": "Marlow Dynamics is also a direct competitor",
+      "explanation": "Marlow Dynamics is starting to market smaller vehicles to civilian customers that Kestrel Labs serves [Data: Entities (9)]. The same company therefore controls a component Kestrel used to depend on and competes for Kestrel's customers, which compounds the risk."
+    },
+    {
+      "summary": "Execution risk remains until Tern is deployed",
+      "explanation": "The community's data describes Tern's goal and schedule, not its completion [Data: Entities (15)]. Until every drone runs a Tern module, Kestrel Labs relies on its remaining Deepcast units, so delays in Project Tern translate directly into operational risk."
+    }
+  ]
+}</code></pre>
+
+<p>Four things make this report useful. The title names entities and the situation, where a weak model writes “Technology Companies Community”. Every finding cites rows that exist in the context. The rating explanation says <em>why</em> the community matters. And the last finding stays inside the evidence: it says the data describes a plan, instead of inventing a delivery date. Contrast that with the offline <code>MockLLM</code>, which produces titles like “Priya Nair and Project Tern” and copies description sentences into findings. It is deterministic and good for tests, but it shows exactly what a “generic” report looks like.</p>
+
+<h2>Building the report context</h2>
+<p>The report prompt is only as good as the tables it receives. The context builder has one job: given a community and a token budget, choose the most informative rows and format them so the model can cite them.</p>
+
+<h3>Ranked tables</h3>
+<p>The rows come from the graph built in <a href="09-entity-resolution.html">Chapter 9</a>:</p>
+<ul>
+  <li><strong>Entities</strong>: id, name, type, summarized description, degree. Ranked by degree, because hubs participate in the most relationships and usually carry the most information.</li>
+  <li><strong>Relationships</strong>: id, source, target, description, combined degree (sum of the endpoints' degrees). Ranked by combined degree, so edges between central entities come first.</li>
+  <li><strong>Claims</strong> (when extracted, <a href="10-claims-temporal.html">Chapter 10</a>): id, subject, type, status, dates, description. Attached to the entities they are about.</li>
+</ul>
+<p>This is the exact context <code>build_community_context</code> produces for C2 with the default budget (243 tokens by <code>count_tokens</code>, which falls back to four tokens per three words when tiktoken is not installed). The pipe-delimited format is compact and makes ids easy to cite.</p>
+
+<pre><code>-----Entities-----
+id|entity|type|description|degree
+13|PRIYA NAIR|PERSON|Priya Nair joined Kestrel Labs in 2023 after seven years at Marlow Dynamics. She was lead engineer on Project Sentinel, co-leads Project Tern and became CTO in March 2026.|4
+15|PROJECT TERN|PROJECT|Project Tern is Kestrel Labs' in-house sonar module, started in June 2025 and co-led by Jonas Vehl and Priya Nair, to replace Deepcast sonar in every Sentinel drone by the end of 2026.|4
+2|DEEPCAST|ORGANIZATION|Deepcast is a sonar hardware supplier that supplied every Kestrel Labs sonar module from 2022. After Marlow Dynamics acquired it in 2025 it stopped signing outside supply contracts.|3
+9|MARLOW DYNAMICS|ORGANIZATION|Marlow Dynamics builds defense-focused underwater vehicles, acquired sonar supplier Deepcast in April 2025, and is starting to market smaller vehicles to civilian customers that compete with Kestrel Labs.|3
+
+-----Relationships-----
+id|source|target|description|combined_degree
+27|PRIYA NAIR|PROJECT TERN|Priya Nair co-leads Project Tern and made finishing it her priority as CTO.|8
+6|DEEPCAST|PROJECT TERN|Project Tern replaces Deepcast sonar in Project Sentinel drones.|7
+21|MARLOW DYNAMICS|PRIYA NAIR|Priya Nair worked at Marlow Dynamics for seven years before joining Kestrel Labs in 2023.|7
+5|DEEPCAST|MARLOW DYNAMICS|Marlow Dynamics acquired Deepcast in April 2025 and reserved its production for internal programs.|6</code></pre>
+
+<p>Degrees are computed on the whole graph, not inside the community: Priya Nair has degree 4 because she also connects to Kestrel Labs and Project Sentinel, which live in other communities. That is deliberate. Global degree measures importance in the corpus, and a community member that bridges to other communities is often the most interesting one to describe.</p>
+
+<h3>Fitting the token budget</h3>
+<p>For a four-entity community everything fits. A leaf community of ten entities with long summarized descriptions, dozens of relationships and claims can easily exceed the budget. GraphRAG's default report input budget (<code>community_reports.max_input_length</code>) is 8,000 tokens, with up to 2,000 output tokens per report; minigraphrag's <code>IndexConfig.report_max_tokens</code> is 4,000.</p>
+
+<div class="viz" data-viz="token-budget">
+<script type="application/json">
+{
+  "title": "Where a report prompt's input budget goes",
+  "total": 8000,
+  "parts": [
+    {"label": "Instructions", "share": 0.06},
+    {"label": "Entities", "share": 0.30},
+    {"label": "Relationships", "share": 0.38},
+    {"label": "Claims", "share": 0.16},
+    {"label": "Headroom", "share": 0.10}
+  ],
+  "note": "The report prompt template itself is about 300 tokens in minigraphrag and longer in GraphRAG, which includes a full worked example. Relationships usually deserve the largest share: they carry the “how” and “why” that findings are made of. Keep headroom, because token estimates are approximate."
+}
+</script>
+</div>
+
+<p>There are two common strategies for spending the budget, and the reference implementations differ:</p>
+<ul>
+  <li><strong>Fixed split</strong> (minigraphrag): half the budget for entity rows and half for relationship rows, each filled greedily in rank order with <code>fit_to_budget</code>. Simple and predictable, but it can waste budget: a community with short descriptions leaves half its entity budget unused while relationships get cut.</li>
+  <li><strong>Edge-driven growth</strong> (Microsoft GraphRAG's <code>sort_context</code>): sort relationships by combined degree, then add them one at a time together with the details of both endpoint entities and their claims, re-rendering the context after each addition and stopping as soon as it would exceed the budget. Entities appear only if they participate in an included relationship, and the tables stay mutually consistent: no relationship refers to an entity whose row was cut.</li>
+</ul>
+
+<pre data-file="minigraphrag/reports.py"><code class="language-python">ENTITY_HEADER = ["id", "entity", "type", "description", "degree"]
+RELATIONSHIP_HEADER = ["id", "source", "target", "description", "combined_degree"]
+
+
+def _entity_rows(G: nx.Graph, nodes: list[str]) -&gt; list[list]:
+    ranked = sorted(nodes, key=lambda n: (-G.nodes[n].get("degree", 0), n))
+    return [[G.nodes[n]["human_id"], n, G.nodes[n].get("type", ""), G.nodes[n].get("description", ""),
+             G.nodes[n].get("degree", 0)] for n in ranked]
+
+
+def _relationship_rows(G: nx.Graph, edges: list[tuple[str, str]]) -&gt; list[list]:
+    ranked = sorted(edges, key=lambda e: (-G.edges[e].get("combined_degree", 0), e))
+    return [[G.edges[e]["human_id"], e[0], e[1], G.edges[e].get("description", ""),
+             G.edges[e].get("combined_degree", 0)] for e in ranked]
+
+
+def _fit_rows(rows: list[list], max_tokens: int) -&gt; list[list]:
+    """Keep the leading rows whose rendered lines fit in `max_tokens`."""
+    lines = ["|".join(str(c) for c in row) for row in rows]
+    return rows[: len(fit_to_budget(lines, max_tokens))]
+
+
+def build_community_context(G: nx.Graph, community: Community, max_tokens: int = 4000) -&gt; str:
+    """Entity and relationship tables for one community, truncated to `max_tokens`.
+
+    Half the budget goes to entities and half to relationships, each ranked by degree.
+    """
+    ent_rows = _fit_rows(_entity_rows(G, community.nodes), max_tokens // 2)
+    rel_rows = _fit_rows(_relationship_rows(G, [tuple(e) for e in community.edges]), max_tokens // 2)
+    return (format_table("Entities", ENTITY_HEADER, ent_rows) + "\n\n"
+            + format_table("Relationships", RELATIONSHIP_HEADER, rel_rows))</code></pre>
+
+<p>Squeeze C2's budget to 150 tokens and the fixed split shows its edge: only Priya Nair's entity row fits in the 75-token entity half, while three of four relationships fit in the other half. The report would cite relationships about Project Tern and Deepcast with no entity rows describing them. Exercise 12.1 asks you to reason through this.</p>
+
+<h2>Bottom-up generation through the hierarchy</h2>
+<p>A leaf community's raw tables usually fit. A level-0 community in a large corpus can have hundreds of entities, and no ranking trick makes that fit in 8,000 tokens without discarding most of it. GraphRAG's solution uses the hierarchy: generate reports for the deepest level first, then, when a parent community's raw context is too large, <strong>substitute</strong> its sub-communities' reports for their raw rows.</p>
+
+<p>Step through the Kestrel hierarchy from Chapter 11 in the order reports are written.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Kestrel community hierarchy, in report order",
+  "subtitle": "max_cluster_size = 5, seed = 42",
+  "height": 440,
+  "interval": 2200,
+  "nodes": [
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 1, "x": 52, "y": 42},
+    {"id": "okafor", "label": "Dr. Mira Okafor", "group": 1, "x": 36, "y": 20},
+    {"id": "vehl", "label": "Jonas Vehl", "group": 1, "x": 58, "y": 12},
+    {"id": "brightwater", "label": "Brightwater Capital", "group": 1, "x": 78, "y": 18},
+    {"id": "park", "label": "Lena Park", "group": 1, "x": 90, "y": 36},
+    {"id": "nair", "label": "Priya Nair", "group": 2, "x": 44, "y": 64},
+    {"id": "tern", "label": "Project Tern", "group": 2, "x": 62, "y": 64},
+    {"id": "deepcast", "label": "Deepcast", "group": 2, "x": 80, "y": 78},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 2, "x": 90, "y": 56},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 4, "x": 26, "y": 52},
+    {"id": "twi", "label": "Tidewater Institute", "group": 3, "x": 20, "y": 22},
+    {"id": "ruiz", "label": "Dr. Ana Ruiz", "group": 3, "x": 6, "y": 36},
+    {"id": "halden", "label": "Halden Reef", "group": 4, "x": 8, "y": 70},
+    {"id": "bleaching", "label": "Bleaching event", "group": 4, "x": 20, "y": 88},
+    {"id": "oha", "label": "Ocean Health Act", "group": 6, "x": 30, "y": 74},
+    {"id": "portavalon", "label": "Port Avalon", "group": 6, "x": 44, "y": 90},
+    {"id": "council", "label": "City Council", "group": 6, "x": 62, "y": 90}
+  ],
+  "edges": [
+    {"source": "okafor", "target": "kestrel"}, {"source": "vehl", "target": "kestrel"}, {"source": "nair", "target": "kestrel"},
+    {"source": "okafor", "target": "twi"}, {"source": "nair", "target": "marlow"}, {"source": "ruiz", "target": "twi"},
+    {"source": "kestrel", "target": "sentinel"}, {"source": "twi", "target": "sentinel"}, {"source": "nair", "target": "sentinel"},
+    {"source": "sentinel", "target": "halden"}, {"source": "sentinel", "target": "bleaching"}, {"source": "bleaching", "target": "halden"},
+    {"source": "ruiz", "target": "halden"}, {"source": "brightwater", "target": "kestrel"}, {"source": "park", "target": "brightwater"},
+    {"source": "park", "target": "kestrel"}, {"source": "deepcast", "target": "kestrel"}, {"source": "marlow", "target": "deepcast"},
+    {"source": "marlow", "target": "kestrel"}, {"source": "kestrel", "target": "tern"}, {"source": "vehl", "target": "tern"},
+    {"source": "nair", "target": "tern"}, {"source": "tern", "target": "deepcast"}, {"source": "oha", "target": "sentinel"},
+    {"source": "council", "target": "kestrel"}, {"source": "kestrel", "target": "portavalon"}, {"source": "twi", "target": "portavalon"},
+    {"source": "council", "target": "portavalon"}, {"source": "oha", "target": "council"}
+  ],
+  "legend": {"1": "C1 leadership and funding", "2": "C2 supply chain", "4": "C4 reef monitoring", "6": "C5 regulation", "3": "C6 research institute"},
+  "steps": [
+    {"caption": "The resolved Kestrel graph: 17 entities, 29 relationships. Colors show the level-1 communities. Reports are written deepest level first, so every parent can reuse its children's reports.", "dim": false},
+    {"caption": "<strong>Level 1, C1</strong> {Kestrel Labs, Okafor, Vehl, Brightwater, Lena Park}: 5 entities, 5 internal relationships, about 315 tokens of context. Raw tables fit, so the report is written from them.", "active": ["kestrel", "okafor", "vehl", "brightwater", "park"], "edges": ["okafor>kestrel", "vehl>kestrel", "brightwater>kestrel", "park>brightwater", "park>kestrel"]},
+    {"caption": "<strong>Level 1, C2</strong> {Deepcast, Marlow Dynamics, Priya Nair, Project Tern}: the supply-chain community, about 243 tokens. This is the report shown at the top of the chapter.", "active": ["nair", "tern", "deepcast", "marlow"], "edges": ["nair>marlow", "marlow>deepcast", "nair>tern", "tern>deepcast"]},
+    {"caption": "<strong>Level 1, C4, C5, C6</strong>: reef monitoring {Project Sentinel, Halden Reef, bleaching event}, regulation {Ocean Health Act, Port Avalon, City Council} and the research institute {Tidewater Institute, Ana Ruiz}. Small contexts, one report each.", "active": ["sentinel", "halden", "bleaching", "oha", "portavalon", "council", "twi", "ruiz"], "edges": ["sentinel>halden", "sentinel>bleaching", "bleaching>halden", "council>portavalon", "oha>council", "ruiz>twi"]},
+    {"caption": "<strong>Level 0, C0</strong> Kestrel business = C1 ∪ C2: 9 entities and 14 relationships, about 632 tokens. With a 4,000-token budget the raw tables fit. With a 500-token budget they don't, so C1's and C2's reports are substituted for their rows. The five highlighted <em>bridging</em> relationships (Kestrel Labs to Deepcast, Marlow Dynamics, Priya Nair and Project Tern; Vehl to Tern) belong to neither child.", "active": ["kestrel", "okafor", "vehl", "brightwater", "park", "nair", "tern", "deepcast", "marlow"], "visitedEdges": ["okafor>kestrel", "vehl>kestrel", "brightwater>kestrel", "park>brightwater", "park>kestrel", "nair>marlow", "marlow>deepcast", "nair>tern", "tern>deepcast"], "edges": ["nair>kestrel", "deepcast>kestrel", "marlow>kestrel", "kestrel>tern", "vehl>tern"]},
+    {"caption": "<strong>Level 0, C3</strong> reef and regulation = C4 ∪ C5 ∪ C6: 8 entities, 10 relationships, about 407 tokens, which fits even a 500-token budget. The five edges crossing between C0 and C3 (for example Kestrel Labs runs Project Sentinel) appear in no community's context at all.", "active": ["sentinel", "halden", "bleaching", "oha", "portavalon", "council", "twi", "ruiz"], "edges": ["twi>sentinel", "ruiz>halden", "oha>sentinel", "twi>portavalon", "sentinel>halden", "sentinel>bleaching", "bleaching>halden", "council>portavalon", "oha>council", "ruiz>twi"], "visitedEdges": ["okafor>twi", "kestrel>sentinel", "nair>sentinel", "council>kestrel", "kestrel>portavalon"]}
+  ]
+}
+</script>
+</div>
+
+<h3>The substitution algorithm</h3>
+<p>For each level, from deepest to shallowest, and for each community at that level:</p>
+<ol>
+  <li>Build the raw context. If it fits the budget, use it.</li>
+  <li>Otherwise, if the community has children with reports, rank the children by size (largest first) and replace their raw rows with their report summaries, one child at a time, until the context fits. Entities and relationships not covered by a substituted child stay as raw rows.</li>
+  <li>If there are no children (a leaf that is too large), fall back to truncating the ranked raw tables.</li>
+</ol>
+<p>GraphRAG's <code>build_mixed_context</code> annotates step 2 with the comment “replace local context with sub-community reports, starting from the biggest sub-community”. Larger children free the most tokens per substitution, and their reports are the most information-dense. minigraphrag implements a simplified version that substitutes as many child reports as fit in half the budget in one go:</p>
+
+<pre data-file="minigraphrag/reports.py"><code class="language-python">def _full_context_tokens(G: nx.Graph, community: Community) -&gt; int:
+    return count_tokens(build_community_context(G, community, max_tokens=10**9))
+
+
+def _substituted_context(G: nx.Graph, community: Community, child_reports: list[CommunityReport],
+                         children: list[Community], max_tokens: int) -&gt; str:
+    """Replace raw tables with sub-community reports (largest children first)."""
+    sizes = {c.id: len(c.nodes) for c in children}
+    ranked = sorted(child_reports, key=lambda r: -sizes.get(r.community_id, 0))
+    rows = _fit_rows([[r.community_id, r.title, r.summary] for r in ranked], max_tokens // 2)
+    used = {row[0] for row in rows}
+    covered = {n for c in children if c.id in used for n in c.nodes}
+    remaining = Community(community.id, community.level, community.parent,
+                          [n for n in community.nodes if n not in covered],
+                          [e for e in community.edges if not (e[0] in covered and e[1] in covered)])
+    return (format_table("Reports", ["id", "title", "summary"], rows) + "\n\n"
+            + build_community_context(G, remaining, max_tokens // 2))
+
+
+def generate_all_reports(llm: LLM, G: nx.Graph, communities: list[Community], max_tokens: int = 4000,
+                         min_size: int = 2) -&gt; list[CommunityReport]:
+    """Write a report for every community (with at least `min_size` nodes), deepest level first."""
+    by_id = {c.id: c for c in communities}
+    reports: dict[int, CommunityReport] = {}
+    for c in sorted(communities, key=lambda c: (-c.level, c.id)):
+        if len(c.nodes) &lt; min_size:
+            continue
+        child_reports = [reports[ch] for ch in c.children if ch in reports]
+        if child_reports and _full_context_tokens(G, c) &gt; max_tokens:
+            context = _substituted_context(G, c, child_reports, [by_id[ch] for ch in c.children], max_tokens)
+        else:
+            context = build_community_context(G, c, max_tokens)
+        reports[c.id] = generate_report(llm, context, c.id, c.level)
+    return [reports[k] for k in sorted(reports)]</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">What substitution throws away</span>
+  <p>Run <code>generate_all_reports</code> on the Kestrel hierarchy with <code>max_tokens=500</code>. C0's context becomes a Reports table with C1 and C2, followed by <em>empty</em> Entities and Relationships tables: every node of C0 is covered by a child, and the filter removes every edge whose two endpoints are covered, including the five bridging edges between C1 and C2. Those bridges are the story: Kestrel Labs bought from Deepcast, competes with Marlow Dynamics, hired Priya Nair and started Project Tern. The C0 report is written from two summaries that never mention how they connect, and canonical question 1 (“Why did Kestrel Labs start Project Tern?”) loses its best global evidence. Exercise 12.5 fixes this by keeping cross-child relationships in the substituted context.</p>
+</div>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "Bottom-up report generation",
+  "perRow": 4,
+  "stages": [
+    {"label": "Deepest level first", "detail": "Sort communities by level descending. Skip communities below a minimum size (minigraphrag: 2 entities)."},
+    {"label": "Rank rows", "detail": "Entities by degree, relationships by combined degree, claims attached to their subjects. Assign stable human-readable ids."},
+    {"label": "Fits the budget?", "detail": "Render the full context and count tokens. If it fits the input budget, use it as is."},
+    {"label": "Substitute children", "detail": "Too large and has children: replace the largest children's raw rows with their report summaries until it fits. Leaves that are too large are truncated instead."},
+    {"label": "Report prompt", "detail": "Send the context with the report instructions and JSON schema. Temperature 0; request JSON mode where available."},
+    {"label": "Parse and validate", "detail": "Extract the JSON object, coerce the rating to a float, keep only well-formed findings, and check every [Data: ...] id exists in the context."},
+    {"label": "Embed and store", "detail": "Render title, summary and findings as markdown (full_content), embed it, and store the report with its level and community id."},
+    {"label": "Next level up", "detail": "Parents can now reuse these reports. Stop after level 0."}
+  ]
+}
+</script>
+</div>
+
+<h2>The report prompt, parsing and embedding</h2>
+
+<h3>The prompt</h3>
+<p><code>minigraphrag/prompts.py</code> keeps the structure of GraphRAG's report prompt and drops its long worked example to save tokens:</p>
+
+<pre data-file="minigraphrag/prompts.py"><code class="language-python">COMMUNITY_REPORT_PROMPT = """You are an AI assistant that helps a human analyst to perform general information discovery.
+
+# Goal
+Write a comprehensive report of a community, given a list of entities that belong to the community as well as their relationships and optional associated claims. The report will be used to inform decision-makers about the community and its potential impact.
+
+# Report Structure
+- TITLE: community's name that represents its key entities; short but specific.
+- SUMMARY: an executive summary of the community's overall structure and how its entities relate.
+- IMPACT SEVERITY RATING: a float score between 0-10 representing the importance of the community.
+- RATING EXPLANATION: a single sentence explaining the rating.
+- DETAILED FINDINGS: a list of 5-10 key insights. Each has a short summary and a multi-paragraph explanation grounded in the data.
+
+Return output as a well-formed JSON-formatted string with the following format:
+{{
+    "title": &lt;report_title&gt;,
+    "summary": &lt;executive_summary&gt;,
+    "rating": &lt;impact_severity_rating&gt;,
+    "rating_explanation": &lt;rating_explanation&gt;,
+    "findings": [
+        {{"summary": &lt;insight_1_summary&gt;, "explanation": &lt;insight_1_explanation&gt;}}
+    ]
+}}
+
+# Grounding Rules
+Points supported by data should list their data references as [Data: &lt;dataset name&gt; (record ids)], e.g. [Data: Entities (5, 7); Relationships (23)]. Do not list more than 5 record ids in a single reference. Do not include information for which no evidence is given.
+
+# Real Data
+Use the following text for your answer. Do not make anything up.
+
+Text:
+{input_text}
+
+Output:
+"""</code></pre>
+
+<p>Three prompt decisions have a large effect on quality. “Impact severity” comes from GraphRAG's original intelligence-analysis framing; for a product knowledge base, “importance to understanding the corpus” may rank communities more sensibly, and GraphRAG's auto prompt tuning rewrites this rating description for your domain (<a href="28-frameworks-in-practice.html">Chapter 28</a>). The grounding rules are what make findings citable, and they only work if the ids in the context are the ones you can resolve later. And “Do not make anything up” is necessary but not sufficient: you still need to check.</p>
+
+<h3>Parsing</h3>
+<p>Report JSON fails in predictable ways: code fences around the object, a trailing sentence after it, a rating written as <code>"7.5/10"</code>, findings as strings instead of objects. The parser extracts the first JSON object and coerces or drops what does not fit, so one bad field never loses the whole report.</p>
+
+<pre data-file="minigraphrag/reports.py"><code class="language-python">@dataclass
+class CommunityReport:
+    community_id: int
+    level: int
+    title: str
+    summary: str
+    rating: float
+    rating_explanation: str
+    findings: list[dict] = field(default_factory=list)
+
+    @property
+    def full_content(self) -&gt; str:
+        """Markdown rendering: what gets embedded and put into search contexts."""
+        lines = [f"# {self.title}", "", self.summary, ""]
+        for f in self.findings:
+            lines += [f"## {f.get('summary', '')}", "", f.get("explanation", ""), ""]
+        return "\n".join(lines).strip()
+
+
+def generate_report(llm: LLM, context: str, community_id: int = -1, level: int = 0) -&gt; CommunityReport:
+    """Ask the LLM for a JSON report and parse it defensively."""
+    data = parse_json_response(llm.complete(P.COMMUNITY_REPORT_PROMPT.format(input_text=context), json=True))
+    try:
+        rating = float(data.get("rating", 0))
+    except (TypeError, ValueError):
+        rating = 0.0
+    findings = [f for f in data.get("findings", []) if isinstance(f, dict)]
+    return CommunityReport(community_id, level, str(data.get("title", f"Community {community_id}")),
+                           str(data.get("summary", "")), rating, str(data.get("rating_explanation", "")), findings)</code></pre>
+
+<p>A rating of <code>"7.5/10"</code> becomes 0.0 here, silently. That is a reasonable default for a teaching implementation and a bad one for production, where it would sink an important community to the bottom of every ranking. Log parse fallbacks and consider retrying once with the parse error in the prompt.</p>
+
+<h3>Embedding reports</h3>
+<p>Global search can map over every report at a level, but several retrieval methods need to <em>find</em> relevant reports first: dynamic community selection, DRIFT's primer step (<a href="15-global-search.html">Chapter 15</a>) and hybrid designs. So the indexer embeds each report's <code>full_content</code> into its own vector store, with the level as metadata:</p>
+
+<pre data-file="minigraphrag/indexer.py"><code class="language-python">report_store = _embed_store(embedder, [str(r.community_id) for r in reports],
+                            [r.full_content for r in reports], [{"level": r.level} for r in reports])</code></pre>
+
+<p>Embedding the full markdown works well when reports are short. For long reports, a single vector averages many topics; embedding the title plus summary, or each finding separately with a pointer back to its report, gives sharper matches.</p>
+
+<h2>RAPTOR: summarizing chunks instead of communities</h2>
+<p>GraphRAG is not the only way to build hierarchical summaries. <strong>RAPTOR</strong> (Sarthi et al., 2024) builds a tree directly from text chunks: embed the chunks, cluster them (with Gaussian mixture models over dimensionality-reduced embeddings, which allows soft membership), summarize each cluster with an LLM, then embed and cluster the summaries, and recurse until the top. At query time it either traverses the tree from the root down or searches all nodes of all levels at once (the “collapsed tree”), which the authors found worked better.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="raptor-title">
+      <title id="raptor-title">RAPTOR builds a tree of summaries over chunks; GraphRAG builds reports over communities of entities</title>
+      <text class="d-text bold" x="20" y="24">RAPTOR: tree over chunks</text>
+      <rect class="d-box comm" x="120" y="40" width="100" height="30" rx="5"/>
+      <text class="d-text small" x="170" y="60" text-anchor="middle">root summary</text>
+      <rect class="d-box comm" x="40" y="110" width="100" height="30" rx="5"/>
+      <text class="d-text small" x="90" y="130" text-anchor="middle">cluster summary</text>
+      <rect class="d-box comm" x="200" y="110" width="100" height="30" rx="5"/>
+      <text class="d-text small" x="250" y="130" text-anchor="middle">cluster summary</text>
+      <line class="d-line" x1="170" y1="70" x2="90" y2="110"/>
+      <line class="d-line" x1="170" y1="70" x2="250" y2="110"/>
+      <rect class="d-box" x="20" y="190" width="54" height="30" rx="4"/><text class="d-text small" x="47" y="210" text-anchor="middle">chunk</text>
+      <rect class="d-box" x="84" y="190" width="54" height="30" rx="4"/><text class="d-text small" x="111" y="210" text-anchor="middle">chunk</text>
+      <rect class="d-box" x="148" y="190" width="54" height="30" rx="4"/><text class="d-text small" x="175" y="210" text-anchor="middle">chunk</text>
+      <rect class="d-box" x="212" y="190" width="54" height="30" rx="4"/><text class="d-text small" x="239" y="210" text-anchor="middle">chunk</text>
+      <rect class="d-box" x="276" y="190" width="54" height="30" rx="4"/><text class="d-text small" x="303" y="210" text-anchor="middle">chunk</text>
+      <line class="d-line" x1="90" y1="140" x2="47" y2="190"/>
+      <line class="d-line" x1="90" y1="140" x2="111" y2="190"/>
+      <line class="d-line" x1="90" y1="140" x2="175" y2="190"/>
+      <line class="d-line dash" x1="250" y1="140" x2="175" y2="190"/>
+      <line class="d-line" x1="250" y1="140" x2="239" y2="190"/>
+      <line class="d-line" x1="250" y1="140" x2="303" y2="190"/>
+      <text class="d-text small" x="20" y="250">Similarity of chunk embeddings decides grouping;</text>
+      <text class="d-text small" x="20" y="266">soft clustering lets a chunk sit under two summaries</text>
+      <text class="d-text small" x="20" y="282">(dashed). Retrieval searches all levels at once.</text>
+      <line class="d-line faint" x1="350" y1="20" x2="350" y2="290"/>
+      <text class="d-text bold" x="370" y="24">GraphRAG: reports over communities</text>
+      <rect class="d-box edge" x="460" y="40" width="120" height="30" rx="5"/>
+      <text class="d-text small" x="520" y="60" text-anchor="middle">C0 report (level 0)</text>
+      <rect class="d-box edge" x="380" y="110" width="120" height="30" rx="5"/>
+      <text class="d-text small" x="440" y="130" text-anchor="middle">C1 report (level 1)</text>
+      <rect class="d-box edge" x="540" y="110" width="120" height="30" rx="5"/>
+      <text class="d-text small" x="600" y="130" text-anchor="middle">C2 report (level 1)</text>
+      <line class="d-line" x1="520" y1="70" x2="440" y2="110"/>
+      <line class="d-line" x1="520" y1="70" x2="600" y2="110"/>
+      <circle class="d-node" cx="395" cy="205" r="10"/><circle class="d-node" cx="430" cy="225" r="10"/><circle class="d-node" cx="465" cy="200" r="10"/>
+      <circle class="d-node alt" cx="570" cy="205" r="10"/><circle class="d-node alt" cx="610" cy="225" r="10"/><circle class="d-node alt" cx="640" cy="195" r="10"/>
+      <line class="d-line" x1="395" y1="205" x2="430" y2="225"/><line class="d-line" x1="430" y1="225" x2="465" y2="200"/>
+      <line class="d-line" x1="570" y1="205" x2="610" y2="225"/><line class="d-line" x1="610" y1="225" x2="640" y2="195"/>
+      <line class="d-line hot" x1="465" y1="200" x2="570" y2="205"/>
+      <line class="d-line faint" x1="440" y1="140" x2="430" y2="190"/>
+      <line class="d-line faint" x1="600" y1="140" x2="610" y2="190"/>
+      <text class="d-text small" x="370" y="250">Graph edges between extracted entities decide</text>
+      <text class="d-text small" x="370" y="266">grouping; each entity is in one community per level.</text>
+      <text class="d-text small" x="370" y="282">Global search maps over reports at a level.</text>
+    </svg>
+  </div>
+  <figcaption>Both build summaries bottom-up. RAPTOR groups chunks by embedding similarity and needs no extraction; GraphRAG groups entities by relationships, which costs an extraction pass but makes each summary about things that interact.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Concern</th><th>RAPTOR tree</th><th>GraphRAG community reports</th></tr></thead>
+  <tbody>
+    <tr><td>Leaves</td><td>Text chunks</td><td>Extracted entities and relationships</td></tr>
+    <tr><td>Grouping signal</td><td>Embedding similarity (soft clusters)</td><td>Graph structure (modularity, hard partition per level)</td></tr>
+    <tr><td>Indexing cost</td><td>Summaries only: roughly one call per cluster per level</td><td>Extraction on every chunk, description summaries, then reports</td></tr>
+    <tr><td>What a summary is about</td><td>Chunks that sound alike (for example all funding announcements)</td><td>Entities that interact (the supply shock and its response)</td></tr>
+    <tr><td>Provenance</td><td>Summary → member chunks</td><td>Finding → entity and relationship ids → source text units</td></tr>
+    <tr><td>Typical retrieval</td><td>Similarity search over all tree nodes</td><td>Map-reduce over reports; local search for entities</td></tr>
+    <tr><td>Best at</td><td>Long single documents and thematic questions over similar text</td><td>Corpora whose questions are about actors, relations and how they combine</td></tr>
+  </tbody>
+</table>
+
+<p>On Kestrel the difference is concrete. RAPTOR would likely cluster the two Brightwater press releases together (similar vocabulary) and the two Tidewater Institute posts together. GraphRAG puts the Marlow acquisition article, the board memo and the Tern engineering blog into one community's evidence, because their entities are linked, even though the documents read very differently. Question 1, “Why did Kestrel Labs start Project Tern?”, needs that cross-document link.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Sarthi et al., RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval (2024)</span>
+  <p>RAPTOR recursively embeds, clusters and summarizes chunks into a tree, and retrieves from multiple levels of abstraction. The authors report that retrieval over the tree improves results on question-answering tasks that require integrating information across long documents, and that pairing RAPTOR with GPT-4 improved the best reported accuracy on the QuALITY benchmark by 20% absolute. <a href="06-graph-shapes.html">Chapter 6</a> places tree indexes alongside other graph shapes.</p>
+</div>
+
+<h2>Cost and quality</h2>
+
+<h3>What reports cost</h3>
+<p>The number of reports is the number of communities with at least <code>min_size</code> members, summed over all levels. With hierarchical Leiden and <code>max_cluster_size = 10</code>, a graph with <em>N</em> entities has at least about <em>N</em>/10 leaf communities, plus their ancestors. Each report call sends up to the input budget and receives up to the output budget.</p>
+<p>A worked estimate: a corpus that produces 20,000 entities gives, say, 2,500 leaf communities and 600 communities at higher levels, about 3,100 reports. If the average context uses 5,000 of the 8,000 input tokens and reports average 1,200 output tokens, that is 3,100 × 5,000 ≈ 15.5 million input tokens and 3,100 × 1,200 ≈ 3.7 million output tokens. Output tokens are typically several times more expensive than input tokens, so reports are a meaningful slice of indexing cost, though usually smaller than extraction, which runs over every chunk with gleaning. Three levers matter most:</p>
+<ul>
+  <li><strong>Skip tiny communities.</strong> A two-entity community rarely deserves a report; raising <code>min_size</code> to 3 or 4 can cut report count substantially on noisy graphs.</li>
+  <li><strong>Cap the output.</strong> Ask for 5 findings rather than 10 at deep levels, where communities are small.</li>
+  <li><strong>Defer.</strong> LazyGraphRAG and similar approaches (<a href="26-cost-scaling.html">Chapter 26</a>) postpone summarization to query time and only summarize what a query touches.</li>
+</ul>
+
+<h3>Quality failure modes</h3>
+<table>
+  <thead><tr><th>Symptom</th><th>Cause</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td>Generic titles and summaries (“Organizations and People in Port Avalon”)</td><td>Thin descriptions, low-information context, a weak model, or a community that is not coherent</td><td>Better description summaries; require named entities in the title; review community coherence (Chapter 11)</td></tr>
+    <tr><td>Findings that cite ids not in the context, or state facts no row supports</td><td>Hallucination, often filling a quota of “5 to 10 findings” with too little data</td><td>Validate every data reference against the context; allow fewer findings for small communities; drop unsupported findings</td></tr>
+    <tr><td>Every rating is 7 or 8</td><td>Uncalibrated rating instruction</td><td>Define the scale with examples; rank communities relative to each other instead of trusting absolute values</td></tr>
+    <tr><td>Parent reports miss how children relate</td><td>Substitution drops bridging relationships</td><td>Keep cross-child edges in substituted contexts (Exercise 12.5)</td></tr>
+    <tr><td>Reports contradict current facts after new documents arrive</td><td>Stale reports: descriptions or membership changed but reports were not regenerated</td><td>Key reports on a hash of member names and descriptions; regenerate only communities whose hash changed, and their ancestors (<a href="27-incremental-temporal.html">Chapter 27</a>)</td></tr>
+    <tr><td>“Priya Nair is CTO” and “Jonas Vehl is CTO” in the same report</td><td>Timeless descriptions (Chapter 10)</td><td>Include claims with dates, or dated validity in relationship descriptions</td></tr>
+  </tbody>
+</table>
+
+<p>Checking data references is cheap and catches the most damaging problem. The ids a report may cite are exactly the ids in the tables it was given:</p>
+
+<pre data-file="examples/ch12_validate_report.py"><code class="language-python">import re
+from minigraphrag.context import parse_tables
+
+REF = re.compile(r"\[Data:([^\]]*)\]")
+PART = re.compile(r"(Entities|Relationships|Claims|Reports)\s*\(([^)]*)\)")
+
+def validate_report(report, context: str) -&gt; list[str]:
+    """Problems with a report's data references and rating, given the context it was generated from."""
+    tables = parse_tables(context)
+    known = {name: {row.get("id", "").strip() for row in rows} for name, rows in tables.items()}
+    problems = []
+    if not 0 &lt;= report.rating &lt;= 10:
+        problems.append(f"rating {report.rating} outside 0-10")
+    for i, f in enumerate(report.findings):
+        refs = REF.findall(f.get("explanation", ""))
+        if not refs:
+            problems.append(f"finding {i}: no data references")
+        for ref in refs:
+            for dataset, ids in PART.findall(ref):
+                id_list = [x.strip() for x in ids.split(",") if x.strip() and x.strip() != "+more"]
+                if len(id_list) &gt; 5:
+                    problems.append(f"finding {i}: more than 5 ids for {dataset}")
+                missing = [x for x in id_list if x not in known.get(dataset, set())]
+                if missing:
+                    problems.append(f"finding {i}: {dataset} ids {missing} not in context")
+    return problems</code></pre>
+
+<p>Run on the supply-chain report above against C2's context, this returns an empty list. Change one reference to <code>Relationships (18)</code>, an edge that exists in the graph but not in C2's context, and it reports <code>finding 0: Relationships ids ['18'] not in context</code>. A model citing a real id it was never shown is a strong sign it is drawing on memory rather than the data.</p>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 12.1 <span class="level">Warm-up</span></h4>
+  <p>C2's full context is about 243 tokens (4 entity rows, 4 relationship rows). Call <code>build_community_context(G, C2, max_tokens=150)</code>. Using the fixed-split rule and the context printed in this chapter, predict which rows survive, then explain what is wrong with the result and propose a better allocation rule.</p>
+  <details class="hint"><summary>Hint</summary><p>Each half gets 75 tokens. minigraphrag's fallback token count is about 4 tokens per 3 words. Priya Nair's entity row is about 30 words; each relationship row is about 15 to 20 words.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Entities (75 tokens):</strong> Priya Nair's row is about 40 tokens; adding Project Tern's (about 46) makes 86, which exceeds 75. So only <strong>Priya Nair</strong> survives.</p>
+    <p><strong>Relationships (75 tokens):</strong> rows 27, 6 and 21 cost about 20, 14 and 23 tokens (57 in total) and fit; row 5 (about 20) would bring the total to 77. So <strong>27, 6, 21</strong> survive.</p>
+    <p>Running the code confirms it: one entity row and three relationship rows. The problem is inconsistency. Relationship 6 (Deepcast–Project Tern) and 21 (Marlow Dynamics–Priya Nair) mention three entities with no row, so the model can cite relationships but has no descriptions for Deepcast, Marlow or Tern. Meanwhile the relationship half cut row 5, the acquisition, which is the single most important fact in the community.</p>
+    <p>A better rule is GraphRAG's edge-driven growth: add relationships in rank order together with the entity rows of their endpoints, and stop when the next addition would exceed the budget. With 150 tokens that yields a consistent context such as relationship 27 plus Priya Nair and Project Tern. An even better rule for small budgets ranks relationships by edge weight or by whether they mention the community's highest-degree entities, so the acquisition is not the first thing dropped.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 12.2 <span class="level">Core</span></h4>
+  <p>For the Kestrel hierarchy (C0 with children C1, C2; C3 with children C4, C5, C6) and full-context sizes C0 ≈ 632, C1 ≈ 315, C2 ≈ 243, C3 ≈ 407, C4 ≈ 159, C5 ≈ 127, C6 ≈ 74 tokens, trace <code>generate_all_reports(llm, G, communities, max_tokens=500)</code>. List the order in which reports are generated, which communities use substituted context, and exactly which relationships of C0 appear in no context at all. Which canonical question suffers most?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Order:</strong> sort key is (−level, id), so level 1 first in id order: C1, C2, C4, C5, C6; then level 0: C0, C3.</p>
+    <p><strong>Substitution:</strong> the level-1 communities have no children, so they use raw context (all fit in 500 anyway). C0 has children with reports and 632 &gt; 500, so it is substituted. C3 has children but 407 ≤ 500, so it uses raw context.</p>
+    <p><strong>C0's context:</strong> the Reports table holds C1 (5 nodes) then C2 (4 nodes); both summaries fit in 250 tokens. All 9 nodes are covered, so the remaining Entities table is empty, and every edge with both endpoints covered is removed. C0 has 14 edges: 5 inside C1, 4 inside C2, and 5 bridging edges, all dropped: Kestrel Labs–Priya Nair, Kestrel Labs–Deepcast, Kestrel Labs–Marlow Dynamics, Kestrel Labs–Project Tern and Jonas Vehl–Project Tern. The first nine are at least represented by the child reports; the five bridges appear in no context of any report. In this run the substituted context is only about 148 tokens: most of the 500-token budget goes unused.</p>
+    <p><strong>Question 1</strong>, “Why did Kestrel Labs start Project Tern?”, suffers most. Its answer runs Marlow Dynamics → Deepcast → Kestrel Labs → Project Tern, and the Deepcast–Kestrel and Kestrel–Tern links are exactly the dropped bridges. Global search would see a leadership report and a supply-chain report without the sentence connecting them. (Local search, which reads the graph directly, is unaffected.)</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 12.3 <span class="level">Core</span></h4>
+  <p>Use <code>validate_report</code> on the supply-chain report JSON from this chapter and C2's context. Then write three corrupted variants and show that each is caught: (a) a finding citing <code>Entities (7)</code> (Kestrel Labs, not in C2's context), (b) a finding with six relationship ids, (c) a rating of 12. Finally, describe one hallucination this validator cannot catch.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import copy, json
+from minigraphrag.reports import CommunityReport
+from ch12_validate_report import validate_report   # the function from this chapter
+
+data = json.loads(REPORT_JSON)                      # the supply-chain report above
+base = CommunityReport(2, 1, data["title"], data["summary"], data["rating"],
+                       data["rating_explanation"], data["findings"])
+print(validate_report(base, C2_CONTEXT))            # []
+
+a = copy.deepcopy(base)
+a.findings[3]["explanation"] += " Kestrel Labs is the affected customer [Data: Entities (7)]."
+print(validate_report(a, C2_CONTEXT))
+# ["finding 3: Entities ids ['7'] not in context"]
+
+b = copy.deepcopy(base)
+b.findings[0]["explanation"] += " [Data: Relationships (5, 6, 21, 27, 5, 6)]"
+print(validate_report(b, C2_CONTEXT))
+# ['finding 0: more than 5 ids for Relationships']
+
+c = copy.deepcopy(base)
+c.rating = 12.0
+print(validate_report(c, C2_CONTEXT))
+# ['rating 12.0 outside 0-10']</code></pre>
+    <p>Here <code>C2_CONTEXT</code> is the context string shown in “Ranked tables” and <code>REPORT_JSON</code> the report text. In (b) the ids themselves are valid, so only the count check fires.</p>
+    <p><strong>What it cannot catch:</strong> a sentence that cites a valid id but states something the row does not say. “Marlow Dynamics paid $200 million for Deepcast [Data: Relationships (5)]” passes, because relationship 5 exists in the context, but no row mentions a price. Catching that needs a claim-level check: an LLM or NLI model that verifies each cited sentence against the text of the cited rows, which costs roughly one extra call per report.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 12.4 <span class="level">Core</span></h4>
+  <p>You are indexing a corpus that yields 6,000 entities. Hierarchical Leiden with <code>max_cluster_size = 10</code> produces 700 leaf communities (of which 220 have only 2 members) and 150 non-leaf communities. Average report context is 3,500 input tokens for leaves and 7,000 for non-leaves; average output is 900 tokens for leaves and 1,500 for non-leaves. (a) How many report calls and tokens does <code>min_size = 2</code> cost? (b) How much does <code>min_size = 3</code> save, assuming two-member communities have half the average leaf input and output? (c) What does skipping them lose for global search?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>(a)</strong> Calls: 700 + 150 = <strong>850</strong>. Input: 700 × 3,500 + 150 × 7,000 = 2,450,000 + 1,050,000 = <strong>3.5 million</strong> tokens. Output: 700 × 900 + 150 × 1,500 = 630,000 + 225,000 = <strong>855,000</strong> tokens.</p>
+    <p><strong>(b)</strong> The 220 two-member communities cost 220 × 1,750 = 385,000 input tokens and 220 × 450 = 99,000 output tokens. Skipping them saves 220 calls (26%), 385,000 input tokens (11%) and 99,000 output tokens (12%). Calls drop much more than tokens, which matters if you are rate-limited rather than budget-limited.</p>
+    <p><strong>(c)</strong> Their entities still appear in parent communities' contexts, as long as the parents are built from raw rows rather than substitution. What is lost is a dedicated finding list at the finest level: a pair like {Brightwater Capital, Lena Park} would only be described inside its parent's report, where it competes for space with bigger themes. For global search at the leaf level those pairs become invisible. For most corpora that is an acceptable trade; for corpora where small pairs matter (a person and the fund they run), keep them or raise their priority.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 12.5 <span class="level">Stretch</span></h4>
+  <p>Fix the substitution problem from Exercise 12.2. Write <code>substituted_context_with_bridges(G, community, child_reports, children, max_tokens)</code> that emits the child reports, then a “Bridging relationships” table of edges whose endpoints lie in two different substituted children (ranked by combined degree), then any remaining raw rows. Show the resulting context for C0 at <code>max_tokens=500</code> and discuss how you would wire it into <code>generate_all_reports</code> without editing the library.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.communities import Community
+from minigraphrag.context import format_table
+from minigraphrag.reports import RELATIONSHIP_HEADER, _fit_rows, _relationship_rows, build_community_context
+
+def substituted_context_with_bridges(G, community, child_reports, children, max_tokens):
+    """Child reports first, then the relationships that cross between children, then leftovers."""
+    sizes = {c.id: len(c.nodes) for c in children}
+    ranked = sorted(child_reports, key=lambda r: -sizes.get(r.community_id, 0))
+    rows = _fit_rows([[r.community_id, r.title, r.summary] for r in ranked], max_tokens // 2)
+    used = {row[0] for row in rows}
+    owner = {n: c.id for c in children if c.id in used for n in c.nodes}
+    covered = set(owner)
+    # Edges whose endpoints sit in two different summarized children: the story between the reports.
+    bridges = [tuple(e) for e in community.edges
+               if e[0] in covered and e[1] in covered and owner[e[0]] != owner[e[1]]]
+    bridge_rows = _fit_rows(_relationship_rows(G, bridges), max_tokens // 4)
+    remaining = Community(community.id, community.level, community.parent,
+                          [n for n in community.nodes if n not in covered],
+                          [e for e in community.edges if not (e[0] in covered and e[1] in covered)])
+    return (format_table("Reports", ["id", "title", "summary"], rows) + "\n\n"
+            + format_table("Bridging relationships", RELATIONSHIP_HEADER, bridge_rows) + "\n\n"
+            + build_community_context(G, remaining, max_tokens // 4))</code></pre>
+    <p>For C0 at 500 tokens the new section reads:</p>
+    <pre><code>-----Bridging relationships-----
+id|source|target|description|combined_degree
+18|KESTREL LABS|PRIYA NAIR|Priya Nair joined Kestrel Labs in 2023 and became CTO in March 2026.|15
+20|KESTREL LABS|PROJECT TERN|Kestrel Labs started Project Tern in June 2025 to build its own sonar.|15
+4|DEEPCAST|KESTREL LABS|Deepcast supplied Kestrel Labs' sonar modules from 2022 until mid-2025.|14
+15|KESTREL LABS|MARLOW DYNAMICS|Marlow Dynamics competes with Kestrel Labs for civilian monitoring customers.|14
+13|JONAS VEHL|PROJECT TERN|Jonas Vehl co-leads Project Tern.|6</code></pre>
+    <p>All five bridges fit, and the whole context is still only about 232 tokens (with a MockLLM-written child report; real reports are longer). The C0 report can now say that the leadership community started Project Tern because its supplier was taken over by a competitor.</p>
+    <p><strong>Wiring it in.</strong> <code>generate_all_reports</code> calls the module-level <code>_substituted_context</code>, so the least invasive option is a small copy of the loop in your own code that calls the new function, which also lets you add the retry-on-parse-failure and validation steps from this chapter. Monkeypatching <code>minigraphrag.reports._substituted_context</code> works for an experiment but couples you to a private name. The bridges table introduces a new dataset name, so extend the grounding rules in the prompt (“Bridging relationships” ids are cited as Relationships) and the validator's dataset map.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why does GraphRAG generate community reports at indexing time rather than summarizing communities when a question arrives?</p>
+  <ol>
+    <li>Because LLMs cannot summarize graphs at query time</li>
+    <li>Because reports are needed to build the graph</li>
+    <li data-correct>So that global questions become a map-reduce over a bounded set of prepared summaries instead of reading the whole corpus per query</li>
+    <li>Because community detection is too slow to run at query time</li>
+  </ol>
+  <div class="explain">Pre-computation moves the expensive summarization offline and amortizes it over all future global queries. Deferred alternatives exist (LazyGraphRAG), but they trade indexing cost for query cost.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In minigraphrag's report context, relationships are ranked by combined degree. What is combined degree?</p>
+  <ol>
+    <li>The number of chunks that mention the relationship</li>
+    <li data-correct>The sum of the degrees of the relationship's two endpoints in the whole graph</li>
+    <li>The summed extraction strength of the relationship</li>
+    <li>The number of communities the relationship crosses</li>
+  </ol>
+  <div class="explain">Combined degree favors relationships between central entities. Edge weight (summed strength) is a different attribute and is not used for this ranking.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A level-0 community's raw context is 30,000 tokens and the budget is 8,000. Its children already have reports. What does GraphRAG's context builder do?</p>
+  <ol>
+    <li>Splits the community again with Leiden</li>
+    <li>Truncates the raw tables to the first 8,000 tokens</li>
+    <li>Skips the report for that community</li>
+    <li data-correct>Replaces sub-communities' raw rows with their reports, starting from the largest sub-community, until the context fits</li>
+  </ol>
+  <div class="explain">Reports are generated bottom-up precisely so parents can reuse children's reports. Truncation is only the fallback for leaves that have no children.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A finding says “Deepcast was acquired for $200 million [Data: Relationships (5)]”, and relationship 5 is in the context but mentions no price. Which check catches this?</p>
+  <ol>
+    <li>Checking that cited ids exist in the context</li>
+    <li>Checking that the rating is between 0 and 10</li>
+    <li data-correct>Verifying the cited sentence against the text of the cited rows, for example with an LLM or NLI check</li>
+    <li>Limiting references to five ids</li>
+  </ol>
+  <div class="explain">The id is valid, so structural checks pass. Only a content check that compares the claim with the cited evidence can flag an unsupported detail.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the main difference between how RAPTOR and GraphRAG decide what gets summarized together?</p>
+  <ol>
+    <li>RAPTOR uses an LLM to group chunks; GraphRAG uses embeddings</li>
+    <li data-correct>RAPTOR clusters chunks by embedding similarity; GraphRAG groups extracted entities by graph structure</li>
+    <li>RAPTOR summarizes only the top level; GraphRAG summarizes only leaves</li>
+    <li>There is no difference; both cluster entities</li>
+  </ol>
+  <div class="explain">RAPTOR's clusters contain text that sounds alike; GraphRAG's communities contain entities that interact. That is why GraphRAG can put the acquisition article and the Tern blog in one community's evidence.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">After adding the 2026 podcast to the corpus, the C1 report still calls Jonas Vehl the CTO. What is the most targeted fix?</p>
+  <ol>
+    <li>Regenerate every report in the index</li>
+    <li>Increase the report output budget</li>
+    <li>Lower the rating of C1</li>
+    <li data-correct>Detect that C1's member descriptions changed (for example by a content hash), regenerate C1 and its ancestors, and include dated facts in the context</li>
+  </ol>
+  <div class="explain">Stale reports come from changed inputs. Hashing member descriptions finds affected communities, ancestors must follow because they may substitute the child report, and dated claims keep the new report from repeating the old fact.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should reports include original text units as well as entity and relationship descriptions?</summary>
+  <div><p>It can help specificity, since descriptions are already summaries. GraphRAG has a variant that builds report context from text units. The cost is budget: a few chunks consume what dozens of relationship rows would. A good compromise is to include the one or two chunks that contribute the most source ids to the community's top relationships.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What does the rating actually do?</summary>
+  <div><p>It orders reports. Global search and dynamic community selection can prioritize or filter by it, and humans browsing an index start with the highest-rated communities. Treat it as a relative ranking signal generated with the same prompt for every community, not as a calibrated score, and adapt its definition (“impact severity”) to your domain.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why do I get only one level of reports when I index the Kestrel corpus with minigraphrag?</summary>
+  <div><p>With the default <code>max_cluster_size = 10</code>, no Kestrel community exceeds ten entities, so nothing is split and every community is level 0. The two-level hierarchy in this chapter uses <code>max_cluster_size = 5</code>. Also, the offline <code>MockLLM</code> extracts relationships from sentence co-occurrence, so its graph has more, noisier edges than the curated one here, and its communities differ (for example it groups Deepcast with Marlow Dynamics as a pair). Run with a real LLM to see communities closer to the running example.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I write reports in parallel?</summary>
+  <div><p>Within a level, yes: communities at the same level don't depend on each other, so batch them concurrently up to your rate limit. Across levels, no: a parent may need its children's reports for substitution. GraphRAG processes level by level for exactly this reason.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Are community reports useful without global search?</summary>
+  <div><p>Yes. Local search (<a href="14-local-search.html">Chapter 14</a>) adds the reports of the communities its seed entities belong to, giving the model a zoomed-out view next to the entity details. They also make an excellent human-facing table of contents for a corpus, and a quick way to sanity-check what your extraction and clustering actually produced.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a report quality dashboard</h3>
+  <p>Generate reports for your Kestrel index and build the checks that tell you whether to trust them before global search does.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>Reports for every community of a two-level hierarchy (<code>max_cluster_size = 5</code>), saved with the exact context each was generated from</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span><code>validate_report</code> run on every report, with a table of problems per community</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The bridging-relationship substitution from Exercise 12.5 in your generation loop, and a before and after comparison of the C0 report</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A content hash per community (members plus descriptions) stored with each report, and a command that lists stale reports after re-indexing</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A short manual review: for each report, is the title specific, does every finding hold up against its cited rows, and does the rating ordering make sense</span></li>
+  </ul>
+  <p><strong>Done when</strong> every report passes validation, the supply-chain report cites the acquisition and Project Tern, and the level-0 report explains why Kestrel Labs started Project Tern.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>A community report has a title, summary, rating, rating explanation and findings with data references; pre-computed reports are what make global questions tractable.</li>
+    <li>Report context is ranked tables: entities by degree, relationships by combined degree, plus claims, trimmed to an input budget. How you spend the budget changes what the report can say.</li>
+    <li>Reports are generated bottom-up; large parents substitute their children's reports for raw rows, largest children first.</li>
+    <li>Substitution can drop the relationships that connect sub-communities; keep bridging edges explicitly.</li>
+    <li>Parse defensively, validate every data reference against the context, and embed report content for retrieval.</li>
+    <li>RAPTOR summarizes clusters of similar chunks; GraphRAG summarizes communities of interacting entities. Pick by whether your questions are about topics or about actors and their relations.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: community report prompt, context builder and <code>community_reports</code> defaults. <span class="venue">GitHub</span></li>
+  <li>Sarthi, Abdullah, Tuli, Khanna, Goldie and Manning. <a href="https://arxiv.org/abs/2401.18059">RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval</a>. <span class="venue">ICLR 2024; arXiv 2401.18059</span></li>
+  <li>Traag, Waltman and van Eck. <a href="https://arxiv.org/abs/1810.08473">From Louvain to Leiden: guaranteeing well-connected communities</a>. <span class="venue">Scientific Reports, 2019</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+  <li>Huang et al. <a href="https://arxiv.org/abs/2503.10150">Retrieval-Augmented Generation with Hierarchical Knowledge (HiRAG)</a>. <span class="venue">arXiv 2503.10150, 2025</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

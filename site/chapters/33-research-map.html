@@ -1,0 +1,902 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The research map | Graph RAG from Scratch</title>
+<meta name="description" content="A taxonomy of GraphRAG research by knowledge organization, retrieval and integration, a 2023 to 2026 timeline, the 2026 trends, open problems, and a checklist for reading papers critically.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="33-research-map" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>The research map</h1>
+  <p class="lede">Hundreds of GraphRAG papers have appeared since 2023, and more arrive every week. This chapter gives you a map to place each one on, a timeline of the milestones, the directions the 2026 papers are pushing, and a checklist for deciding whether a result is worth building on.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Place any GraphRAG paper in a three-stage taxonomy: knowledge organization, knowledge retrieval and knowledge integration</li>
+      <li>Trace the field's milestones from Think-on-Graph and From Local to Global to the 2026 work on cost, time, provenance and modality</li>
+      <li>Summarize what the 2026 papers claim, using only what their abstracts actually say</li>
+      <li>Read a GraphRAG paper critically with a checklist covering baselines, cost, leakage, judges and statistics</li>
+      <li>Set up a weekly routine to keep up with the literature without drowning in it</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why you need a map</h2>
+<p>By now you have built every major piece of GraphRAG yourself: extraction and resolution (<a href="08-entity-relation-extraction.html">Chapters 8</a> and <a href="09-entity-resolution.html">9</a>), communities and reports (<a href="11-community-detection.html">11</a> and <a href="12-community-reports.html">12</a>), local, global, PPR and path retrieval (<a href="14-local-search.html">14</a> to <a href="19-subgraph-gnn.html">19</a>), evaluation (<a href="25-evaluation.html">25</a>) and agents with memory (<a href="30-agentic-graphrag.html">30</a>). The research literature is the same set of ideas recombined, pushed further, and occasionally renamed.</p>
+<p>Without a map, every new paper looks like a new system you have to learn from scratch. With one, most papers reduce to a sentence: “a new way to build the index,” “a new policy for walking the graph,” or “a new way to feed the retrieved subgraph to the model.” That sentence tells you which chapter's code it would change, which baseline it should beat, and whether it matters for your use case.</p>
+
+<h3>Three surveys, three framings</h3>
+<p>Three surveys from late 2024 and early 2025 are the standard entry points. They slice the same field differently, and it helps to know all three because papers borrow their vocabulary.</p>
+<table>
+  <thead><tr><th>Survey</th><th>How it divides the pipeline</th><th>Most useful for</th></tr></thead>
+  <tbody>
+    <tr><td>Peng et al., <em>Graph Retrieval-Augmented Generation: A Survey</em> (2408.08921)</td><td>Graph-based indexing, graph-guided retrieval, graph-enhanced generation; also downstream tasks, evaluation and industrial use</td><td>A first formal description of the workflow and the training methods at each stage</td></tr>
+    <tr><td>Han et al., <em>Retrieval-Augmented Generation with Graphs (GraphRAG)</em> (2501.00309)</td><td>Components: query processor, retriever, organizer, generator, data source; then techniques per domain</td><td>Seeing how GraphRAG designs differ by domain; its abstract argues that graphs in different domains have distinct relational patterns and need dedicated designs</td></tr>
+    <tr><td>Zhang et al., <em>A Survey of Graph Retrieval-Augmented Generation for Customized LLMs</em> (2501.13958)</td><td>Knowledge organization, knowledge retrieval, knowledge integration</td><td>Its companion list, DEEP-PolyU/Awesome-GraphRAG, which uses the same headings</td></tr>
+  </tbody>
+</table>
+<p>This chapter uses the third framing because the curated list that follows it gives you a live, categorized feed. The mapping to the course is direct: Part 2 is knowledge organization, Part 3 is knowledge retrieval, Part 4 is knowledge integration.</p>
+
+<div class="callout note">
+  <span class="callout-title">One paper, several boxes</span>
+  <p>Many papers span categories. The curated list files Think-on-Graph under “GraphRAG with existing KGs,” “logical reasoning-based retriever,” “LLM-based retriever” and “graph-enhanced chain of thought,” because it does all four. When you need a single place for a paper, use its main contribution: the component its ablation shows matters.</p>
+</div>
+
+<h2>Knowledge organization: what the graph is for</h2>
+<p>The first question to ask about any system is what role the graph plays. The distinction is subtle and it predicts almost everything else about the design.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="org-title">
+      <title id="org-title">Three roles a graph can play: an index over text, a carrier of knowledge, or both in a hybrid</title>
+      <defs><marker id="org-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box node" x="10" y="12" width="210" height="226" rx="8"/>
+      <text class="d-text bold" x="24" y="36">Graph as index</text>
+      <circle class="d-node" cx="60" cy="80" r="11"/><circle class="d-node" cx="130" cy="70" r="11"/><circle class="d-node" cx="175" cy="110" r="11"/>
+      <line class="d-line" x1="71" y1="78" x2="119" y2="72"/><line class="d-line" x1="140" y1="77" x2="165" y2="102"/>
+      <rect class="d-box ghost" x="30" y="136" width="70" height="36" rx="4"/><rect class="d-box ghost" x="130" y="136" width="70" height="36" rx="4"/>
+      <text class="d-text small" x="40" y="158">passage</text><text class="d-text small" x="140" y="158">passage</text>
+      <line class="d-line dash" x1="60" y1="91" x2="62" y2="136" marker-end="url(#org-arr)"/>
+      <line class="d-line dash" x1="175" y1="121" x2="168" y2="136" marker-end="url(#org-arr)"/>
+      <text class="d-text small" x="24" y="198">Nodes point to text. The LLM</text>
+      <text class="d-text small" x="24" y="213">reads the passages, not the graph.</text>
+      <text class="d-text small" x="24" y="228">RAPTOR, HippoRAG 2, LinearRAG</text>
+
+      <rect class="d-box edge" x="235" y="12" width="210" height="226" rx="8"/>
+      <text class="d-text bold" x="249" y="36">Graph as knowledge carrier</text>
+      <circle class="d-node warm" cx="280" cy="80" r="11"/><circle class="d-node warm" cx="360" cy="70" r="11"/><circle class="d-node warm" cx="405" cy="120" r="11"/><circle class="d-node warm" cx="300" cy="140" r="11"/>
+      <line class="d-line hot" x1="291" y1="78" x2="349" y2="72"/><line class="d-line hot" x1="368" y1="79" x2="398" y2="110"/><line class="d-line hot" x1="284" y1="91" x2="296" y2="129"/>
+      <text class="d-text small" x="300" y="58">acquired</text>
+      <text class="d-text small" x="249" y="198">Facts live on nodes and edges.</text>
+      <text class="d-text small" x="249" y="213">The LLM reads triples, paths, reports.</text>
+      <text class="d-text small" x="249" y="228">GraphRAG, ToG, RoG, PathRAG</text>
+
+      <rect class="d-box comm" x="460" y="12" width="210" height="226" rx="8"/>
+      <text class="d-text bold" x="474" y="36">Hybrid</text>
+      <circle class="d-node warm" cx="505" cy="78" r="10"/><circle class="d-node warm" cx="575" cy="72" r="10"/>
+      <line class="d-line hot" x1="515" y1="77" x2="565" y2="73"/>
+      <rect class="d-box ghost" x="600" y="100" width="58" height="34" rx="4"/><text class="d-text small" x="606" y="121">chunk</text>
+      <rect class="d-box ghost" x="480" y="100" width="58" height="34" rx="4"/><text class="d-text small" x="486" y="121">chunk</text>
+      <line class="d-line dash" x1="580" y1="82" x2="620" y2="100" marker-end="url(#org-arr)"/>
+      <line class="d-line dash" x1="503" y1="88" x2="507" y2="100" marker-end="url(#org-arr)"/>
+      <text class="d-text small" x="474" y="198">Graph facts and the chunks they</text>
+      <text class="d-text small" x="474" y="213">came from, retrieved together.</text>
+      <text class="d-text small" x="474" y="228">KG²RAG, HybGRAG, CodexGraph</text>
+    </svg>
+  </div>
+  <figcaption>The same Kestrel corpus can be organized three ways. In the index role, the edge between Marlow Dynamics and Deepcast only helps you find the passage about the acquisition. In the carrier role, the edge itself is evidence. Hybrids keep both.</figcaption>
+</figure>
+
+<h3>Graphs for knowledge indexing</h3>
+<p>Here the graph is a navigation structure over the original text. RAPTOR builds a tree of recursive summaries over chunks; HippoRAG 2 links phrase nodes to passage nodes so a PageRank walk ends on passages; LinearRAG argues that relation extraction is the unstable, expensive step and builds its graph without it, for large corpora. The retrieved unit is still a passage, so answers inherit the passages' fidelity and citations come for free. The weakness is that the graph can only be as good as the co-occurrence or similarity signals used to link nodes.</p>
+
+<h3>Graphs as knowledge carriers</h3>
+<p>Here the graph <em>is</em> the knowledge. The list splits this in two. <strong>Graphs built from a corpus</strong> is Microsoft's From Local to Global (entity graph, communities, reports), GraphReader, Medical Graph RAG, PathRAG and Youtu-GraphRAG; this is what you built in Part 2. <strong>GraphRAG with existing knowledge graphs</strong> is the older KGQA tradition: Think-on-Graph, Think-on-Graph 2.0 and Reasoning on Graphs walk Freebase or Wikidata. The strength is compact, composable evidence. The weakness is extraction error: a wrong edge is a wrong fact, and nothing in the retrieved context reveals it.</p>
+<p>A newer strand questions whether you should build the graph ahead of time at all. <em>You Don't Need Pre-built Graphs for RAG</em> (2508.06105, the method is called LogicRAG) argues that corpus-to-graph conversion costs tokens and update latency, and that a fixed graph may not match the reasoning structure a particular query needs. Instead it decomposes each query into sub-problems, builds a directed acyclic graph of their dependencies at inference time, and retrieves for them in topological order. AutoGraph-R1 (2510.15339) goes the other way: it keeps the pre-built graph but trains the constructor with reinforcement learning, rewarding graphs by how well they serve a downstream RAG pipeline, with separate rewards for the carrier and index roles.</p>
+
+<h3>Hybrid GraphRAG</h3>
+<p>Hybrids treat the graph and the text as complementary. KG²RAG retrieves seed chunks semantically, then expands and organizes them using the knowledge graph. HybGRAG answers questions that need both textual and relational knowledge bases. CodexGraph puts a code repository into a graph database and lets the model query it. Capstones <a href="c2-code-graph.html">2</a> and <a href="c4-enterprise-kgqa.html">4</a> are hybrids in exactly this sense.</p>
+
+<h2>Knowledge retrieval: how the graph is searched</h2>
+<p>Given a graph, the second question is how a query becomes a subgraph, a path set or a list of passages. The curated list uses seven retriever families. The explorer below shows every family with representative papers, placed where the list files them except where a note says otherwise, plus pointers to the chapter where you implemented the idea.</p>
+
+<div class="viz" data-viz="ch33-taxonomy">
+<script type="application/json">
+{
+  "title": "GraphRAG taxonomy explorer",
+  "subtitle": "Click a category to see its papers; use the buttons to filter by stage",
+  "stages": [
+    {"id": "org", "label": "Knowledge organization", "group": 1, "children": [
+      {"id": "org-index", "label": "Graphs for indexing", "detail": "The graph organizes and links text; retrieval returns passages.", "papers": [
+        {"name": "RAPTOR", "arxiv": "2401.18059", "year": 2024, "note": "Recursive summary tree over chunks; retrieve across levels.", "chapter": "12-community-reports.html"},
+        {"name": "HippoRAG 2", "arxiv": "2502.14802", "year": 2025, "note": "Phrase and passage nodes; PPR ends on passages.", "chapter": "17-ppr-hipporag.html"},
+        {"name": "LinearRAG", "arxiv": "2510.10114", "year": 2025, "note": "Avoids unstable relation extraction when building the graph for large corpora.", "chapter": "26-cost-scaling.html"},
+        {"name": "HiRAG", "arxiv": "2503.10150", "year": 2025, "note": "RAG with hierarchical knowledge.", "chapter": "12-community-reports.html"},
+        {"name": "KAG", "arxiv": "2409.13731", "year": 2024, "note": "Knowledge augmented generation for professional domains.", "chapter": "05-knowledge-graphs.html"},
+        {"name": "OG-RAG", "arxiv": "2412.15235", "year": 2024, "note": "Ontology-grounded hypergraph over domain documents.", "chapter": "31-multimodal-hypergraph.html"},
+        {"name": "GraphCoder", "arxiv": "2406.07003", "year": 2024, "note": "Code context graph of control flow and dependencies for completion.", "chapter": "32-domain-graphrag.html"}
+      ]},
+      {"id": "org-corpus", "label": "KG built from corpus", "detail": "An LLM extracts a knowledge graph; the graph carries the facts.", "papers": [
+        {"name": "From Local to Global", "arxiv": "2404.16130", "year": 2024, "note": "Entity graph, Leiden communities, reports, local and global search.", "chapter": "15-global-search.html"},
+        {"name": "GraphReader", "arxiv": "2406.14550", "year": 2024, "note": "An agent explores a graph built from a long document.", "chapter": "30-agentic-graphrag.html"},
+        {"name": "Medical Graph RAG", "arxiv": "2408.04187", "year": 2024, "note": "Graph linked to trusted medical sources.", "chapter": "32-domain-graphrag.html"},
+        {"name": "PathRAG", "arxiv": "2502.14902", "year": 2025, "note": "Prunes to key relational paths to cut redundant context.", "chapter": "18-paths-and-agents.html"},
+        {"name": "GFM-RAG", "arxiv": "2502.01113", "year": 2025, "note": "A graph foundation model reasons over the graph for retrieval.", "chapter": "19-subgraph-gnn.html"},
+        {"name": "Youtu-GraphRAG", "arxiv": "2508.19855", "year": 2025, "note": "Schema-bounded extraction agent, community tree, agentic retriever.", "chapter": "30-agentic-graphrag.html"},
+        {"name": "AutoGraph-R1", "arxiv": "2510.15339", "year": 2025, "note": "RL-trained graph constructor rewarded by downstream RAG utility.", "chapter": "24-training-with-graphs.html"},
+        {"name": "Adaptive reasoning structures", "arxiv": "2508.06105", "year": 2025, "note": "LogicRAG: a DAG of sub-problems per query instead of a pre-built graph.", "chapter": "23-graph-reasoning.html"}
+      ]},
+      {"id": "org-existing", "label": "Existing knowledge graphs", "detail": "Retrieval over a curated KG such as Freebase or Wikidata.", "papers": [
+        {"name": "Think-on-Graph", "arxiv": "2307.07697", "year": 2023, "note": "LLM beam search over KG relations and entities.", "chapter": "18-paths-and-agents.html"},
+        {"name": "Think-on-Graph 2.0", "arxiv": "2407.10805", "year": 2024, "note": "Alternates KG exploration with document retrieval.", "chapter": "18-paths-and-agents.html"},
+        {"name": "Reasoning on Graphs", "arxiv": "2310.01061", "year": 2023, "note": "Plans relation paths, retrieves them, reasons faithfully.", "chapter": "23-graph-reasoning.html"},
+        {"name": "StructRAG", "arxiv": "2410.08815", "year": 2024, "note": "Picks a structure type per task and restructures documents into it.", "chapter": "22-context-construction.html"},
+        {"name": "GraphSearch", "arxiv": "2509.22009", "year": 2025, "note": "Agentic deep search with semantic and relational channels.", "chapter": "30-agentic-graphrag.html"}
+      ]},
+      {"id": "org-hybrid", "label": "Hybrid GraphRAG", "detail": "Graph facts and text retrieved together.", "papers": [
+        {"name": "KG²RAG", "arxiv": "2502.06864", "year": 2025, "note": "Semantic seed chunks, then KG-guided expansion and organization.", "chapter": "21-hybrid-design-patterns.html"},
+        {"name": "HybGRAG", "arxiv": "2412.16311", "year": 2024, "note": "Questions over textual and relational knowledge bases.", "chapter": "21-hybrid-design-patterns.html"},
+        {"name": "Graph of Records", "arxiv": "2410.11001", "year": 2024, "note": "Links retrieved chunks to past LLM responses for summarization.", "chapter": "15-global-search.html"},
+        {"name": "CodexGraph", "arxiv": "2408.03910", "year": 2024, "note": "Code repository in a graph database queried by the model.", "chapter": "c2-code-graph.html"}
+      ]}
+    ]},
+    {"id": "ret", "label": "Knowledge retrieval", "group": 2, "children": [
+      {"id": "ret-sim", "label": "Similarity-based", "detail": "Embedding or lexical similarity selects nodes, edges or subgraphs.", "papers": [
+        {"name": "G-Retriever", "arxiv": "2402.07630", "year": 2024, "note": "Similarity prizes plus a prize-collecting Steiner tree.", "chapter": "19-subgraph-gnn.html"},
+        {"name": "GraphCoder", "arxiv": "2406.07003", "year": 2024, "note": "Retrieves similar code context subgraphs.", "chapter": "32-domain-graphrag.html"},
+        {"name": "ColGraphRAG", "arxiv": "2607.16208", "year": 2026, "note": "Late-interaction scoring for graph-linked images (our placement).", "chapter": "31-multimodal-hypergraph.html"}
+      ]},
+      {"id": "ret-logic", "label": "Logical reasoning", "detail": "Rules, relation paths or reasoning structures decide what to fetch.", "papers": [
+        {"name": "Think-on-Graph", "arxiv": "2307.07697", "year": 2023, "note": "Relation pruning step by step.", "chapter": "18-paths-and-agents.html"},
+        {"name": "Adaptive reasoning structures", "arxiv": "2508.06105", "year": 2025, "note": "Query-specific logic structures.", "chapter": "23-graph-reasoning.html"}
+      ]},
+      {"id": "ret-llm", "label": "LLM-based", "detail": "The LLM extracts keywords, scores communities or chooses the next hop.", "papers": [
+        {"name": "LightRAG", "arxiv": "2410.05779", "year": 2024, "note": "High- and low-level keywords match relations and entities.", "chapter": "16-lightrag.html"},
+        {"name": "From Local to Global", "arxiv": "2404.16130", "year": 2024, "note": "LLM map-reduce over community reports.", "chapter": "15-global-search.html"},
+        {"name": "Think-on-Graph", "arxiv": "2307.07697", "year": 2023, "note": "The LLM is the beam scorer.", "chapter": "18-paths-and-agents.html"}
+      ]},
+      {"id": "ret-gnn", "label": "GNN-based", "detail": "A graph neural network scores nodes or passages.", "papers": [
+        {"name": "GNN-Ret", "arxiv": "2406.06572", "year": 2024, "note": "GNN over a graph of related passages.", "chapter": "19-subgraph-gnn.html"},
+        {"name": "GNN-RAG", "arxiv": "2405.20139", "year": 2024, "note": "GNN finds answer candidates; shortest paths become the prompt (our placement).", "chapter": "19-subgraph-gnn.html"},
+        {"name": "CG-RAG", "arxiv": "2501.15067", "year": 2025, "note": "Sparse and dense signals with graph encoding on citation graphs.", "chapter": "32-domain-graphrag.html"}
+      ]},
+      {"id": "ret-multi", "label": "Multi-round", "detail": "Retrieve, reason, retrieve again.", "papers": [
+        {"name": "Graph Chain-of-Thought", "arxiv": "2404.07103", "year": 2024, "note": "Iterates reasoning, graph interaction and execution.", "chapter": "23-graph-reasoning.html"},
+        {"name": "Graph of Records", "arxiv": "2410.11001", "year": 2024, "note": "Grows a graph of chunks and responses over rounds.", "chapter": "15-global-search.html"},
+        {"name": "GraphSearch", "arxiv": "2509.22009", "year": 2025, "note": "Six-module multi-turn workflow (our placement).", "chapter": "30-agentic-graphrag.html"}
+      ]},
+      {"id": "ret-post", "label": "Post-retrieval", "detail": "Filter, verify or restructure what was retrieved before generation.", "papers": [
+        {"name": "Chain-of-Knowledge prompting", "arxiv": "2306.06427", "year": 2023, "note": "Evidence triples plus a verification step.", "chapter": "23-graph-reasoning.html"},
+        {"name": "Graph-constrained Reasoning", "arxiv": "2410.13080", "year": 2024, "note": "Constrains decoding to paths that exist in the KG.", "chapter": "23-graph-reasoning.html"}
+      ]},
+      {"id": "ret-hybrid", "label": "Hybrid retriever", "detail": "Several retrieval signals combined.", "papers": [
+        {"name": "Think-on-Graph 2.0", "arxiv": "2407.10805", "year": 2024, "note": "KG walks and document retrieval in tight coupling.", "chapter": "18-paths-and-agents.html"},
+        {"name": "StructRAG", "arxiv": "2410.08815", "year": 2024, "note": "Hybrid structurization at inference time.", "chapter": "22-context-construction.html"}
+      ]}
+    ]},
+    {"id": "int", "label": "Knowledge integration", "group": 3, "children": [
+      {"id": "int-node", "label": "Fine-tuning: node level", "detail": "Train the model on node-level graph knowledge.", "papers": [
+        {"name": "GraphGPT", "arxiv": "2310.13023", "year": 2023, "note": "Graph instruction tuning.", "chapter": "24-training-with-graphs.html"}
+      ]},
+      {"id": "int-path", "label": "Fine-tuning: path level", "detail": "Train on paths or path descriptions.", "papers": [
+        {"name": "MuseGraph", "arxiv": "2403.04780", "year": 2024, "note": "Compact graph descriptions and CoT-based instructions for graph mining.", "chapter": "24-training-with-graphs.html"},
+        {"name": "Reasoning on Graphs", "arxiv": "2310.01061", "year": 2023, "note": "Instruction-tuned to generate relation paths.", "chapter": "23-graph-reasoning.html"}
+      ]},
+      {"id": "int-subgraph", "label": "Fine-tuning: subgraph level", "detail": "Encode whole subgraphs as tokens or soft prompts.", "papers": [
+        {"name": "LLaGA", "arxiv": "2402.08170", "year": 2024, "note": "Large language and graph assistant.", "chapter": "24-training-with-graphs.html"}
+      ]},
+      {"id": "int-cot", "label": "In-context: graph-enhanced CoT", "detail": "No training; the prompt structures reasoning over graph evidence.", "papers": [
+        {"name": "Think-on-Graph", "arxiv": "2307.07697", "year": 2023, "note": "Reasoning interleaved with graph exploration.", "chapter": "18-paths-and-agents.html"},
+        {"name": "Graph Chain-of-Thought", "arxiv": "2404.07103", "year": 2024, "note": "Graph reasoning as an iterative prompt loop.", "chapter": "23-graph-reasoning.html"},
+        {"name": "Chain-of-Knowledge (ICLR 2024)", "openreview": "cPgh4gWZlz", "year": 2024, "note": "Grounds reasoning by adapting knowledge from heterogeneous sources.", "chapter": "23-graph-reasoning.html"}
+      ]},
+      {"id": "int-refine", "label": "In-context: KG refinement", "detail": "The LLM and the graph correct each other.", "papers": [
+        {"name": "Plan-on-Graph", "arxiv": "2410.23875", "year": 2024, "note": "Self-correcting adaptive planning on KGs.", "chapter": "18-paths-and-agents.html"}
+      ]}
+    ]}
+  ]
+}
+</script>
+</div>
+
+<h3>What the seven families trade off</h3>
+<table>
+  <thead><tr><th>Family</th><th>Query-time LLM calls</th><th>Main strength</th><th>Main risk</th><th>Where you built it</th></tr></thead>
+  <tbody>
+    <tr><td>Similarity-based</td><td>0 to 1</td><td>Fast, cheap, easy to cache</td><td>Misses bridge entities that do not resemble the query</td><td><a href="14-local-search.html">Ch 14</a>, <a href="19-subgraph-gnn.html">19</a></td></tr>
+    <tr><td>Logical reasoning</td><td>Few</td><td>Interpretable paths, precise on KGs with typed relations</td><td>Brittle when relations are free text or the schema is incomplete</td><td><a href="18-paths-and-agents.html">Ch 18</a>, <a href="20-text2cypher.html">20</a></td></tr>
+    <tr><td>LLM-based</td><td>One per step, batch or community</td><td>Handles vague and global questions</td><td>Cost and latency grow with graph size; the LLM's judgment is a black box</td><td><a href="15-global-search.html">Ch 15</a>, <a href="16-lightrag.html">16</a></td></tr>
+    <tr><td>GNN-based</td><td>0 for retrieval</td><td>Learns multi-hop relevance, fast at inference</td><td>Needs training data; may not transfer across graphs</td><td><a href="19-subgraph-gnn.html">Ch 19</a></td></tr>
+    <tr><td>Multi-round</td><td>Several rounds</td><td>Recovers from a bad first retrieval</td><td>Loops, drift and unbounded cost without a stopping rule</td><td><a href="30-agentic-graphrag.html">Ch 30</a></td></tr>
+    <tr><td>Post-retrieval</td><td>1 or more</td><td>Faithfulness: removes unsupported evidence before generation</td><td>Adds a stage that can drop the one fact you needed</td><td><a href="23-graph-reasoning.html">Ch 23</a></td></tr>
+    <tr><td>Hybrid</td><td>Varies</td><td>Covers more question types</td><td>More moving parts to tune and evaluate</td><td><a href="21-hybrid-design-patterns.html">Ch 21</a></td></tr>
+  </tbody>
+</table>
+<p>Map the canonical Kestrel questions onto these families and the trade-offs become concrete. “What connects Priya Nair to Deepcast?” is a path question: logical or PPR retrieval finds PRIYA NAIR → MARLOW DYNAMICS → DEEPCAST with zero or one LLM call. “What are the main themes in this corpus?” has no path to find; only an LLM-based map-reduce over community reports answers it, at one call per batch of reports. “Why did Kestrel Labs start Project Tern?” sits in between and is where multi-round and hybrid retrievers earn their cost.</p>
+
+<h2>Knowledge integration: how evidence reaches the model</h2>
+<p>The third stage is how retrieved graph knowledge changes what the model generates. There are two broad routes.</p>
+<h3>Fine-tuning</h3>
+<p>Fine-tuning methods change the model's weights so it can consume graph structure directly. The list groups them by granularity. <strong>Node-level</strong> methods such as GraphGPT tune the model on instructions about individual nodes and their attributes. <strong>Path-level</strong> methods train on sequences: Reasoning on Graphs tunes the model to generate relation paths that are then instantiated in the KG, and MuseGraph turns graphs into compact descriptions for instruction tuning. <strong>Subgraph-level</strong> methods such as LLaGA encode whole neighborhoods into the model's input space. Since 2025 a related line trains the retrieval <em>policy</em> rather than the reader with reinforcement learning: Graph-R1 frames retrieval as a multi-turn agent-environment interaction with an end-to-end reward, and AutoGraph-R1 trains the graph constructor. <a href="24-training-with-graphs.html">Chapter 24</a> covers these.</p>
+<h3>In-context learning</h3>
+<p>Most production systems never fine-tune. They linearize graph evidence into the prompt (<a href="22-context-construction.html">Chapter 22</a>) and structure the reasoning. <strong>Graph-enhanced chain of thought</strong> interleaves reasoning steps with graph lookups (Think-on-Graph, Graph Chain-of-Thought). <strong>Collaborative KG refinement</strong> lets the model detect and repair problems in the retrieved graph or its own plan, as Plan-on-Graph does with self-correction. Everything you built in minigraphrag is in-context integration: the <code>[Data: Entities (3)]</code> citation format is a lightweight form of grounding that keeps the model tied to specific records.</p>
+
+<div class="callout tip">
+  <span class="callout-title">A three-question classifier</span>
+  <p>For any paper, answer: (1) What does a graph node stand for, text or fact? (2) Who decides what to retrieve: similarity, rules, an LLM, a GNN or a trained policy? (3) Are model weights changed? Those three answers place most papers in the explorer above. The rest are benchmarks, surveys, systems papers or critiques, which you should tag as such.</p>
+</div>
+
+<h2>A timeline of milestones, 2023 to 2026</h2>
+<p>The field did not start in 2024. Knowledge-graph question answering and graph neural networks have long histories. What changed in 2023 is that LLMs became good enough to both <em>build</em> graphs from text and <em>walk</em> them with language. The timeline below lists the papers and releases that each changed what practitioners built. Dates are the month of first arXiv submission.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 820" role="img" aria-labelledby="tl-title">
+      <title id="tl-title">Timeline of GraphRAG milestones from 2023 to September 2026</title>
+      <line class="d-line" x1="96" y1="20" x2="96" y2="805"/>
+      <!-- 2023 -->
+      <text class="d-text bold" x="10" y="34">2023</text>
+      <line class="d-line faint" x1="10" y1="42" x2="670" y2="42"/>
+      <text class="d-text small mono" x="10" y="66">2023-06</text><circle class="d-node alt" cx="96" cy="62" r="6"/>
+      <text class="d-text" x="112" y="66"><tspan class="d-text bold">Unifying LLMs and KGs roadmap</tspan> frames KG-enhanced LLMs</text>
+      <text class="d-text small mono" x="10" y="92">2023-07</text><circle class="d-node warm" cx="96" cy="88" r="6"/>
+      <text class="d-text" x="112" y="92"><tspan class="d-text bold">Think-on-Graph</tspan>: the LLM beam-searches a KG</text>
+      <text class="d-text small mono" x="10" y="118">2023-10</text><circle class="d-node alt" cx="96" cy="114" r="6"/>
+      <text class="d-text" x="112" y="118"><tspan class="d-text bold">Reasoning on Graphs</tspan> and <tspan class="d-text bold">GraphGPT</tspan>: training with graphs</text>
+      <!-- 2024 -->
+      <text class="d-text bold" x="10" y="156">2024</text>
+      <line class="d-line faint" x1="10" y1="164" x2="670" y2="164"/>
+      <text class="d-text small mono" x="10" y="188">2024-01</text><circle class="d-node" cx="96" cy="184" r="6"/>
+      <text class="d-text" x="112" y="188"><tspan class="d-text bold">RAPTOR</tspan> tree index; <tspan class="d-text bold">MultiHop-RAG</tspan> benchmark</text>
+      <text class="d-text small mono" x="10" y="214">2024-02</text><circle class="d-node warm" cx="96" cy="210" r="6"/>
+      <text class="d-text" x="112" y="214"><tspan class="d-text bold">G-Retriever</tspan>: PCST subgraphs for textual graphs</text>
+      <text class="d-text small mono" x="10" y="240">2024-04</text><circle class="d-node" cx="96" cy="236" r="6"/>
+      <text class="d-text" x="112" y="240"><tspan class="d-text bold">From Local to Global</tspan>: communities, reports, global search</text>
+      <text class="d-text small mono" x="10" y="266">2024-05</text><circle class="d-node warm" cx="96" cy="262" r="6"/>
+      <text class="d-text" x="112" y="266"><tspan class="d-text bold">HippoRAG</tspan> (PPR memory) and <tspan class="d-text bold">GNN-RAG</tspan></text>
+      <text class="d-text small mono" x="10" y="292">2024-07</text><circle class="d-node" cx="96" cy="288" r="6"/>
+      <text class="d-text" x="112" y="292"><tspan class="d-text bold">microsoft/graphrag</tspan> released as open source</text>
+      <text class="d-text small mono" x="10" y="318">2024-08</text><circle class="d-node alt" cx="96" cy="314" r="6"/>
+      <text class="d-text" x="112" y="318"><tspan class="d-text bold">Graph RAG survey</tspan> (Peng et al.) formalizes the workflow</text>
+      <text class="d-text small mono" x="10" y="344">2024-10</text><circle class="d-node warm" cx="96" cy="340" r="6"/>
+      <text class="d-text" x="112" y="344"><tspan class="d-text bold">LightRAG</tspan>: dual-level keywords, incremental updates</text>
+      <!-- 2025 -->
+      <text class="d-text bold" x="10" y="382">2025</text>
+      <line class="d-line faint" x1="10" y1="390" x2="670" y2="390"/>
+      <text class="d-text small mono" x="10" y="414">2025-01</text><circle class="d-node alt" cx="96" cy="410" r="6"/>
+      <text class="d-text" x="112" y="414"><tspan class="d-text bold">Zep</tspan> temporal KG memory; Zhang et al. survey (Han et al.: Dec 2024)</text>
+      <text class="d-text small mono" x="10" y="440">2025-02</text><circle class="d-node warm" cx="96" cy="436" r="6"/>
+      <text class="d-text" x="112" y="440"><tspan class="d-text bold">HippoRAG 2</tspan>, <tspan class="d-text bold">PathRAG</tspan>, <tspan class="d-text bold">GFM-RAG</tspan></text>
+      <text class="d-text small mono" x="10" y="466">2025-03</text><circle class="d-node" cx="96" cy="462" r="6"/>
+      <text class="d-text" x="112" y="466"><tspan class="d-text bold">HyperGraphRAG</tspan>; <tspan class="d-text bold">DIGIMON</tspan> unified comparison</text>
+      <text class="d-text small mono" x="10" y="492">2025-06</text><circle class="d-node alt" cx="96" cy="488" r="6"/>
+      <text class="d-text" x="112" y="492"><tspan class="d-text bold">GraphRAG-Bench</tspan>: when do graphs help at all?</text>
+      <text class="d-text small mono" x="10" y="518">2025-07</text><circle class="d-node alt" cx="96" cy="514" r="6"/>
+      <text class="d-text" x="112" y="518"><tspan class="d-text bold">Graph-R1</tspan>: agentic GraphRAG trained end to end with RL</text>
+      <text class="d-text small mono" x="10" y="544">2025-08</text><circle class="d-node warm" cx="96" cy="540" r="6"/>
+      <text class="d-text" x="112" y="544"><tspan class="d-text bold">Youtu-GraphRAG</tspan>: schema, community tree, agentic retriever</text>
+      <text class="d-text small mono" x="10" y="570">2025-09</text><circle class="d-node warm" cx="96" cy="566" r="6"/>
+      <text class="d-text" x="112" y="570"><tspan class="d-text bold">GraphSearch</tspan>: agentic deep search, two channels</text>
+      <text class="d-text small mono" x="10" y="596">2025-10</text><circle class="d-node" cx="96" cy="592" r="6"/>
+      <text class="d-text" x="112" y="596"><tspan class="d-text bold">LinearRAG</tspan> and <tspan class="d-text bold">AutoGraph-R1</tspan>: cheaper, trained construction</text>
+      <!-- 2026 -->
+      <text class="d-text bold" x="10" y="634">2026</text>
+      <line class="d-line faint" x1="10" y1="642" x2="670" y2="642"/>
+      <text class="d-text small mono" x="10" y="666">2026</text><circle class="d-node" cx="96" cy="662" r="6"/>
+      <text class="d-text" x="112" y="666"><tspan class="d-text bold">Microsoft GraphRAG</tspan> moves to maintenance mode</text>
+      <text class="d-text small mono" x="10" y="692">2026-05</text><circle class="d-node warm" cx="96" cy="688" r="6"/>
+      <text class="d-text" x="112" y="692"><tspan class="d-text bold">ColGraphRAG</tspan>: late interaction for multimodal graphs</text>
+      <text class="d-text small mono" x="10" y="718">2026-06</text><circle class="d-node warm" cx="96" cy="714" r="6"/>
+      <text class="d-text" x="112" y="718"><tspan class="d-text bold">HyCE-RAG</tspan>: hypergraph chains of evidence</text>
+      <text class="d-text small mono" x="10" y="744">2026-07</text><circle class="d-node" cx="96" cy="740" r="6"/>
+      <text class="d-text" x="112" y="744"><tspan class="d-text bold">HVM-GraphRAG</tspan>: concept graph indexing multimodal chunks</text>
+      <text class="d-text small mono" x="10" y="770">2026-08</text><circle class="d-node alt" cx="96" cy="766" r="6"/>
+      <text class="d-text" x="112" y="770"><tspan class="d-text bold">LineageRAG</tspan>, <tspan class="d-text bold">post-graph-rag</tspan>, <tspan class="d-text bold">The Commercial Tax</tspan></text>
+      <text class="d-text small mono" x="10" y="796">2026-09</text><circle class="d-node warm" cx="96" cy="792" r="6"/>
+      <text class="d-text" x="112" y="796"><tspan class="d-text bold">MOSAIC</tspan>, <tspan class="d-text bold">LiteRAG</tspan>, <tspan class="d-text bold">NS-ST-GraphRAG</tspan></text>
+    </svg>
+  </div>
+  <figcaption>Milestones by month of first arXiv submission. The open-source release and maintenance-mode entries are project events, not papers; the microsoft/graphrag README dates its first release to July 2024 but gives no date for maintenance mode, so that entry is placed by year only. Dot colors: teal for knowledge organization and systems, amber for retrieval, purple for training, surveys, evaluation and critiques.</figcaption>
+</figure>
+
+<p>Read the timeline as three waves. In 2023 the work came from the knowledge-graph QA community: the graph already existed and the question was how an LLM should walk it. In 2024 From Local to Global and its open-source release shifted attention to graphs <em>built from your own documents</em>, and a burst of retrieval ideas followed (PPR, keywords, paths, subgraphs). In 2025 the field turned on itself: unified comparisons such as DIGIMON and GraphRAG-Bench asked when graphs help, while RL-trained constructors and agents tried to make every stage learnable. The 2026 papers, next, mostly attack the costs and blind spots that those comparisons exposed.</p>
+
+<h2>What 2026 is pushing on</h2>
+<p>This section summarizes a sample of 2026 arXiv papers. Every description below restates what the paper's own abstract says, including the numbers, which are the authors' self-reported results. None of them has been independently reproduced in this course. Treat them as claims to test, which is exactly what the checklist later in the chapter is for.</p>
+
+<h3>Cost-efficient GraphRAG</h3>
+<p><strong>LiteRAG</strong> (2609.10239) targets query-time cost. Its abstract describes replacing expensive retrieval-time LLM control with query-conditioned algorithmic exploration and reasoning-chain context construction. On DistComp, a multi-hop benchmark over distributed-systems papers, it reports the highest overall quality among the evaluated methods (0.798) while cutting per-query latency by over 100× and cost by over 99% relative to GraphRAG Global and DRIFT; on UltraDomain it reports matching LinearRAG's quality with about 14× fewer tokens. The ablation credits query-adaptive thresholding and community-aware hub penalization. If you have run global search from <a href="15-global-search.html">Chapter 15</a>, the direction makes sense: map-reduce calls the LLM once per batch of reports on every query.</p>
+<p><strong>The Commercial Tax</strong> (2608.16096) is a critique of how benchmarks report multi-hop retrieval. It audits four leading MuSiQue systems (HippoRAG-2, PropRAG, SAG, KET-RAG) and reports that three depend on NV-Embed-v2, which is licensed cc-by-nc-4.0, for their best numbers without saying so. It measures thirteen embedders on one MuSiQue harness with bootstrap confidence intervals, and reports that a commercially licensed gap to that anchor existed until mid-2026 and was closed by a model released in July 2026. On cost, it reports that three of five audited systems, including Microsoft's GraphRAG, do not disclose indexing cost, and that the only published GraphRAG dollar figures it found span 11× inside a single third-party paper. Its cost model separates one-time embedding from graph construction and recurring answering. The lesson for you: a leaderboard number without a license and a cost is not yet a decision.</p>
+
+<h3>Query-adaptive exploration</h3>
+<p><strong>MOSAIC</strong> (2609.11065) starts from an observation you may have made in <a href="21-hybrid-design-patterns.html">Chapter 21</a>: direct facts need compact neighborhoods, comparisons need balanced coverage of several targets, and mediated questions need deeper paths. It is training-free: an LLM analyzer turns each query's evidence requirements into a bounded policy over seed selection, traversal, stopping and evidence selection, while the graph, indexes, scoring, grounding and generator stay shared. On GraphRAG-Bench it reports query-weighted answer correctness of 76.97 (Medical) and 64.33 (Novel), and in controlled comparisons on the same graph and generator it reports that no fixed narrow, medium or wide policy was consistently best, with MOSAIC 9.96 points above the strongest fixed policy while evaluating 81.9% fewer paths than the wide one. That controlled comparison, same graph and same generator, is the kind of experiment the checklist below asks for.</p>
+
+<h3>Provenance and lineage</h3>
+<p><strong>LineageRAG</strong> (2608.16004) argues that existing GraphRAG methods leave the link between finding evidence and grounding it in source text implicit. It derives “evidence demands” from the query, builds one evidence lineage per demand through demand-conditioned retrieval over the corpus graph, keeps the demand attached to every candidate, and completes a lineage with a verbatim source span when the evidence supports the demand. On HotpotQA, 2WikiMultiHopQA and MuSiQue it reports average gains of 3.51 R@5, 5.96 EM and 5.22 F1 over leading GraphRAG baselines. For Kestrel, a lineage for “Why did Kestrel start Project Tern?” would carry two demands (why the supply ended, what Kestrel did about it), each ending in a quoted sentence.</p>
+
+<h3>Time: bi-temporal and spatio-temporal graphs</h3>
+<p><strong>post-graph-rag</strong> (2608.24921) is an open-source engine that puts chunks with embeddings, a canonical entity graph and community summaries in one PostgreSQL database (pgvector plus edge tables). It validates extraction output before writing, rejecting vague predicates, pronominal names and bare quantities, and it adds a bi-temporal layer that records when a relation held and when the system believed it, superseding incompatible earlier assertions. The abstract reports 94.0% on LongMemEval and attributes the largest single gain to carrying each relation's validity period into the synthesis prompt, which moved temporal reasoning from 0.496 to 0.881 in its ablation. It also reports 0.807 on ECT-QA, an earnings-call benchmark in which every metric is restated each quarter, against published figures of 0.599, 0.406 and 0.405 for TG-RAG, LightRAG and GraphRAG. That is the design you built in <a href="27-incremental-temporal.html">Chapter 27</a> and will extend in <a href="c3-temporal-memory.html">Capstone 3</a>. Notice one detail when you read it: the abstract names gemini-3.6-flash for its own 94.0% and gpt-4o for Zep's 71.2, and does not name a generator for the full-context 60.2.</p>
+<p><strong>NS-ST-GraphRAG</strong> (2609.05139) applies temporal and spatial graphs to long literary narratives, where relations evolve over narrative time. It combines ontology-guided extraction, deterministic constraint checking, dual temporal coordinates, spatial scene attributes and dynamic subgraph retrieval that selects the graph state valid for a query's scope, and introduces Red-Chamber-QA for classical Chinese literature. Its abstract is unusually candid: on a 120-question held-out split it reports 0.733 against 0.675 for the baseline with McNemar exact p = 0.092, described as “directionally favorable but not significant,” notes a closed-book model scores 0.083, and says a pre-specified condition of one of its hypotheses was not supported. Reward that kind of reporting when you see it.</p>
+
+<h3>Hypergraphs</h3>
+<p><strong>HyCE-RAG</strong> (2607.22597) notes that pairwise edges cannot represent associations among several entities and contexts at once. It organizes entities, relations and contextual evidence into hyperedges, builds a query-aware evidence hypergraph, propagates confidence over entity-hyperedge incidences, and assembles ranked evidence chains before generation, scoring semantic relevance, connectivity, coverage, relation reliability, extraction confidence and propagated confidence. It reports consistent gains over standard and graph-based RAG on HotpotQA, 2WikiMultihopQA, MuSiQue and two GraphRAG-Bench subsets in accuracy, context relevance and faithfulness, and frames hypergraphs as a direction for <em>post-retrieval</em> reasoning. <a href="31-multimodal-hypergraph.html">Chapter 31</a> covers the representation.</p>
+
+<h3>Multimodal documents</h3>
+<p><strong>HVM-GraphRAG</strong> (2607.24861) addresses question answering over complex documents where evidence spans regions and modalities. It identifies two problems in existing multimodal GraphRAG, unreliable cross-modal evidence indexing and expensive traversal, and responds with a holistic view that guides graph construction, a compact concept-level graph indexed to supporting multimodal chunks (so retrieval avoids walking a dense entity graph), and modality-specific grouping of retrieved chunks. It reports the best answer performance in most evaluated settings on three datasets with better online retrieval efficiency.</p>
+<p><strong>ColGraphRAG</strong> (2607.16208) is a narrow, well-controlled study: in a graph-grounded multimodal QA pipeline it replaces only the ranking operator for graph-linked image nodes, swapping single-vector similarity for late-interaction MaxSim scoring in the ColBERT/ColPali lineage, and keeps everything else unchanged. On MultimodalQA it reports improved retrieval-stage estimates and downstream QA gains where visual evidence matters most, mixed trends on text-dominant questions, and explicitly calls for broader validation. Single-operator swaps like this are the easiest papers to reproduce and trust.</p>
+
+<h3>Agentic GraphRAG</h3>
+<p>Two 2025 papers anchor the agentic direction that 2026 work builds on. <strong>GraphSearch</strong> (2509.22009) names two limitations, shallow retrieval that misses important evidence and inefficient use of the pre-built graph, and proposes a six-module agentic workflow with dual-channel retrieval: semantic queries over chunks and relational queries over the graph, reporting consistent gains on six multi-hop benchmarks. <strong>Youtu-GraphRAG</strong> (2508.19855) unifies construction and retrieval around one schema: a seed schema bounds an extraction agent and expands to new domains, “dually-perceived” community detection fuses topology with subgraph semantics into a hierarchical knowledge tree, and an agentic retriever uses the same schema to split queries into parallel sub-queries with reflection. It also introduces an anonymized dataset and an “Anonymity Reversion” task to reduce knowledge leakage from pre-training. Its arXiv abstract reports up to 90.71% token-cost savings and 16.62% higher accuracy over state-of-the-art baselines; the later ICLR listing reports 33.60% lower token cost with the same accuracy gain, so cite the version you evaluate.</p>
+
+<table>
+  <thead><tr><th>Trend</th><th>Representative papers</th><th>What it changes in your minigraphrag</th></tr></thead>
+  <tbody>
+    <tr><td>Cost-efficient retrieval</td><td>LiteRAG, The Commercial Tax</td><td>Replace per-query LLM calls with algorithmic exploration; always report indexing and query cost</td></tr>
+    <tr><td>Query-adaptive exploration</td><td>MOSAIC</td><td>A per-query policy for seeds, hops and stopping instead of fixed <code>top_k</code> and depth</td></tr>
+    <tr><td>Provenance</td><td>LineageRAG</td><td>Carry evidence demands through retrieval; end each chain in a verbatim span</td></tr>
+    <tr><td>Time</td><td>post-graph-rag, NS-ST-GraphRAG</td><td>Validity intervals on edges, and put them in the prompt</td></tr>
+    <tr><td>Higher-order facts</td><td>HyCE-RAG</td><td>Hyperedges for n-ary evidence; confidence propagation</td></tr>
+    <tr><td>Multimodal</td><td>HVM-GraphRAG, ColGraphRAG</td><td>Concept graphs indexing images and tables; better image scoring</td></tr>
+    <tr><td>Agentic</td><td>GraphSearch, Youtu-GraphRAG</td><td>Multi-turn tool use over graph and text channels</td></tr>
+  </tbody>
+</table>
+
+<h2>Open problems</h2>
+<p>The same problems recur across surveys, critiques and your own experiments in this course. Each is a good place to contribute.</p>
+<ul>
+  <li><strong>When do graphs actually help?</strong> GraphRAG-Bench was motivated by reports that GraphRAG often underperforms vanilla RAG on real tasks. Your own Kestrel results probably showed the same shape: graphs win on multi-hop and global questions and can lose on single-hop lookups. A reliable way to predict, per query or per corpus, whether to use the graph is still open. Routers in <a href="c1-minigraphrag.html">Capstone 1</a> are a practical but crude answer.</li>
+  <li><strong>Cost that scales with the corpus.</strong> LLM extraction and per-community summarization dominate indexing (<a href="26-cost-scaling.html">Chapter 26</a>). Relation-free graphs (LinearRAG), lazy indexing and trained small extractors all help, but systems still rarely publish cost next to quality, as The Commercial Tax documents.</li>
+  <li><strong>Graph quality you cannot see.</strong> A wrong edge looks exactly like a right one in the prompt. Validating extraction before writing (post-graph-rag), training constructors against downstream utility (AutoGraph-R1) and verbatim grounding (LineageRAG) are three different answers to the same problem.</li>
+  <li><strong>Change over time.</strong> Most benchmarks are static snapshots. Real corpora supersede facts, as the Kestrel CTO change shows. Evaluations of incremental updates and temporal correctness are still thin.</li>
+  <li><strong>Evaluation validity.</strong> LLM judges have position and length bias (<a href="25-evaluation.html">Chapter 25</a>), public benchmarks leak into pre-training (the motivation for Youtu-GraphRAG's anonymized dataset), and comparisons often change the generator or embedder along with the method.</li>
+  <li><strong>Security and access control.</strong> Community summaries mix text from documents with different permissions, and injected instructions can ride along with retrieved evidence (<a href="29-production-ops.html">Chapter 29</a>). There is little published work on ACL-correct GraphRAG; <a href="c4-enterprise-kgqa.html">Capstone 4</a> makes you confront it.</li>
+  <li><strong>Beyond binary text graphs.</strong> Hyperedges, images, tables, code and time all strain the entity-relation-entity model, and each extension currently comes with its own pipeline.</li>
+</ul>
+
+<h2>Reading a GraphRAG paper critically</h2>
+<p>A paper's abstract is an advertisement for its best result. Your job is to find out whether that result will survive on your data, with your models, at your budget. Use this checklist on every paper you are considering building on. Most items can be checked in ten minutes with the paper's tables and repository.</p>
+
+<table>
+  <thead><tr><th>#</th><th>Question</th><th>Why it matters</th><th>Red flag</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Which part of the taxonomy does the contribution change?</td><td>Tells you which baseline is the fair one</td><td>A “retrieval” paper that also changes extraction, chunking and the generator</td></tr>
+    <tr><td>2</td><td>Do all systems use the same generator, embedder and graph?</td><td>Otherwise the comparison measures models, not methods</td><td>Baseline numbers copied from other papers that used different models</td></tr>
+    <tr><td>3</td><td>Is vanilla RAG a baseline, tuned fairly?</td><td>Many GraphRAG gains shrink against a well-tuned vector or hybrid baseline</td><td>Top-k = 1 or tiny chunks for the baseline only</td></tr>
+    <tr><td>4</td><td>What does indexing cost, and what does a query cost?</td><td>A method 2 points better at 20× the tokens may be worse for you</td><td>No token, dollar or latency numbers at all</td></tr>
+    <tr><td>5</td><td>Which question types are in the benchmark?</td><td>Graphs help multi-hop and global questions; single-hop may regress</td><td>One aggregate score, no per-type breakdown</td></tr>
+    <tr><td>6</td><td>Could the answers be in the model's pre-training data?</td><td>Wikipedia-based multi-hop sets can be answered closed-book</td><td>No closed-book baseline, no anonymized or new data</td></tr>
+    <tr><td>7</td><td>If an LLM judges, how was bias controlled?</td><td>Position, length and self-preference bias can decide pairwise wins</td><td>Single ordering, judge is the same model as the system</td></tr>
+    <tr><td>8</td><td>Are differences significant?</td><td>Benchmarks with a few hundred questions have wide intervals</td><td>Sub-point gains with no confidence intervals or tests</td></tr>
+    <tr><td>9</td><td>Does an ablation show which component matters?</td><td>Lets you adopt the one idea that carries the gain</td><td>Every component added at once, nothing removed</td></tr>
+    <tr><td>10</td><td>Can you run it: code, prompts, licenses?</td><td>Reproducibility and whether you may deploy it commercially</td><td>Non-commercial model weights behind the best number, undisclosed</td></tr>
+  </tbody>
+</table>
+
+<div class="callout example">
+  <span class="callout-title">The checklist applied to one abstract</span>
+  <p>Take post-graph-rag's LongMemEval claim: 94.0% for its engine versus 71.2% for Zep and 60.2% for full context. Item 2 flags it immediately: the abstract names gemini-3.6-flash for its own run and gpt-4o for the Zep number, so part of the gap may come from the generator. Item 9 is answered well: the abstract reports a paired ablation on the same graph for its largest single contribution (temporal grounding in the prompt, 0.496 to 0.881 on temporal reasoning). Item 10 is answered well too: code links are given. A fair next step is to rerun the Zep comparison with the same generator before concluding the architecture is the cause.</p>
+</div>
+
+<p>Read beyond the abstract in this order: the experimental setup table (models, datasets, sizes), the main results table with per-type breakdowns, the ablation table, the cost or efficiency section, the limitations section, and only then the method section. You will skip the method section of most papers, and that is the point.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Curated lists have errors too</span>
+  <p>Lists are edited by hand and papers change after they are listed. arXiv 2412.12612, for example, first appeared as SynthCypher and is now titled Auto-Cypher, so a list entry and the paper can disagree. Before you cite or classify a paper, open its arXiv page and check the current title and authors.</p>
+</div>
+
+<h2>How to keep up</h2>
+<h3>A query that finds the new papers</h3>
+<p>arXiv's export API is free, needs no key, and supports field queries and sorting by submission date. The script below fetches the latest matches, proposes taxonomy tags from keyword rules, and flags two checklist signals visible in the abstract alone: whether cost is reported and whether code is linked. It uses only the standard library. Be gentle with the API; one request per run with a few dozen results is plenty.</p>
+
+<pre data-file="research/radar.py"><code class="language-python">"""Weekly GraphRAG radar: fetch new arXiv papers, tag them with the taxonomy, write a triage list."""
+from __future__ import annotations
+
+import re
+import sys
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+
+API = "https://export.arxiv.org/api/query"
+QUERY = ('abs:GraphRAG OR ti:GraphRAG OR abs:"graph retrieval-augmented generation" '
+         'OR (abs:"knowledge graph" AND abs:"retrieval-augmented")')
+ATOM = {"a": "http://www.w3.org/2005/Atom"}
+
+# Keyword rules that propose a place in the taxonomy. A human confirms it after reading the abstract.
+TAGS = {
+    "organization/indexing": r"\bindex(ing)?\b|tree|hierarch|passage graph",
+    "organization/kg-construction": r"construct|extraction|schema|ontolog",
+    "retrieval/llm-agent": r"agent|agentic|iterative|multi-turn|reflection",
+    "retrieval/gnn": r"\bGNN\b|graph neural",
+    "retrieval/ppr-paths": r"pagerank|path|random walk|traversal",
+    "integration/fine-tuning": r"fine-tun|reinforcement|\bRL\b|instruction tun",
+    "cross-cutting/cost": r"cost|latency|token|efficien",
+    "cross-cutting/temporal": r"temporal|time-aware|bi-temporal",
+    "cross-cutting/multimodal": r"multimodal|image|visual|table",
+    "cross-cutting/hypergraph": r"hypergraph|hyperedge|n-ary",
+    "cross-cutting/evaluation": r"benchmark|evaluat",
+    "cross-cutting/provenance": r"provenance|lineage|grounding|citation",
+}
+
+
+def fetch(max_results: int = 50) -&gt; list[dict]:
+    params = urllib.parse.urlencode({"search_query": QUERY, "sortBy": "submittedDate",
+                                     "sortOrder": "descending", "max_results": max_results})
+    with urllib.request.urlopen(f"{API}?{params}", timeout=30) as resp:
+        root = ET.fromstring(resp.read())
+    papers = []
+    for e in root.findall("a:entry", ATOM):
+        abstract = " ".join(e.find("a:summary", ATOM).text.split())
+        papers.append({
+            "id": e.find("a:id", ATOM).text.rsplit("/", 1)[-1],
+            "date": e.find("a:published", ATOM).text[:10],
+            "title": " ".join(e.find("a:title", ATOM).text.split()),
+            "abstract": abstract,
+            "tags": [t for t, pat in TAGS.items() if re.search(pat, abstract, re.I)],
+            # Checklist signals visible in the abstract alone.
+            "reports_cost": bool(re.search(r"cost|token|latency|\$|USD", abstract)),
+            "has_code": bool(re.search(r"github\.com|code (is )?available|open-source", abstract, re.I)),
+        })
+    return papers
+
+
+if __name__ == "__main__":
+    for p in fetch(int(sys.argv[1]) if len(sys.argv) &gt; 1 else 25):
+        flags = ("cost " if p["reports_cost"] else "") + ("code" if p["has_code"] else "")
+        print(f"{p['date']}  {p['id']:&lt;14} {p['title'][:80]}\n    tags: {', '.join(p['tags']) or '-'}  {flags}")</code></pre>
+
+<p>Run it once a week (<code>python research/radar.py 50</code>). The tags are suggestions, not truth: in a sample run, MOSAIC was tagged “ppr-paths” because its abstract mentions paths, while a human would file it under query-adaptive LLM-based retrieval. That gap is why the triage step below exists.</p>
+
+<h3>Curated lists and collections</h3>
+<table>
+  <thead><tr><th>Source</th><th>What it is</th><th>Use it for</th></tr></thead>
+  <tbody>
+    <tr><td><a href="https://github.com/DEEP-PolyU/Awesome-GraphRAG">DEEP-PolyU/Awesome-GraphRAG</a></td><td>Papers, benchmarks and open-source projects organized by the organization, retrieval and integration taxonomy of survey 2501.13958</td><td>Placing a paper in the taxonomy; finding benchmarks</td></tr>
+    <tr><td><a href="https://github.com/graphrag/awesome-graphrag">graphrag/awesome-graphrag</a></td><td>A broad list of GraphRAG, knowledge graph and related generative AI resources</td><td>Tools, articles and practitioner material beyond papers</td></tr>
+    <tr><td><a href="https://github.com/H-Freax/Awesome-Graph-RAG">H-Freax/Awesome-Graph-RAG</a></td><td>A list of graph retrieval-augmented generation papers and resources</td><td>A second opinion on coverage</td></tr>
+    <tr><td><a href="https://huggingface.co/collections/graphrag/graphrag-papers-667566a057208377a1489c82">Hugging Face graphrag/graphrag-papers</a></td><td>A community collection of GraphRAG papers on Hugging Face</td><td>Papers with linked models, datasets and discussion</td></tr>
+    <tr><td><a href="https://github.com/pengboci/GraphRAG-Survey">pengboci/GraphRAG-Survey</a> and <a href="https://github.com/Graph-RAG/GraphRAG/">Graph-RAG/GraphRAG</a></td><td>Repositories maintained alongside surveys 2408.08921 and 2501.00309</td><td>Following each survey's framing as it is updated</td></tr>
+  </tbody>
+</table>
+
+<h3>A weekly triage routine</h3>
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "Thirty minutes a week",
+  "perRow": 3,
+  "stages": [
+    {"label": "Fetch", "detail": "Run the radar script and skim the curated lists' recent commits. Expect 20 to 60 candidates."},
+    {"label": "Title pass", "detail": "Drop papers outside your problem in seconds. Keep maybe a third."},
+    {"label": "Abstract pass", "detail": "For each survivor, write the three-question classification: node meaning, who decides retrieval, weights changed?"},
+    {"label": "Checklist pass", "detail": "Open the results and setup tables. Score checklist items 2, 4, 5 and 8. Most papers stop here."},
+    {"label": "Place on the map", "detail": "Add the paper to your own taxonomy file with its tag, one-line claim and checklist notes."},
+    {"label": "Reproduce one", "detail": "Once a month, reimplement the single component an ablation says matters, inside minigraphrag, on Kestrel and on your corpus."}
+  ]
+}
+</script>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 33.1 <span class="level">Warm-up</span></h4>
+  <p>Classify each paper into the taxonomy using only the one-line summary of its abstract. Give the main category and, where it applies, a secondary one. (a) HyperGraphRAG (2503.21322): represents n-ary facts as hyperedges, with hypergraph construction, retrieval and generation. (b) Graph-R1 (2507.21892): lightweight hypergraph construction, retrieval as multi-turn agent-environment interaction, optimized with end-to-end RL. (c) DIGIMON (2503.04338): a unified framework and systematic comparison of graph-based RAG methods. (d) MOSAIC (2609.11065): an LLM analyzer sets a per-query exploration policy on a shared graph. (e) LiteRAG (2609.10239): algorithmic, query-conditioned exploration replaces retrieval-time LLM control. (f) HyCE-RAG (2607.22597): confidence propagation over a query-aware evidence hypergraph, then evidence-chain assembly.</p>
+  <details class="hint"><summary>Hint</summary><p>Ask the three questions: what does a node stand for, who decides what to retrieve, and are weights trained? One of the six is not a method at all.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <table>
+      <thead><tr><th>Paper</th><th>Main</th><th>Secondary</th><th>Reasoning</th></tr></thead>
+      <tbody>
+        <tr><td>(a) HyperGraphRAG</td><td>Organization: KG built from corpus (as a hypergraph)</td><td>Retrieval over hyperedges</td><td>The contribution is the representation; retrieval and generation follow from it</td></tr>
+        <tr><td>(b) Graph-R1</td><td>Integration: fine-tuning (RL-trained retrieval policy)</td><td>Retrieval: multi-round</td><td>Weights change, and what they learn is when and what to retrieve over several turns</td></tr>
+        <tr><td>(c) DIGIMON</td><td>Not a method: benchmark and analysis</td><td>n/a</td><td>Tag it as evaluation; use it to find fair baselines rather than to place a technique</td></tr>
+        <tr><td>(d) MOSAIC</td><td>Retrieval: LLM-based (query-adaptive control)</td><td>Retrieval: hybrid of traversal policies</td><td>No training, graph fixed; an LLM decides seeds, depth and stopping per query</td></tr>
+        <tr><td>(e) LiteRAG</td><td>Retrieval: similarity and algorithmic exploration</td><td>Cross-cutting: cost</td><td>The point is to remove the LLM from the retrieval loop; graph and generator are not the contribution</td></tr>
+        <tr><td>(f) HyCE-RAG</td><td>Retrieval: post-retrieval</td><td>Organization: hypergraph</td><td>Its own abstract frames the hypergraph as a direction for post-retrieval reasoning over assembled evidence chains</td></tr>
+      </tbody>
+    </table>
+    <p>Reasonable people will place (a) and (f) differently. What matters is that your placement names the component a fair baseline should hold fixed: for (e), the same graph and generator with LLM-controlled retrieval; for (b), the same retriever tools without RL training.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 33.2 <span class="level">Core</span></h4>
+  <p>Critique the LiteRAG abstract with the ten-item checklist. For each item, write “answered by the abstract,” “needs the paper,” or “red flag,” with one sentence of justification. Then write the two questions you would most want the full paper to answer before adopting the method for Kestrel-style global questions.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ol>
+      <li><strong>Taxonomy.</strong> Answered: retrieval-time control and context construction change; the graph is presumably reused.</li>
+      <li><strong>Same generator, embedder, graph.</strong> Needs the paper: the abstract compares to GraphRAG Global, DRIFT and LinearRAG but does not say whether all used the same models and graph.</li>
+      <li><strong>Vanilla RAG baseline.</strong> Needs the paper: not mentioned in the abstract.</li>
+      <li><strong>Cost.</strong> Answered, strongly: latency over 100× lower and cost over 99% lower than GraphRAG Global and DRIFT, 14× fewer tokens than LinearRAG. Check whether indexing cost is also reported, since the abstract talks about query time.</li>
+      <li><strong>Question types.</strong> Needs the paper: DistComp is multi-hop; UltraDomain is closer to sensemaking. Look for a per-type breakdown.</li>
+      <li><strong>Leakage.</strong> Partly reassuring: a benchmark over distributed-systems papers is less likely to be memorized as QA pairs than Wikipedia, but the papers themselves may be in pre-training.</li>
+      <li><strong>Judge bias.</strong> Needs the paper: “overall quality 0.798” suggests a judged or composite score; check how it was produced.</li>
+      <li><strong>Significance.</strong> Needs the paper: no intervals in the abstract. “Matches LinearRAG” in particular needs an interval to mean anything.</li>
+      <li><strong>Ablation.</strong> Answered: query-adaptive thresholding and community-aware hub penalization drive the token efficiency.</li>
+      <li><strong>Reproducibility.</strong> Needs the paper: no code link in the abstract.</li>
+    </ol>
+    <p>Two questions for Kestrel: (1) Global questions such as “What are the main themes?” have no seed entities. How does query-conditioned exploration choose where to start, and how does quality on UltraDomain's broad questions compare with map-reduce global search per question type? (2) Is the 99% cost reduction measured against global search at a fixed community level or with dynamic community selection, which already cuts map calls substantially?</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 33.3 <span class="level">Core</span></h4>
+  <p>Design an experiment, runnable with minigraphrag on the Kestrel corpus, that tests MOSAIC's central claim at small scale: that no single fixed exploration policy is best for every question type. Specify the policies, the fixed components, the question sets, the metrics, how you control for cost, and what result would falsify the claim on this corpus.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>Fixed components.</strong> One index built once with <code>build_index</code>; one embedder; one generator model for every answer; the same response type and a fixed context budget (say 4,000 tokens) so a wider policy cannot win by reading more.</p>
+    <p><strong>Policies.</strong> Three fixed policies over <code>hipporag_search</code>, differing in how many passages reach the context: narrow (3), medium (5) and wide (10, truncated to the budget). Seed selection stays fixed at the five seeds <code>link_query_to_nodes</code> returns, because <code>hipporag_search</code> does not expose that parameter; varying seeds as well means calling <code>link_query_to_nodes</code> and <code>personalized_pagerank</code> yourself. Add an oracle-routed policy that picks, per question, the best fixed policy in hindsight (an upper bound), and a simple rule-based router that picks narrow for single-hop, wide for multi-hop.</p>
+    <p><strong>Questions.</strong> The 23 questions in <code>data/questions.jsonl</code> sliced by type (single-hop, multi-hop, temporal, global), plus 20 new ones you write so the router is not tuned on its test set.</p>
+    <p><strong>Metrics.</strong> Context recall against <code>supporting_docs</code> (retrieval quality, no judge needed), token F1 against the gold answers, and LLM calls and context tokens per question.</p>
+    <pre><code class="language-python">from minigraphrag.evaluation import context_recall, load_questions
+from minigraphrag.indexer import load_index
+from minigraphrag.llm import get_llm
+from minigraphrag.search.ppr import hipporag_search
+
+POLICIES = {"narrow": 3, "medium": 5, "wide": 10}
+index, llm = load_index(".index"), get_llm("openai", cache_dir=".cache/llm")
+rows = []
+for q in load_questions("data/questions.jsonl"):
+    for name, k in POLICIES.items():
+        r = hipporag_search(index, q["question"], llm, top_k_passages=k, max_context_tokens=4000)
+        rows.append((q["type"], name, context_recall(r.sources, q["supporting_docs"])))
+for qtype in sorted({t for t, _, _ in rows}):
+    print(qtype, {p: round(sum(s for t, n, s in rows if t == qtype and n == p) /
+                           sum(1 for t, n, _ in rows if t == qtype and n == p), 2) for p in POLICIES})</code></pre>
+    <p><strong>Analysis.</strong> Compute per-type means with bootstrap intervals over questions. The claim is supported on Kestrel if the best fixed policy differs between types with non-overlapping (or paired-significant) intervals, and if the oracle-routed policy beats the best single fixed policy overall. It is falsified here if one fixed policy is within the interval of the best on every type. With about 5 to 8 questions per type, expect wide intervals; say so, and treat the result as a pilot that motivates a larger question set rather than a verdict.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 33.4 <span class="level">Core</span></h4>
+  <p>Extend <code>radar.py</code> so that it (a) remembers which arXiv IDs it has already shown, (b) writes new papers to a <code>triage.md</code> file with empty fields for your three-question classification and checklist items 2, 4, 5 and 8, and (c) never shows a paper twice across versions (2609.11065v1 and v2 are the same paper).</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import json
+import re
+from pathlib import Path
+
+from radar import fetch
+
+SEEN = Path("research/seen.json")
+
+
+def base_id(arxiv_id: str) -&gt; str:
+    return re.sub(r"v\d+$", "", arxiv_id)          # 2609.11065v2 -&gt; 2609.11065
+
+
+def triage(max_results: int = 50) -&gt; int:
+    SEEN.parent.mkdir(parents=True, exist_ok=True)
+    seen = set(json.loads(SEEN.read_text())) if SEEN.exists() else set()
+    new = [p for p in fetch(max_results) if base_id(p["id"]) not in seen]
+    lines = []
+    for p in new:
+        lines += [f"## {p['title']} ({base_id(p['id'])}, {p['date']})",
+                  f"https://arxiv.org/abs/{base_id(p['id'])}",
+                  f"- Suggested tags: {', '.join(p['tags']) or 'none'}",
+                  "- Node meaning (text or fact):",
+                  "- Who decides retrieval:",
+                  "- Weights trained (yes/no):",
+                  f"- [2] same models/graph as baselines: ",
+                  f"- [4] cost reported: {'abstract mentions cost' if p['reports_cost'] else 'check paper'}",
+                  "- [5] per-type results: ",
+                  "- [8] intervals or tests: ",
+                  "- Decision (skip / read / reproduce):", ""]
+        seen.add(base_id(p["id"]))
+    if lines:
+        with Path("research/triage.md").open("a") as f:
+            f.write("\n".join(lines) + "\n")
+    SEEN.write_text(json.dumps(sorted(seen)))
+    return len(new)
+
+
+if __name__ == "__main__":
+    print(f"{triage()} new papers added to research/triage.md")</code></pre>
+    <p>Storing base IDs handles version bumps. Appending rather than overwriting keeps your notes. If you run this in a scheduled job, commit <code>seen.json</code> and <code>triage.md</code> so your notes have history.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 33.5 <span class="level">Stretch</span></h4>
+  <p>GraphRAG-Bench asks when graphs help. Answer that question for the Kestrel corpus with minigraphrag: run <code>basic</code>, <code>local</code>, <code>global</code>, <code>ppr</code> and <code>hybrid</code> on all 23 questions with a real LLM, and produce a table of context recall and token F1 by question type with bootstrap intervals and LLM calls per question. Then write a one-paragraph “when to use graphs on this corpus” recommendation that a reader could act on.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import random
+from collections import defaultdict
+
+from minigraphrag.cli import make_search
+from minigraphrag.evaluation import load_questions, run_eval
+from minigraphrag.indexer import load_index
+from minigraphrag.llm import get_llm
+
+index, llm = load_index(".index"), get_llm("openai", cache_dir=".cache/llm")
+methods = ["basic", "local", "global", "ppr", "hybrid"]
+questions = load_questions("data/questions.jsonl")
+result = run_eval(questions, {m: make_search(m, index, llm) for m in methods})
+
+
+def ci(xs, n=2000, seed=0):
+    rng = random.Random(seed)
+    means = sorted(sum(rng.choice(xs) for _ in xs) / len(xs) for _ in range(n))
+    return means[int(0.025 * n)], means[int(0.975 * n) - 1]
+
+
+groups = defaultdict(list)
+for row in result["rows"]:
+    groups[(row["type"], row["system"])].append(row)
+print("| type | method | recall [95% CI] | F1 [95% CI] |")
+for (qtype, method), rs in sorted(groups.items()):
+    rec, f1 = [r["context_recall"] for r in rs], [r["token_f1"] for r in rs]
+    (rl, rh), (fl, fh) = ci(rec), ci(f1)
+    print(f"| {qtype} | {method} | {sum(rec)/len(rec):.2f} [{rl:.2f}, {rh:.2f}] | {sum(f1)/len(f1):.2f} [{fl:.2f}, {fh:.2f}] |")</code></pre>
+    <p>Pair it with the LLM call counts from each <code>SearchResult</code>. What a defensible write-up looks like: on single-hop questions, basic search is usually as good as any graph method at one call, so use it. On multi-hop questions, PPR or hybrid retrieval should bring more supporting documents into context; recommend them if their recall interval sits above basic's. On global questions, only map-reduce global search sees the whole corpus, at a higher call count that grows with the number of community reports; token F1 is a poor metric here, so add the pairwise judge from Chapter 25 before recommending it. State the sample size per type (5 to 8 questions) and say the recommendation is provisional until a larger question set confirms it.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In HippoRAG 2, PageRank mass ends on passage nodes, and the LLM reads those passages. Where does it belong in the organization taxonomy?</p>
+  <ol>
+    <li>Graph as knowledge carrier, because it has entity nodes</li>
+    <li data-correct>Graphs for knowledge indexing, because the graph navigates to text that the LLM reads</li>
+    <li>Hybrid GraphRAG, because it uses embeddings</li>
+    <li>Knowledge integration, because it changes the prompt</li>
+  </ol>
+  <div class="explain">The deciding question is what the LLM consumes as evidence. HippoRAG 2 uses the graph to rank passages; the passages are the evidence. The curated list files it under graphs for indexing.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A paper reports that its GraphRAG method beats a baseline by 6 points. The baseline numbers were copied from an earlier paper that used a different generator. Which checklist item fails?</p>
+  <ol>
+    <li>Leakage</li>
+    <li>Reproducibility</li>
+    <li>Ablation</li>
+    <li data-correct>Same generator, embedder and graph for all systems</li>
+  </ol>
+  <div class="explain">With different generators, part or all of the 6 points may come from the model rather than the method. Copied baseline numbers are one of the most common ways this happens.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">According to its abstract, what is post-graph-rag's largest single contribution in its ablation?</p>
+  <ol>
+    <li>Storing everything in PostgreSQL with pgvector</li>
+    <li>Rejecting vague predicates during extraction</li>
+    <li data-correct>Carrying each relation's validity period into the synthesis prompt</li>
+    <li>Community summaries</li>
+  </ol>
+  <div class="explain">The abstract attributes the largest single contribution to temporal grounding at synthesis, which moved temporal reasoning from 0.496 to 0.881 in a paired ablation on one graph per instance.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which question is The Commercial Tax (2608.16096) mainly asking of multi-hop retrieval benchmarks?</p>
+  <ol>
+    <li>Whether GraphRAG beats vector RAG on MuSiQue</li>
+    <li data-correct>Whether published numbers can be deployed commercially and what they cost to build</li>
+    <li>Whether LLM judges are biased</li>
+    <li>Whether hypergraphs outperform graphs</li>
+  </ol>
+  <div class="explain">It audits licensing of the embedding backbone behind leading systems' numbers and the missing indexing-cost disclosures, and models one-time versus recurring costs.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">MOSAIC reports that in controlled comparisons no fixed narrow, medium or wide policy was consistently best. What does “controlled” most importantly mean here?</p>
+  <ol>
+    <li>The experiments were run several times</li>
+    <li>The questions were written by the authors</li>
+    <li data-correct>The graph and the generator were identical across policies, so only the exploration policy varied</li>
+    <li>Temperature was set to zero</li>
+  </ol>
+  <div class="explain">Holding the graph and generator fixed isolates the variable under study, which is what makes the finding about policies rather than about models or indexes.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">GraphRAG-Bench (2506.05690) was motivated by what observation?</p>
+  <ol>
+    <li>Knowledge graphs are too expensive to store</li>
+    <li>LLMs cannot read graphs</li>
+    <li>Community detection is unstable</li>
+    <li data-correct>GraphRAG frequently underperforms vanilla RAG on many real-world tasks, so it is unclear when graphs help</li>
+  </ol>
+  <div class="explain">Its abstract frames the benchmark around the question of whether and in which scenarios graph structures provide measurable benefits.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I read the surveys cover to cover?</summary>
+  <div><p>No. Read the framework section of one survey (the knowledge organization, retrieval and integration sections of 2501.13958 map directly to this course), then use the surveys as indexes: when a paper cites an idea you don't recognize, look it up in the survey's table of methods. Surveys date quickly; use the curated lists for anything after early 2025.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I know whether a 2026 result is worth building on when nobody has reproduced it?</summary>
+  <div><p>Look for three things: a controlled comparison (same graph and generator), an ablation that isolates one component, and released code. If all three are present, reimplement just that component inside minigraphrag and test it on Kestrel and on your own data. ColGraphRAG-style single-operator papers are the easiest to verify this way. If none are present, wait.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is GraphRAG research converging, or fragmenting?</summary>
+  <div><p>Both. The pipeline stages have converged: nearly every paper fits the organization, retrieval, integration frame, and the same baselines (GraphRAG, LightRAG, HippoRAG) recur. The extensions are fragmenting into time, modality, hypergraphs, code and agents, each with its own benchmarks. For practitioners the convergence matters more: a small set of patterns, which you have now built, covers most systems.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Microsoft GraphRAG is in maintenance mode. Does that mean the approach is dead?</summary>
+  <div><p>No. It means one reference implementation is no longer being actively extended. The ideas it popularized (entity graphs from text, community reports, local and global search) are in LightRAG, neo4j-graphrag, LlamaIndex and many 2026 papers, and several of those papers still use GraphRAG Global and DRIFT as baselines. <a href="28-frameworks-in-practice.html">Chapter 28</a> discusses what to use instead.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Where can I contribute as an engineer rather than a researcher?</summary>
+  <div><p>Reproductions with honest cost numbers, evaluations on new domains with per-type breakdowns, and security work (ACL-correct summaries, injection through documents) are all underserved and valued. A well-documented reproduction that shows a published gain shrinking under a fair baseline is a real contribution.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: your own research radar</h3>
+  <p>Build a personal, versioned map of the literature that you will actually maintain, and use it once to change your system.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>research/</code> folder with the radar and triage scripts from Exercise 33.4, run weekly for four weeks</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A taxonomy file with at least 25 papers, each with its three-question classification and a one-line claim restated from the abstract</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Full checklist write-ups for three papers, including one that you decided not to adopt and why</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>One reproduced component inside minigraphrag, evaluated on Kestrel with per-type results and cost</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A half-page “state of the field for my use case” note that names the open problem most likely to hurt you</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can take any new GraphRAG abstract, place it on your map in two minutes, and say which experiment would convince you to use it.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Place papers with three questions: what a node stands for, who decides what to retrieve, and whether weights are trained.</li>
+    <li>Knowledge organization distinguishes graphs that index text from graphs that carry facts; hybrids keep both.</li>
+    <li>Retrieval families trade query-time LLM calls against flexibility; integration is either fine-tuning at node, path or subgraph level or in-context prompting.</li>
+    <li>The 2026 papers push on cost, query-adaptive exploration, provenance, time, hyperedges, modality and agents; their numbers are self-reported claims until reproduced.</li>
+    <li>Read results critically: same models across systems, fair vanilla baselines, cost, per-type results, leakage, judge bias, significance, ablations and licenses.</li>
+    <li>Keep up with a small weekly routine and reproduce one component a month rather than reading everything.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Zhang et al. <a href="https://arxiv.org/abs/2501.13958">A Survey of Graph Retrieval-Augmented Generation for Customized Large Language Models</a>. <span class="venue">arXiv 2501.13958, 2025</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+  <li>Han et al. <a href="https://arxiv.org/abs/2501.00309">Retrieval-Augmented Generation with Graphs (GraphRAG)</a>. <span class="venue">arXiv 2501.00309, 2025</span></li>
+  <li>DEEP-PolyU. <a href="https://github.com/DEEP-PolyU/Awesome-GraphRAG">Awesome-GraphRAG</a>. <span class="venue">GitHub</span></li>
+  <li>graphrag. <a href="https://github.com/graphrag/awesome-graphrag">awesome-graphrag</a>. <span class="venue">GitHub</span></li>
+  <li>H-Freax. <a href="https://github.com/H-Freax/Awesome-Graph-RAG">Awesome-Graph-RAG</a>. <span class="venue">GitHub</span></li>
+  <li>graphrag. <a href="https://huggingface.co/collections/graphrag/graphrag-papers-667566a057208377a1489c82">GraphRAG Papers collection</a>. <span class="venue">Hugging Face</span></li>
+  <li>Coll Tejeda, García López and Barcelona-Pons. <a href="https://arxiv.org/abs/2609.10239">LiteRAG: Cost-Efficient Graph-Based Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2609.10239, 2026</span></li>
+  <li>Lee et al. <a href="https://arxiv.org/abs/2609.11065">MOSAIC: Query-Aware Exploration Policy Adaptation for GraphRAG</a>. <span class="venue">arXiv 2609.11065, 2026</span></li>
+  <li>Zheng et al. <a href="https://arxiv.org/abs/2608.16004">LineageRAG: Harnessing GraphRAG by Constructing Evidence Lineages with Source Grounding</a>. <span class="venue">arXiv 2608.16004, 2026</span></li>
+  <li>Rajah. <a href="https://arxiv.org/abs/2608.24921">post-graph-rag: A PostgreSQL-Native Bi-Temporal Graph RAG Engine with Temporal Grounding at Synthesis</a>. <span class="venue">arXiv 2608.24921, 2026</span></li>
+  <li>Lin. <a href="https://arxiv.org/abs/2609.05139">NS-ST-GraphRAG: Neuro-Symbolic Spatio-Temporal GraphRAG for Literary Knowledge Processing</a>. <span class="venue">arXiv 2609.05139, 2026</span></li>
+  <li>An et al. <a href="https://arxiv.org/abs/2607.22597">HyCE-RAG: Hypergraph Chain-of-Evidence Retrieval-Augmented Generation for Explainable Multi-hop Question Answering</a>. <span class="venue">arXiv 2607.22597, 2026</span></li>
+  <li>He et al. <a href="https://arxiv.org/abs/2607.24861">HVM-GraphRAG: Holistic-View Multimodal Graph Retrieval-Augmented Generation on Complex Document</a>. <span class="venue">arXiv 2607.24861, 2026</span></li>
+  <li>Kim. <a href="https://arxiv.org/abs/2607.16208">ColGraphRAG: Late-Interaction Evidence Retrieval for Multimodal GraphRAG</a>. <span class="venue">arXiv 2607.16208, 2026</span></li>
+  <li>Sanchez and Dehnad. <a href="https://arxiv.org/abs/2608.16096">The Commercial Tax: Rent-vs-Own Blind Spots in Multi-Hop Retrieval Benchmarks</a>. <span class="venue">arXiv 2608.16096, 2026</span></li>
+  <li>Yang et al. <a href="https://arxiv.org/abs/2509.22009">GraphSearch: An Agentic Deep Searching Workflow for Graph Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2509.22009, 2025</span></li>
+  <li>Dong et al. <a href="https://arxiv.org/abs/2508.19855">Youtu-GraphRAG: Vertically Unified Agents for Graph Retrieval-Augmented Complex Reasoning</a>. <span class="venue">arXiv 2508.19855, 2025</span></li>
+  <li>Xiang et al. <a href="https://arxiv.org/abs/2506.05690">When to use Graphs in RAG: A Comprehensive Analysis for Graph Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2506.05690, 2025</span></li>
+  <li>Zhou et al. <a href="https://arxiv.org/abs/2503.04338">In-depth Analysis of Graph-based RAG in a Unified Framework</a>. <span class="venue">arXiv 2503.04338, 2025</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Sun et al. <a href="https://arxiv.org/abs/2307.07697">Think-on-Graph: Deep and Responsible Reasoning of Large Language Model on Knowledge Graph</a>. <span class="venue">arXiv 2307.07697, 2023</span></li>
+  <li>Luo et al. <a href="https://arxiv.org/abs/2310.01061">Reasoning on Graphs: Faithful and Interpretable Large Language Model Reasoning</a>. <span class="venue">arXiv 2310.01061, 2023</span></li>
+  <li>Gutiérrez et al. <a href="https://arxiv.org/abs/2502.14802">From RAG to Memory: Non-Parametric Continual Learning for Large Language Models</a>. <span class="venue">arXiv 2502.14802, 2025</span></li>
+  <li>Zhuang et al. <a href="https://arxiv.org/abs/2510.10114">LinearRAG: Linear Graph Retrieval Augmented Generation on Large-scale Corpora</a>. <span class="venue">arXiv 2510.10114, 2025</span></li>
+  <li>Tsang et al. <a href="https://arxiv.org/abs/2510.15339">AutoGraph-R1: End-to-End Reinforcement Learning for Knowledge Graph Construction</a>. <span class="venue">arXiv 2510.15339, 2025</span></li>
+  <li>Luo et al. <a href="https://arxiv.org/abs/2507.21892">Graph-R1: Towards Agentic GraphRAG Framework via End-to-end Reinforcement Learning</a>. <span class="venue">arXiv 2507.21892, 2025</span></li>
+  <li>Luo et al. <a href="https://arxiv.org/abs/2503.21322">HyperGraphRAG: Retrieval-Augmented Generation via Hypergraph-Structured Knowledge Representation</a>. <span class="venue">arXiv 2503.21322, 2025</span></li>
+  <li>Chen et al. <a href="https://arxiv.org/abs/2508.06105">You Don't Need Pre-built Graphs for RAG: Retrieval Augmented Generation with Adaptive Reasoning Structures</a>. <span class="venue">arXiv 2508.06105, 2025</span></li>
+  <li>Pan et al. <a href="https://arxiv.org/abs/2306.08302">Unifying Large Language Models and Knowledge Graphs: A Roadmap</a>. <span class="venue">arXiv 2306.08302, 2023</span></li>
+  <li>arXiv. <a href="https://info.arxiv.org/help/api/user-manual.html">arXiv API user's manual</a>. <span class="venue">arXiv documentation</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+<script>
+GRFSViz.register("ch33-taxonomy", function (el, cfg, api) {
+  const W = 720, rowH = 30, top = 24;
+  const leaves = [];
+  cfg.stages.forEach((s) => s.children.forEach((c) => leaves.push({ stage: s, cat: c })));
+  const H = top * 2 + leaves.length * rowH;
+  const { stage } = api.frame(el, cfg);
+  const svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title }, stage);
+  const bar = api.controls(el);
+  const panel = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const rootY = H / 2, rootX = 70, stageX = 250, catX = 440;
+  const gLines = api.svgEl("g", {}, svg), gNodes = api.svgEl("g", {}, svg);
+  const lineStyle = "stroke:var(--rule);stroke-width:1.6;fill:none";
+  const text = (x, y, s, anchor, extra) => {
+    const t = api.svgEl("text", { x: x, y: y, "text-anchor": anchor || "start", style: "fill:var(--ink);font-size:12.5px;" + (extra || "") }, gNodes);
+    t.textContent = s; return t;
+  };
+  const rootC = api.svgEl("circle", { cx: rootX, cy: rootY, r: 12, style: "fill:var(--panel);stroke:var(--ink-2);stroke-width:2" }, gNodes);
+  text(rootX, rootY + 30, "GraphRAG", "middle", "font-weight:650");
+  const stageEls = [], catEls = [];
+  let row = 0;
+  cfg.stages.forEach((s) => {
+    const first = row, last = row + s.children.length - 1;
+    const sy = top + ((first + last) / 2) * rowH + rowH / 2;
+    const col = api.groupColor(s.group);
+    const sl = api.svgEl("path", { d: "M" + (rootX + 12) + "," + rootY + " C" + (rootX + 90) + "," + rootY + " " + (stageX - 90) + "," + sy + " " + (stageX - 11) + "," + sy, style: lineStyle }, gLines);
+    const g = api.svgEl("g", { tabindex: 0, role: "button", style: "cursor:pointer" }, gNodes);
+    const c = api.svgEl("circle", { cx: stageX, cy: sy, r: 11, style: "fill:color-mix(in srgb," + col + " 30%, var(--panel));stroke:" + col + ";stroke-width:2" }, g);
+    const t = api.svgEl("text", { x: stageX - 18, y: sy + 4, "text-anchor": "end", style: "fill:var(--ink);font-size:12.5px;font-weight:650" }, g);
+    t.textContent = s.label;
+    stageEls.push({ s, g, c, line: sl });
+    g.addEventListener("click", () => filter(s.id));
+    g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); filter(s.id); } });
+    s.children.forEach((cat) => {
+      const cy = top + row * rowH + rowH / 2;
+      const cl = api.svgEl("path", { d: "M" + (stageX + 11) + "," + sy + " C" + (stageX + 80) + "," + sy + " " + (catX - 80) + "," + cy + " " + (catX - 8) + "," + cy, style: lineStyle }, gLines);
+      const cg = api.svgEl("g", { tabindex: 0, role: "button", style: "cursor:pointer" }, gNodes);
+      const cc = api.svgEl("circle", { cx: catX, cy: cy, r: 8, style: "fill:color-mix(in srgb," + col + " 22%, var(--panel));stroke:" + col + ";stroke-width:2" }, cg);
+      const ct = api.svgEl("text", { x: catX + 16, y: cy + 4, style: "fill:var(--ink);font-size:12.5px" }, cg);
+      ct.textContent = cat.label + "  (" + cat.papers.length + ")";
+      catEls.push({ s, cat, g: cg, c: cc, t: ct, line: cl, col });
+      cg.addEventListener("click", () => select(cat.id));
+      cg.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); select(cat.id); } });
+      row++;
+    });
+  });
+  let current = null, stageFilter = null;
+  function paint() {
+    catEls.forEach((e) => {
+      const inStage = !stageFilter || e.s.id === stageFilter;
+      const sel = current === e.cat.id;
+      e.g.style.opacity = inStage ? 1 : 0.3;
+      e.line.style.opacity = inStage ? 1 : 0.3;
+      e.line.style.stroke = sel ? e.col : "var(--rule)";
+      e.line.style.strokeWidth = sel ? 3 : 1.6;
+      e.c.setAttribute("r", sel ? 11 : 8);
+      e.t.style.fontWeight = sel ? 650 : 400;
+    });
+    stageEls.forEach((e) => { const on = !stageFilter || e.s.id === stageFilter; e.g.style.opacity = on ? 1 : 0.35; e.line.style.opacity = on ? 1 : 0.35; });
+  }
+  function link(p) {
+    if (p.arxiv) return "<a href=\"https://arxiv.org/abs/" + p.arxiv + "\">" + api.escapeHtml(p.name) + "</a> <span class=\"viz-chip\">" + p.arxiv + "</span>";
+    if (p.openreview) return "<a href=\"https://openreview.net/forum?id=" + p.openreview + "\">" + api.escapeHtml(p.name) + "</a> <span class=\"viz-chip\">OpenReview</span>";
+    return api.escapeHtml(p.name);
+  }
+  function select(id) {
+    current = id;
+    const e = catEls.find((x) => x.cat.id === id);
+    if (stageFilter && e.s.id !== stageFilter) stageFilter = null;
+    paint();
+    const items = e.cat.papers.map((p) => "<li>" + link(p) + " (" + p.year + "): " + api.escapeHtml(p.note) +
+      (p.chapter ? " <a class=\"viz-chip node\" href=\"" + p.chapter + "\">course link</a>" : "") + "</li>").join("");
+    panel.innerHTML = "<strong>" + api.escapeHtml(e.s.label) + " / " + api.escapeHtml(e.cat.label) + ".</strong> " +
+      api.escapeHtml(e.cat.detail) + "<ul style=\"margin:.4em 0 0;padding-left:1.2em\">" + items + "</ul>";
+  }
+  function filter(sid) {
+    stageFilter = sid;
+    const firstCat = catEls.find((x) => !sid || x.s.id === sid);
+    select(firstCat.cat.id);
+    buttons.forEach((b) => b.classList.toggle("primary", b.dataset.stage === (sid || "")));
+  }
+  const buttons = [];
+  [{ id: "", label: "All stages" }].concat(cfg.stages.map((s) => ({ id: s.id, label: s.label }))).forEach((b) => {
+    const btn = api.button(bar, b.label);
+    btn.dataset.stage = b.id;
+    btn.addEventListener("click", () => filter(b.id || null));
+    buttons.push(btn);
+  });
+  api.h("span", { class: "grow" }, bar);
+  const nPapers = new Set(); catEls.forEach((e) => e.cat.papers.forEach((p) => nPapers.add(p.name)));
+  api.h("span", { class: "stepno" }, bar, catEls.length + " categories, " + nPapers.size + " papers");
+  filter(null);
+});
+</script>
+</body>
+</html>

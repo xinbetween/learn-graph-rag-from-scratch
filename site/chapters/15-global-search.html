@@ -1,0 +1,801 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Global search and DRIFT | Graph RAG from Scratch</title>
+<meta name="description" content="Answer corpus-wide questions with map-reduce over community reports, estimate its cost, cut that cost with dynamic community selection, and combine global and local search with DRIFT.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="15-global-search" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Global search and DRIFT</h1>
+  <p class="lede">Some questions are about the whole corpus, not any entity in it. This chapter builds GraphRAG's answer to them, map-reduce over community reports, then makes it cheaper with dynamic community selection and more precise with DRIFT, which starts global and finishes local.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Explain query-focused summarization and why community reports make it tractable</li>
+      <li>Implement map-reduce global search: shuffle and batch reports, map with 0–100 helpfulness scores, filter, reduce</li>
+      <li>Estimate the calls, tokens and latency of a global query, and choose a community level</li>
+      <li>Trace dynamic community selection top-down through a report hierarchy and predict what it prunes</li>
+      <li>Describe DRIFT's primer, follow-up and output phases, and decide when to use global, local or DRIFT</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Questions no chunk can answer</h2>
+<p>Canonical question 4 is “What are the main themes in this corpus?” Question 5 is “What risks does Kestrel Labs face?” Try them on the tools you have so far:</p>
+<ul>
+  <li><strong>Vector RAG</strong> embeds “main themes” and retrieves the chunks most similar to that phrase, which is to say, arbitrary chunks. No passage in the Kestrel corpus lists its own themes.</li>
+  <li><strong>Local search</strong> (<a href="14-local-search.html">Chapter 14</a>) does better on question 5, because it anchors on KESTREL LABS. But that anchor is a hub, the context fills with whatever its highest-ranked edges happen to be, and risks described in terms of Marlow Dynamics or the Ocean Health Act may not make it in. Question 4 has no anchor at all.</li>
+</ul>
+<p>These are <strong>query-focused summarization</strong> (QFS) questions: produce a summary of a large collection, shaped by a question. Before LLMs, QFS systems extracted and compressed sentences. The GraphRAG paper's contribution is a way to do it with LLMs over corpora far larger than a context window: summarize once at index time by community (<a href="12-community-reports.html">Chapter 12</a>), then at query time ask the question of every summary and combine the answers.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Edge et al., From Local to Global (2024)</span>
+  <p>The paper describes global answer generation in three stages. Community summaries “are randomly shuffled and divided into chunks of pre-specified token size”. Intermediate answers are generated in parallel, and the LLM is “asked to generate a score between 0-100 indicating how helpful the generated answer is”. Finally, intermediate answers “are sorted in descending order of helpfulness score and iteratively added into a new context window until the token limit is reached”. Its evaluation compares this against vector RAG on global sensemaking questions using LLM judges for comprehensiveness and diversity.</p>
+</div>
+
+<h2>Map-reduce over community reports</h2>
+
+<h3>Step 1: pick the reports</h3>
+<p>Global search reads reports at one level of the community hierarchy. Level 0 is the coarsest: a few large communities. Deeper levels are smaller and more numerous. A static level alone would leave gaps, because some branches of the hierarchy stop early. GraphRAG handles this by assigning each entity to its deepest community at or above the chosen level and using those communities' reports. <code>minigraphrag</code>'s <code>reports_at_level</code> does the equivalent: reports at the level, plus leaf communities at shallower levels, so every entity is covered exactly once.</p>
+
+<pre data-file="minigraphrag/search/global_.py"><code class="language-python">def reports_at_level(index, level: int | None = None) -&gt; list[CommunityReport]:
+    """Reports at `level`, plus leaf communities at shallower levels so every entity stays covered."""
+    level = 0 if level is None else level
+    by_id = {c.id: c for c in index.communities}
+    chosen = []
+    for r in index.reports:
+        c = by_id[r.community_id]
+        if c.level == level or (c.level &lt; level and not c.children):
+            chosen.append(r)
+    return chosen</code></pre>
+
+<p>The hierarchy below is the one <a href="14-local-search.html">Chapter 14</a>'s trace used: the clean 17-entity Kestrel graph clustered with <code>max_cluster_size=4</code> (<a href="12-community-reports.html">Chapter 12</a> used 5, so its community ids differ). Level 0 gives three reports; level 1 gives six, because community 7 has no children and is carried down.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 300" role="img" aria-labelledby="lvl-title">
+      <title id="lvl-title">The Kestrel community hierarchy and which reports global search reads at level 0 and at level 1</title>
+      <text class="d-text small" x="70" y="16">Level 0</text>
+      <text class="d-text small" x="40" y="150">Level 1</text>
+      <rect class="d-box comm" x="70" y="24" width="200" height="50" rx="6"/>
+      <text class="d-text bold" x="82" y="45">C0 Kestrel Labs</text>
+      <text class="d-text small" x="82" y="63">leadership, funding, supply (9)</text>
+      <rect class="d-box comm" x="300" y="24" width="190" height="50" rx="6"/>
+      <text class="d-text bold" x="312" y="45">C4 Reef science</text>
+      <text class="d-text small" x="312" y="63">Sentinel, TWI, Halden (5)</text>
+      <rect class="d-box comm" x="520" y="24" width="150" height="50" rx="6"/>
+      <text class="d-text bold" x="532" y="45">C7 Regulation</text>
+      <text class="d-text small" x="532" y="63">OHA, council, city (3)</text>
+
+      <rect class="d-box node" x="40" y="164" width="84" height="50" rx="6"/>
+      <text class="d-text bold" x="50" y="185">C1 Board</text>
+      <text class="d-text small" x="50" y="203">founders (4)</text>
+      <rect class="d-box node" x="132" y="164" width="84" height="50" rx="6"/>
+      <text class="d-text bold" x="142" y="185">C2 Tern</text>
+      <text class="d-text small" x="142" y="203">team (3)</text>
+      <rect class="d-box node" x="224" y="164" width="84" height="50" rx="6"/>
+      <text class="d-text bold" x="234" y="185">C3 Supply</text>
+      <text class="d-text small" x="234" y="203">Marlow (2)</text>
+      <rect class="d-box node" x="316" y="164" width="84" height="50" rx="6"/>
+      <text class="d-text bold" x="326" y="185">C5 Bleach</text>
+      <text class="d-text small" x="326" y="203">Sentinel (3)</text>
+      <rect class="d-box node" x="408" y="164" width="84" height="50" rx="6"/>
+      <text class="d-text bold" x="418" y="185">C6 TWI</text>
+      <text class="d-text small" x="418" y="203">Ana Ruiz (2)</text>
+      <rect class="d-box ghost" x="520" y="164" width="150" height="50" rx="6"/>
+      <text class="d-text bold" x="532" y="185">C7 carried down</text>
+      <text class="d-text small" x="532" y="203">leaf at level 0</text>
+
+      <line class="d-line" x1="120" y1="74" x2="82" y2="162"/>
+      <line class="d-line" x1="170" y1="74" x2="174" y2="162"/>
+      <line class="d-line" x1="220" y1="74" x2="266" y2="162"/>
+      <line class="d-line" x1="370" y1="74" x2="358" y2="162"/>
+      <line class="d-line" x1="420" y1="74" x2="450" y2="162"/>
+      <line class="d-line dash" x1="595" y1="74" x2="595" y2="162"/>
+
+      <rect class="d-box ghost" x="40" y="236" width="630" height="54" rx="6"/>
+      <text class="d-text small" x="52" y="257">Level 0: 3 reports, broad but compressed. The Tern schedule and Marlow's civilian push are one line each in C0.</text>
+      <text class="d-text small" x="52" y="277">Level 1: 6 reports, specific, twice the map input. Deeper levels on a real corpus multiply this further.</text>
+    </svg>
+  </div>
+  <figcaption>The report hierarchy for the Kestrel graph. Numbers in parentheses are member counts. Global search at level 1 reads the five level-1 reports plus C7, which has no children.</figcaption>
+</figure>
+
+<h3>Step 2: shuffle and batch</h3>
+<p>Reports are shuffled with a fixed seed and packed greedily into batches that fit the map context (GraphRAG's default data budget is 12,000 tokens per batch; <code>minigraphrag</code> uses 3,000 so that the tiny Kestrel index still makes several batches). Why shuffle? Reports are stored in id order, and neighboring ids are often related communities. Without shuffling, all the relevant reports for a question can land in one batch, where they compete for one map call's limited output and the model compresses them together, while other batches return nothing. Shuffling spreads relevant material across batches so each gets full attention.</p>
+<p>Each batch is rendered as a table. GraphRAG's global context includes the report's full content, its rank, and an <em>occurrence weight</em>: the number of text units associated with the community's entities, normalized, which signals how much of the corpus the community covers.</p>
+
+<pre data-file="minigraphrag/search/global_.py"><code class="language-python">def _batches(reports: list[CommunityReport], max_tokens: int, seed: int) -&gt; list[list[CommunityReport]]:
+    """Shuffle (so no batch is systematically all-irrelevant) and pack reports into token-bounded batches."""
+    shuffled = list(reports)
+    random.Random(seed).shuffle(shuffled)
+    batches, current, used = [], [], 0
+    for r in shuffled:
+        t = count_tokens(r.full_content)
+        if current and used + t &gt; max_tokens:
+            batches.append(current)
+            current, used = [], 0
+        current.append(r)
+        used += t
+    return batches + ([current] if current else [])</code></pre>
+
+<h3>Step 3: map</h3>
+<p>Each batch goes to the LLM in parallel with the question. The map prompt asks for a list of key points, each with a description that cites reports and an importance score from 0 to 100. GraphRAG's prompt says an “I don't know” type of response should score 0 and caps the response length (<code>map_max_length</code>, 1,000 words by default). Here is <code>minigraphrag</code>'s condensed version:</p>
+
+<pre data-file="minigraphrag/prompts.py"><code class="language-python">GLOBAL_MAP_PROMPT = """---Role---
+You are a helpful assistant responding to questions about data in the tables provided.
+
+---Goal---
+Generate a list of key points that responds to the user's question, summarizing all relevant information in the community reports below.
+Each key point must have a description and an importance score from 0 to 100 reflecting how helpful it is for answering the question. If the reports are not relevant, return an empty list or points with score 0.
+Reference supporting reports as [Data: Reports (report ids)].
+
+The response should be JSON formatted as follows:
+{{"points": [{{"description": "Description of point 1 [Data: Reports (report ids)]", "score": score_value}}]}}
+
+---Data tables---
+{context_data}
+
+---Question---
+{question}
+"""</code></pre>
+
+<h3>Step 4: filter and reduce</h3>
+<p>Collect all points from all batches. Drop the useless ones: GraphRAG keeps points with score greater than 0; <code>minigraphrag</code> uses a configurable <code>min_score</code>, 20 by default, because small models rarely say 0 even when a report is irrelevant. Sort the rest by score, descending, and pack them into the reduce prompt until its data budget is full. The reduce prompt presents each point as an analyst report with its importance score and asks for one answer in the requested format, keeping the report citations.</p>
+
+<pre data-file="minigraphrag/search/global_.py"><code class="language-python">def _map_reduce(index, query: str, llm: LLM, reports: list[CommunityReport], max_context_tokens: int,
+                min_score: int, response_type: str, seed: int, method: str, extra_calls: int = 0) -&gt; SearchResult:
+    points, calls, useful = [], extra_calls, []
+    for batch in _batches(reports, max_context_tokens, seed):
+        context = format_table("Reports", ["id", "title", "content", "rating"],
+                               [[r.community_id, r.title, r.full_content, r.rating] for r in batch])
+        data = parse_json_response(llm.complete(P.GLOBAL_MAP_PROMPT.format(context_data=context, question=query), json=True))
+        calls += 1
+        kept = []
+        for p in data.get("points", []):
+            try:
+                score = int(float(p.get("score", 0)))
+            except (TypeError, ValueError):
+                continue
+            if score &gt;= min_score and p.get("description"):
+                kept.append({"description": " ".join(str(p["description"]).split()), "score": score})
+        if kept:
+            useful.extend(batch)
+        points.extend(kept)
+
+    points.sort(key=lambda p: -p["score"])
+    if not points:
+        return SearchResult(NO_DATA_ANSWER, method, "", {"points": []}, [], calls)
+    report_data = "\n\n".join(f"----Analyst {i + 1}----\nImportance Score: {p['score']}\n{p['description']}"
+                              for i, p in enumerate(points))
+    answer = llm.complete(P.GLOBAL_REDUCE_PROMPT.format(report_data=report_data, question=query, response_type=response_type))
+    return SearchResult(answer, method, report_data, {"points": points, "reports": [r.community_id for r in useful]},
+                        _report_sources(index, useful), calls + 1)</code></pre>
+
+<p>The map calls run sequentially here for readability. In production, run them concurrently; they are independent, and concurrency is what keeps global search latency tolerable. <code>global_search</code> is a thin wrapper that picks the reports (static level or dynamic selection) and calls <code>_map_reduce</code>:</p>
+
+<pre data-file="minigraphrag/search/global_.py"><code class="language-python">def global_search(index, query: str, llm: LLM, level: int | None = None, dynamic: bool = False,
+                  max_context_tokens: int = 3000, min_score: int = 20,
+                  response_type: str = DEFAULT_RESPONSE_TYPE, seed: int = 42) -&gt; SearchResult:
+    """Map-reduce global search over the reports at `level` (or dynamically selected reports)."""
+    if dynamic:
+        reports, calls = dynamic_community_selection(index, query, llm)
+    else:
+        reports, calls = reports_at_level(index, level), 0
+    return _map_reduce(index, query, llm, reports, max_context_tokens, min_score, response_type, seed,
+                       "global-dynamic" if dynamic else "global", calls)</code></pre>
+
+<h3>Worked example: what are the main themes?</h3>
+<p>At level 0 the Kestrel index has three reports. Each fits in its own batch at a small budget, so there are three map calls and one reduce call. Every report is relevant to a themes question, so nothing is filtered. Step through it:</p>
+
+<div class="viz" data-viz="map-reduce">
+<script type="application/json">
+{
+  "title": "Global search at level 0",
+  "subtitle": "Three level-0 reports, one map call each",
+  "question": "What are the main themes in this corpus?",
+  "threshold": 20,
+  "communities": [
+    {"title": "C4 Halden Reef science and Project Sentinel", "score": 85, "answer": "Continuous reef monitoring: Sentinel drones run by Kestrel with Tidewater Institute detected the August 2024 Halden Reef bleaching days before divers [Data: Reports (4)]."},
+    {"title": "C0 Kestrel Labs: leadership, funding and supply", "score": 90, "answer": "Company growth and funding (Brightwater's Series A and B); supply-chain shock when Marlow bought Deepcast, answered by building Project Tern in-house [Data: Reports (0)]."},
+    {"title": "C7 Ocean Health Act and Port Avalon", "score": 75, "answer": "Regulation creating demand: the Ocean Health Act requires quarterly reef monitoring, and Port Avalon City Council contracted Kestrel for compliance [Data: Reports (7)]."}
+  ],
+  "final": "Four themes run through the corpus. (1) Reef science and continuous monitoring: Project Sentinel and Tidewater Institute's detection of the 2024 Halden Reef bleaching [Data: Reports (4)]. (2) Supply-chain risk and vertical integration: Deepcast's acquisition by Marlow Dynamics and Kestrel's in-house Project Tern [Data: Reports (0)]. (3) Funding and growth: Brightwater Capital's Series A and B [Data: Reports (0)]. (4) Regulation creating demand: the Ocean Health Act and the city council contract [Data: Reports (7)]."
+}
+</script>
+</div>
+
+<p>One report (C0) contributed two themes. At level 0, a coarse report has to cover funding and supply chain in the same few hundred tokens, and a map call can only surface what the report kept. For a themes question on this small corpus that is fine. For risks, the detail matters more.</p>
+
+<h3>Worked example: what risks does Kestrel Labs face?</h3>
+<p>At level 1 there are six reports. This time the scores spread out, and one falls under <code>min_score</code> = 20:</p>
+
+<div class="viz" data-viz="map-reduce">
+<script type="application/json">
+{
+  "title": "Global search at level 1",
+  "subtitle": "Six reports; min_score = 20",
+  "question": "What risks does Kestrel Labs face?",
+  "threshold": 20,
+  "communities": [
+    {"title": "C3 Marlow Dynamics and Deepcast", "score": 90, "answer": "Single-supplier dependence exposed when Marlow bought Deepcast and ended outside contracts; Marlow now markets smaller vehicles to Kestrel's civilian customers [Data: Reports (3)]."},
+    {"title": "C1 Founders and Brightwater's board seat", "score": 10, "answer": "The board backed the 2026 leadership change; no specific risk beyond general funding needs [Data: Reports (1)]."},
+    {"title": "C2 Project Tern team", "score": 80, "answer": "Execution risk: Tern must replace every Deepcast module by the end of 2026 while the fleet runs on spares [Data: Reports (2)]."},
+    {"title": "C7 Ocean Health Act and Port Avalon", "score": 70, "answer": "Demand depends on the Ocean Health Act; weakening or delay would shrink the contract pipeline [Data: Reports (7)]."},
+    {"title": "C6 Tidewater Institute and Dr. Ana Ruiz", "score": 45, "answer": "Scientific credibility rests on one partner, Tidewater Institute [Data: Reports (6)]."},
+    {"title": "C5 Sentinel and the 2024 bleaching event", "score": 35, "answer": "Reputation and data come mostly from one site, Halden Reef [Data: Reports (5)]."}
+  ],
+  "final": "Kestrel Labs faces five main risks. Supply: its dependence on a single sonar supplier was exposed when Marlow Dynamics acquired Deepcast and stopped outside sales [Data: Reports (3)]. Execution: Project Tern must replace every Deepcast module by the end of 2026 before spares run out [Data: Reports (2)]. Competition: Marlow Dynamics is moving into Kestrel's civilian market with far more money [Data: Reports (3)]. Regulation: most new demand depends on the Ocean Health Act [Data: Reports (7)]. Concentration: its data and reputation rest on one reef and one scientific partner [Data: Reports (5, 6)]."
+}
+</script>
+</div>
+
+<p>This matches the reference answer in <code>data/questions.jsonl</code> for question 5. The report that scored 10 was filtered before the reduce step, which kept its irrelevant “no specific risk” line out of the final prompt.</p>
+
+<h2>Cost and latency</h2>
+<p>Global search is expensive, and its cost is easy to model. Let:</p>
+<ul>
+  <li><em>R</em> = number of reports read, <em>r</em> = average report length in tokens</li>
+  <li><em>B</em> = data tokens per map batch, <em>p</em> = fixed prompt tokens per call</li>
+  <li><em>o</em> = output tokens per map call, <em>c</em> = concurrent calls, <em>t</em> = seconds per map call</li>
+</ul>
+<table>
+  <thead><tr><th>Quantity</th><th>Formula</th></tr></thead>
+  <tbody>
+    <tr><td>Map calls</td><td><em>M</em> = ⌈<em>R</em> · <em>r</em> / <em>B</em>⌉</td></tr>
+    <tr><td>Map input tokens</td><td><em>R</em> · <em>r</em> + <em>M</em> · <em>p</em></td></tr>
+    <tr><td>Map output tokens</td><td><em>M</em> · <em>o</em></td></tr>
+    <tr><td>Reduce input tokens</td><td>min(<em>M</em> · <em>o</em>, reduce data budget) + <em>p</em></td></tr>
+    <tr><td>Wall time</td><td>⌈<em>M</em> / <em>c</em>⌉ · <em>t</em> + <em>t</em><sub>reduce</sub></td></tr>
+  </tbody>
+</table>
+<p>Two things stand out. First, input tokens scale with the total size of the reports at your level, independent of the question: a question with one relevant community costs as much as one with fifty. Second, latency is bounded by concurrency and rate limits, not by the model, once <em>M</em> is large. The LightRAG paper makes the scale concrete for one of its datasets: global retrieval over 610 communities at roughly 1,000 tokens each touches about 610,000 tokens and requires hundreds of API calls. Play with the numbers:</p>
+
+<div class="viz" data-viz="ch15-cost">
+<script type="application/json">
+{
+  "title": "Global search cost calculator",
+  "subtitle": "Static map-reduce versus dynamic community selection",
+  "promptTokens": 1000,
+  "mapOutputTokens": 600,
+  "ratePromptTokens": 400,
+  "sliders": [
+    {"key": "reports", "label": "Reports at level", "min": 10, "max": 3000, "step": 10, "value": 1500},
+    {"key": "tokens", "label": "Tokens per report", "min": 200, "max": 3000, "step": 50, "value": 1000},
+    {"key": "batch", "label": "Batch data tokens", "min": 2000, "max": 32000, "step": 1000, "value": 12000},
+    {"key": "concurrency", "label": "Concurrent calls", "min": 1, "max": 64, "step": 1, "value": 16},
+    {"key": "seconds", "label": "Seconds per call", "min": 5, "max": 60, "step": 1, "value": 20},
+    {"key": "rated", "label": "Dynamic: % of reports rated", "min": 5, "max": 100, "step": 1, "value": 35},
+    {"key": "kept", "label": "Dynamic: % kept for map", "min": 1, "max": 100, "step": 1, "value": 30}
+  ]
+}
+</script>
+</div>
+
+<h3>Choosing the level</h3>
+<table>
+  <thead><tr><th>Level</th><th>Reports</th><th>Cost</th><th>What you get</th><th>Use when</th></tr></thead>
+  <tbody>
+    <tr><td>Coarse (0 or 1)</td><td>Few</td><td>Low</td><td>Broad themes; details compressed away by report substitution</td><td>“Main themes”, executive summaries, small budgets</td></tr>
+    <tr><td>Middle</td><td>Hundreds on a real corpus</td><td>Medium</td><td>Themes with supporting specifics</td><td>Default for most sensemaking questions; GraphRAG's CLI defaults to <code>--community-level 2</code></td></tr>
+    <tr><td>Deep</td><td>Many small reports</td><td>High</td><td>Fine-grained, many near-duplicate or irrelevant reports</td><td>Exhaustive analyses where missing a minor actor is costly</td></tr>
+  </tbody>
+</table>
+<p>The right level depends on the question, which is exactly why a single static level is unsatisfying. A risks question wants depth in the supply-chain branch and nothing from the reef-science branch; a themes question wants breadth everywhere. Dynamic community selection lets the question choose.</p>
+
+<h2>Dynamic community selection</h2>
+<p>Microsoft Research introduced dynamic community selection in November 2024 as a way to stop paying for irrelevant reports. Instead of reading every report at a fixed level, it walks the hierarchy top-down and asks a model a much cheaper question first: <em>is this report relevant to the query?</em></p>
+<ol>
+  <li>Start with all level-0 (root) reports in a queue.</li>
+  <li>Rate every report in the queue concurrently with a small prompt: relevance from 0 to 5. GraphRAG's prompt asks for JSON with a <code>reason</code> and a <code>rating</code>. Optionally repeat the rating <code>num_repeats</code> times and take the most common value.</li>
+  <li>A report is relevant if its rating is at least the threshold (GraphRAG default 1). For each relevant report, add its children to the next queue. Irrelevant reports are dropped, <em>and so is their entire subtree</em>, without ever being rated.</li>
+  <li>Unless <code>keep_parent</code> is set, when a child is relevant its parent is removed from the relevant set, so the most specific relevant reports win.</li>
+  <li>Repeat level by level until the queue is empty. If a whole level turns out irrelevant, GraphRAG falls back to rating every report at the next level, down to <code>dynamic_search_max_level</code> (default 2).</li>
+  <li>Run ordinary map-reduce over the relevant reports.</li>
+</ol>
+<p>The rating calls are short (one report plus a small prompt, a few tokens out) and can use a cheaper model than the map step. The blog post reports using GPT-4o-mini for rating and GPT-4o for map-reduce on an AP News dataset with 50 global questions: dynamic selection at level 1 selected about 470 reports on average instead of about 1,500 and gave an average cost reduction of 77% compared with static search.</p>
+
+<pre data-file="minigraphrag/search/global_.py"><code class="language-python">def dynamic_community_selection(index, query: str, llm: LLM, threshold: int = 2, keep_parent: bool = False,
+                                max_level: int | None = None) -&gt; tuple[list[CommunityReport], int]:
+    """Top-down relevance rating. Returns (relevant reports, number of LLM calls)."""
+    by_id = {c.id: c for c in index.communities}
+    queue = [r for r in index.reports if by_id[r.community_id].level == 0]
+    relevant: dict[int, CommunityReport] = {}
+    calls = 0
+    while queue:
+        report = queue.pop(0)
+        data = parse_json_response(llm.complete(
+            P.COMMUNITY_RATING_PROMPT.format(report=report.full_content, question=query), json=True))
+        calls += 1
+        try:
+            rating = int(data.get("rating", 0))
+        except (TypeError, ValueError):
+            rating = 0
+        if rating &lt; threshold:
+            continue  # prune the whole subtree: children of an irrelevant community are skipped
+        relevant[report.community_id] = report
+        community = by_id[report.community_id]
+        if max_level is not None and community.level &gt;= max_level:
+            continue
+        children = [index.report(ch) for ch in community.children if index.report(ch)]
+        queue.extend(children)
+    # Prefer specific communities: drop a parent if at least one of its children is relevant.
+    for cid in list(relevant):
+        parent = by_id[cid].parent
+        if not keep_parent and parent in relevant:
+            relevant.pop(parent, None)
+    return list(relevant.values()), calls</code></pre>
+
+<p><code>minigraphrag</code> differs in three small ways: it rates one report at a time (easy to read, slow), its default threshold is 2 because a rating of 1 from a small model often means “mentions a word from the question”, and its <code>max_level</code> is a hard depth limit rather than a fallback depth. Now trace it on question 5:</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Dynamic community selection",
+  "subtitle": "What risks does Kestrel Labs face? Ratings 0 to 5, threshold 2",
+  "height": 380,
+  "directed": true,
+  "scoreDigits": 0,
+  "nodes": [
+    {"id": "Q", "label": "query", "group": 8, "x": 50, "y": 8},
+    {"id": "C0", "label": "C0 Kestrel Labs", "group": 3, "x": 22, "y": 38},
+    {"id": "C4", "label": "C4 Reef science", "group": 3, "x": 60, "y": 38},
+    {"id": "C7", "label": "C7 Regulation", "group": 3, "x": 88, "y": 38},
+    {"id": "C1", "label": "C1 Board", "group": 1, "x": 7, "y": 80},
+    {"id": "C2", "label": "C2 Tern team", "group": 1, "x": 22, "y": 80},
+    {"id": "C3", "label": "C3 Supply", "group": 1, "x": 37, "y": 80},
+    {"id": "C5", "label": "C5 Bleaching", "group": 1, "x": 53, "y": 80},
+    {"id": "C6", "label": "C6 Tidewater", "group": 1, "x": 68, "y": 80}
+  ],
+  "edges": [
+    {"source": "Q", "target": "C0"}, {"source": "Q", "target": "C4"}, {"source": "Q", "target": "C7"},
+    {"source": "C0", "target": "C1"}, {"source": "C0", "target": "C2"}, {"source": "C0", "target": "C3"},
+    {"source": "C4", "target": "C5"}, {"source": "C4", "target": "C6"}
+  ],
+  "legend": {"3": "Level 0 report", "1": "Level 1 report"},
+  "steps": [
+    {"caption": "<strong>Start.</strong> The queue holds the three level-0 reports. Nothing at level 1 has been rated yet.", "active": ["Q"], "visited": ["C0", "C4", "C7"], "edges": ["Q>C0", "Q>C4", "Q>C7"]},
+    {"caption": "<strong>Rate level 0.</strong> C0 (Kestrel Labs) rates 5, C7 (Ocean Health Act) 4, C4 (reef science) 2. All three meet the threshold of 2, so their children join the queue. C7 has no children. Calls so far: 3.", "active": ["C0", "C4", "C7"], "scores": {"C0": 5, "C4": 2, "C7": 4}},
+    {"caption": "<strong>Rate level 1.</strong> C3 (Marlow and Deepcast) 5, C2 (Tern team) 4, C1 (board) 2, C6 (Tidewater) 2, C5 (bleaching) 1. C5 is below the threshold and is dropped. Calls so far: 8.", "active": ["C1", "C2", "C3", "C5", "C6"], "visited": ["C0", "C4", "C7"], "edges": ["C0>C1", "C0>C2", "C0>C3", "C4>C5", "C4>C6"], "scores": {"C0": 5, "C4": 2, "C7": 4, "C1": 2, "C2": 4, "C3": 5, "C5": 1, "C6": 2}},
+    {"caption": "<strong>Prefer specific reports.</strong> C0 and C4 each have a relevant child, so with keep_parent = false they are removed. Selected for map-reduce: C1, C2, C3, C6 and C7. Five reports after eight cheap rating calls.", "active": ["C1", "C2", "C3", "C6", "C7"], "edges": ["C0>C1", "C0>C2", "C0>C3", "C4>C6"], "scores": {"C1": 2, "C2": 4, "C3": 5, "C6": 2, "C7": 4}},
+    {"caption": "<strong>What was lost.</strong> C5 held “most data comes from one reef”, one of the five reference risks. A rating of 1 pruned it. Threshold 1 (GraphRAG's default) would have kept it. Pruning is a recall trade-off, and it happens before any map call can notice.", "active": ["C5"], "visited": ["C4"], "edges": ["C4>C5"], "scores": {"C5": 1}}
+  ]
+}
+</script>
+</div>
+
+<p>On this tiny index dynamic selection saves almost nothing: static level 1 would read six reports, dynamic reads five after eight rating calls. The savings appear at scale, when a question is relevant to a small fraction of hundreds of top-level branches and whole subtrees are pruned unrated. For a themes question, where every root is relevant, dynamic selection rates everything and prunes nothing, so it costs slightly <em>more</em> than static search. Use it for focused global questions.</p>
+
+<h2>DRIFT search</h2>
+<p>Local search is precise but narrow: it only knows the neighborhood of its seeds. Global search is broad but expensive and blurry: it only knows what reports kept. <strong>DRIFT search</strong>, introduced in a Microsoft Research blog post on 31 October 2024, combines them. It uses community reports to understand the shape of the question, then sends targeted local searches to fill in the details.</p>
+
+<h3>The three phases</h3>
+<ol>
+  <li><strong>Primer.</strong> The query is compared with community reports to find the top K most relevant ones. To increase recall, DRIFT uses a HyDE-style expansion: an LLM first writes a hypothetical answer to the query, and that answer, rather than the bare question, is embedded and matched against report embeddings. In the GraphRAG implementation, the hypothetical answer is formatted after a randomly chosen community report, so it “looks like” a report. The top reports are split into folds processed in parallel (<code>primer_folds</code>, default 5), and for each fold the LLM returns an intermediate answer, a 0 to 100 score, and up to a configured number of follow-up questions.</li>
+  <li><strong>Follow-up.</strong> Each follow-up question runs through a variant of local search. Because the primer already consumed community reports, this local search is configured to spend almost all of its budget on text units (<code>local_search_text_unit_prop</code> 0.9, <code>local_search_community_prop</code> 0.1 by default). Each local answer again comes with a score and further follow-ups. The blog describes this as “a globally informed query refinement” and says the implementation ran two iterations at the time; the current code's default depth (<code>n_depth</code>) is 3, taking up to <code>drift_k_followups</code> (default 20) of the highest-scoring open questions per iteration.</li>
+  <li><strong>Output hierarchy.</strong> The result is a tree of questions and intermediate answers ranked by relevance to the original query. It can be returned as is, which is useful for exploration, or reduced into one final answer.</li>
+</ol>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "DRIFT search",
+  "subtitle": "Global primer, local follow-ups, hierarchy of answers",
+  "perRow": 4,
+  "stages": [
+    {"label": "Hypothetical answer", "detail": "HyDE-style: the LLM drafts an answer to 'What risks does Kestrel Labs face?' shaped like a community report. It mentions supply, competition, regulation, growth, without inventing new names."},
+    {"label": "Top-K reports", "detail": "Embed the hypothetical answer and rank community reports by cosine similarity to it. The draft's vocabulary ('supplier', 'contract', 'regulation') pulls in C3, C2 and C7."},
+    {"label": "Primer folds", "detail": "Split the top reports into folds. For each fold, the LLM writes an intermediate answer, a 0-100 score and follow-up questions such as 'When does Kestrel run out of Deepcast spares?'"},
+    {"label": "Rank follow-ups", "detail": "Keep the highest-scoring open questions, up to drift_k_followups per round."},
+    {"label": "Local search each", "detail": "Each follow-up runs local search with 90% of the budget on text units. 'When does Kestrel run out of spares?' seeds DEEPCAST and PROJECT TERN and finds the board memo's nine months of inventory."},
+    {"label": "New follow-ups", "detail": "Each local answer returns a score and more questions, for example 'Is Marlow Dynamics selling to municipalities?' Repeat for n_depth rounds."},
+    {"label": "Answer hierarchy", "detail": "A tree: the original question, the primer answer, follow-up questions and their answers, each with a relevance score."},
+    {"label": "Reduce (optional)", "detail": "Merge the ranked intermediate answers into one response that keeps both the global framing and the local specifics."}
+  ]
+}
+</script>
+</div>
+
+<div class="callout paper">
+  <span class="callout-title">Microsoft Research, Introducing DRIFT Search (2024)</span>
+  <p>The blog post evaluates DRIFT against local search on a dataset of more than 5,000 AP News articles with 50 local questions, judged by an LLM. It reports that DRIFT search outperformed local search 78% of the time on comprehensiveness and 81% of the time on diversity. These are win rates on one dataset and question type, reported by the authors of the method; replicate on your own questions before relying on them.</p>
+</div>
+
+<h3>DRIFT in minigraphrag</h3>
+<p><code>minigraphrag</code>'s <code>drift_search</code> keeps the structure and drops the expensive parts, so you can see the idea in thirty lines: it embeds the query directly (no hypothetical answer), takes the top five reports, asks for one primer answer with follow-ups, runs local search for up to three follow-ups (one round), and reduces with the global reduce prompt. Exercise 15.5 adds the HyDE step.</p>
+
+<pre data-file="minigraphrag/search/global_.py"><code class="language-python">def drift_search(index, query: str, llm: LLM, top_k_reports: int = 5, max_followups: int = 3,
+                 response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; SearchResult:
+    """DRIFT-style search: global primer from the nearest reports, then local follow-ups, then reduce."""
+    hits = index.report_store.search(index.embedder.embed([query])[0], k=top_k_reports)
+    reports = [index.report(int(rid)) for rid, _, _ in hits]
+    context = format_table("Reports", ["id", "title", "content"], [[r.community_id, r.title, r.full_content] for r in reports])
+    primer = parse_json_response(llm.complete(P.DRIFT_PRIMER_PROMPT.format(context_data=context, question=query), json=True))
+    calls = 1
+    answers = [(100, str(primer.get("intermediate_answer", "")))]
+    sources = _report_sources(index, reports)
+    followups = [str(q) for q in primer.get("follow_up_queries", [])][:max_followups]
+    for q in followups:
+        result = local_search(index, q, llm)
+        calls += result.llm_calls
+        answers.append((80, result.answer))
+        sources += [s for s in result.sources if s not in sources]
+    report_data = "\n\n".join(f"----Analyst {i + 1}----\nImportance Score: {score}\n{' '.join(text.split())}"
+                              for i, (score, text) in enumerate(answers) if text.strip())
+    answer = llm.complete(P.GLOBAL_REDUCE_PROMPT.format(report_data=report_data, question=query, response_type=response_type))
+    return SearchResult(answer, "drift", report_data, {"followups": followups, "reports": [r.community_id for r in reports]},
+                        sources, calls + 1)</code></pre>
+
+<pre data-file="terminal"><code class="language-bash">python -m minigraphrag query --method global "What are the main themes in this corpus?" --level 0
+python -m minigraphrag query --method global --dynamic "What risks does Kestrel Labs face?"
+python -m minigraphrag query --method drift "What risks does Kestrel Labs face?" --show-context</code></pre>
+
+<h2>Choosing between global, local and DRIFT</h2>
+<table>
+  <thead><tr><th>Question shape</th><th>Kestrel example</th><th>Best first choice</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Whole-corpus themes, no anchor</td><td>“What are the main themes in this corpus?”</td><td>Global, coarse level</td><td>Every part of the corpus must be summarized; no entity to anchor on</td></tr>
+    <tr><td>Focused sensemaking about one actor</td><td>“What risks does Kestrel Labs face?”</td><td>DRIFT, or global with dynamic selection</td><td>Needs breadth to find all risks, detail to substantiate them; much of the corpus is irrelevant</td></tr>
+    <tr><td>Multi-hop fact chain</td><td>“Why did Kestrel Labs start Project Tern?”</td><td>Local</td><td>Anchors exist; evidence sits one hop away in specific chunks</td></tr>
+    <tr><td>Connection between named entities</td><td>“What connects Priya Nair to Deepcast?”</td><td>Local, or path retrieval (Ch. 18)</td><td>The answer is a path, which reports tend to summarize away</td></tr>
+    <tr><td>Single fact or number</td><td>“How far is Halden Reef from Port Avalon?”</td><td>Basic or local</td><td>One chunk answers it; global search would be slow and vague</td></tr>
+    <tr><td>Time-sensitive fact</td><td>“Who is the CTO of Kestrel Labs?”</td><td>Local with claims, or a temporal graph (Ch. 27)</td><td>Reports blur time; claims carry dates</td></tr>
+  </tbody>
+</table>
+<p>Global search beats local when the answer is distributed: many communities each contribute a small piece and no anchor reaches them all. Local beats global when the answer is concentrated: a few entities and their chunks contain it, and reports would only paraphrase it with less precision and more cost. DRIFT sits between them and costs more than either on a single question, because it runs a primer and several local searches. <a href="16-lightrag.html">Chapter 16</a> shows a cheaper way to get some of the global breadth without reports at all.</p>
+
+<h2>Failure modes</h2>
+<table>
+  <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+  <tbody>
+    <tr><td>Generic, repetitive answers</td><td>Level too coarse; reports compressed the specifics</td><td>Go one level deeper, or use DRIFT for focused questions</td></tr>
+    <tr><td>“I don't know” for a question the corpus answers</td><td>All map scores filtered; threshold too high for your model</td><td>Log score distributions; calibrate <code>min_score</code>; check that reports mention the relevant terms</td></tr>
+    <tr><td>Irrelevant points in the answer</td><td>Model gives every batch a high score</td><td>Stricter map prompt with examples of score 0; raise <code>min_score</code>; dynamic selection</td></tr>
+    <tr><td>Different answers on re-run</td><td>Shuffle seed or batch composition changed</td><td>Fix the seed; cache map responses keyed by batch content</td></tr>
+    <tr><td>Costs spike after re-indexing</td><td>More, smaller communities at the same level number</td><td>Track report count per level in your index metadata; pick the level by count, not by number</td></tr>
+    <tr><td>Important minor theme missing with dynamic selection</td><td>A parent rated below threshold pruned the subtree</td><td>Lower threshold, <code>num_repeats</code> &gt; 1, or rate on full content instead of summary</td></tr>
+    <tr><td>Unverifiable claims in the final answer</td><td>Reduce step dropped or merged citations</td><td>Require citations in reduce; verify ids as in Chapter 14; trace report ids back to entities and text units</td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 15.1 <span class="level">Warm-up</span></h4>
+  <p>An index has 800 reports at level 2, averaging 900 tokens. Batches hold 12,000 data tokens, the map prompt adds 1,000 tokens per call, each map call returns 500 tokens and takes 25 seconds, and you run 16 calls concurrently. The reduce call takes 30 seconds. Compute the number of map calls, total map input and output tokens, the reduce input (with a 12,000-token data budget) and the wall time.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ul>
+      <li>Report tokens: 800 × 900 = 720,000. Map calls: ⌈720,000 / 12,000⌉ = <strong>60</strong>. (Greedy packing of whole reports can need one or two more, because batches rarely fill exactly.)</li>
+      <li>Map input: 720,000 + 60 × 1,000 = <strong>780,000 tokens</strong>. Map output: 60 × 500 = <strong>30,000 tokens</strong>.</li>
+      <li>Reduce input: all 30,000 output tokens of points would not fit in 12,000, so the top-scored points up to <strong>12,000</strong> tokens are used, plus about 1,000 of prompt. Points beyond the budget are discarded, lowest scores first.</li>
+      <li>Wall time: ⌈60 / 16⌉ = 4 waves × 25 s = 100 s, plus 30 s for reduce = <strong>about 130 seconds</strong>. Doubling concurrency to 32 gives 2 waves: 80 s. Rate limits usually cap this before your code does.</li>
+    </ul>
+    <p>Note what does not appear: the question. A question relevant to three reports costs the same 780,000 input tokens.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 15.2 <span class="level">Core</span></h4>
+  <p>Using the Kestrel hierarchy and these ratings for “Who funds Kestrel Labs and why?”: C0 = 5, C4 = 0, C7 = 1; C1 = 5, C2 = 1, C3 = 0. (a) With <code>minigraphrag</code>'s defaults (threshold 2, <code>keep_parent=False</code>), how many rating calls happen and which reports are selected? (b) Same with threshold 1. (c) With threshold 2 and <code>keep_parent=True</code>. (d) Compare map input with static level 1 if every report is 600 tokens.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Rate level 0: C0 (5) relevant, C4 (0) and C7 (1) not. C4's children C5 and C6 are never rated. C0's children join the queue: C1 (5) relevant, C2 (1) and C3 (0) not. Calls: 3 + 3 = <strong>6</strong>. C1 is relevant and its parent C0 is removed. Selected: <strong>C1</strong> only.</p>
+    <p>(b) Threshold 1: level 0 C0 and C7 are relevant (C7 has no children). Children of C0: C1 and C2 relevant, C3 not. Calls: 3 + 3 = 6. C0 is removed because it has relevant children. Selected: <strong>C1, C2, C7</strong>. C7 (the Ocean Health Act) is arguably relevant to “why”, since investors cited regulation-driven demand; C2 is noise.</p>
+    <p>(c) Threshold 2 with <code>keep_parent=True</code>: calls still 6, selected <strong>C0 and C1</strong>. The parent adds context such as the Series B being tied to Tern, at the cost of redundancy with C1.</p>
+    <p>(d) Static level 1 reads six reports: 3,600 tokens of report text in the map step. Dynamic (a) reads one: 600 tokens, plus six rating calls each carrying one report (about 3,600 report tokens in total, since level-0 reports are longer in practice) on a cheaper model. On Kestrel the saving is small; the point is that C4's subtree was pruned without rating C5 and C6, and on a corpus with hundreds of roots that pruning dominates.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 15.3 <span class="level">Core</span></h4>
+  <p>Twelve reports are stored in id order; reports 3, 4 and 5 (all about supply chains) are the only ones relevant to a question. Each batch holds four reports, and the map model can write at most about 150 words per call. Compare what happens with and without shuffling. Then write a test for <code>_batches</code> that checks every report appears exactly once and no batch exceeds the budget unless it holds a single oversized report.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Without shuffling, batches are {0–3}, {4–7}, {8–11}. Two relevant reports (4, 5) share batch 2 and one (3) sits in batch 1. Batch 3 returns nothing. Batch 2 has to cover two relevant reports in 150 words, so each gets roughly half the attention and space. The worse case is a stored order that puts all three in one batch: one call must summarize all relevant material within one output limit, and the reduce step receives one compressed point instead of three detailed ones. Shuffling makes that concentration unlikely on average, so relevant material tends to be spread over several map calls, each of which can write a full point. It does not guarantee it; a fixed seed makes the outcome reproducible, not optimal.</p>
+    <pre><code class="language-python">from minigraphrag.reports import CommunityReport
+from minigraphrag.search.global_ import _batches
+from minigraphrag.tokens import count_tokens
+
+def make_report(i, words):
+    return CommunityReport(i, 1, f"R{i}", "word " * words, 5.0, "", [])
+
+def test_batches_cover_all_and_respect_budget():
+    reports = [make_report(i, w) for i, w in enumerate([100, 300, 50, 700, 200, 120, 90, 400])]
+    budget = 600
+    batches = _batches(reports, budget, seed=7)
+    ids = [r.community_id for b in batches for r in b]
+    assert sorted(ids) == list(range(len(reports)))          # each exactly once
+    for b in batches:
+        used = sum(count_tokens(r.full_content) for r in b)
+        assert used &lt;= budget or len(b) == 1                 # oversized report alone is allowed
+
+def test_shuffle_is_deterministic():
+    reports = [make_report(i, 50) for i in range(12)]
+    a = [[r.community_id for r in b] for b in _batches(reports, 300, seed=1)]
+    b = [[r.community_id for r in b] for b in _batches(reports, 300, seed=1)]
+    assert a == b</code></pre>
+    <p>The 700-word report becomes 934 tokens with the fallback estimator (⌈700 × 4/3⌉), larger than the budget on its own; <code>_batches</code> still emits it, alone, because it only closes a batch when the current one is non-empty. That is the right behavior, and the test encodes it.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 15.4 <span class="level">Core</span></h4>
+  <p>Write <code>route(question)</code> that returns <code>"global"</code>, <code>"drift"</code>, <code>"local"</code> or <code>"basic"</code> using cheap rules first and an LLM only when rules are unsure. Apply your rules to the seven canonical questions and justify each routing.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import re
+
+BROAD = re.compile(r"\b(themes?|overall|trends?|summari[sz]e|main (topics|ideas)|landscape|across)\b", re.I)
+FOCUSED_BROAD = re.compile(r"\b(risks?|challenges?|opportunities|strategy|impact|what happened)\b", re.I)
+RELATIONAL = re.compile(r"\b(why|how did|connect|relationship|between|led to|because)\b", re.I)
+
+def mentioned_entities(index, question):
+    q = question.upper()
+    return [n for n, d in index.graph.nodes(data=True)
+            if any(re.search(rf"(?&lt;!\w){re.escape(s)}(?!\w)", q) for s in [n, *d.get("aliases", [])])]
+
+def route(index, question, llm=None):
+    ents = mentioned_entities(index, question)
+    if BROAD.search(question) and not ents:
+        return "global"
+    if FOCUSED_BROAD.search(question):
+        return "drift" if ents else "global"
+    if ents and (RELATIONAL.search(question) or len(ents) &gt;= 2):
+        return "local"
+    if ents:
+        return "local"
+    if llm is None:
+        return "basic"
+    answer = llm.complete("Classify the question as GLOBAL (about the whole collection) or "
+                          f"SPECIFIC (about particular things). Answer one word.\nQuestion: {question}")
+    return "global" if answer.strip().upper().startswith("GLOBAL") else "basic"</code></pre>
+    <table>
+      <thead><tr><th>Question</th><th>Route</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>1. Why did Kestrel Labs start Project Tern?</td><td>local</td><td>Two entities and “why”: an anchored causal chain</td></tr>
+        <tr><td>2. Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?</td><td>local</td><td>Mentions Halden Reef (and “bleaching” if the event has that alias); multi-hop from an anchor. Path retrieval (Ch. 18) would do better</td></tr>
+        <tr><td>3. What connects Priya Nair to Deepcast?</td><td>local</td><td>Two entities, “connect”</td></tr>
+        <tr><td>4. What are the main themes in this corpus?</td><td>global</td><td>Broad pattern and no entities</td></tr>
+        <tr><td>5. What risks does Kestrel Labs face?</td><td>drift</td><td>Focused-broad word with an anchor entity</td></tr>
+        <tr><td>6. Who is the CTO of Kestrel Labs?</td><td>local</td><td>One entity; include claims for time</td></tr>
+        <tr><td>7. Who supplied Kestrel's sonar in 2024?</td><td>local</td><td>“Kestrel” is an alias of Kestrel Labs; temporal, needs claims</td></tr>
+      </tbody>
+    </table>
+    <p>Rules like these are brittle but transparent and free. Log the route with every query, and review misroutes in your evaluation set before replacing them with an LLM classifier.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 15.5 <span class="level">Stretch</span></h4>
+  <p>Add a HyDE primer to <code>minigraphrag</code>'s DRIFT. Write <code>hyde_report_hits(index, query, llm, k)</code> that asks the LLM for a hypothetical answer formatted like a randomly chosen report (without new named entities), embeds it, and returns the top-k report ids. Explain why, for “What risks does Kestrel Labs face?”, this should rank the supply-chain and regulation reports higher than embedding the bare question does, and how you would measure the difference without a human.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import random
+
+HYDE_PROMPT = """Create a hypothetical answer to the following query: {query}
+
+Format it to follow the structure of the template below:
+
+{template}
+
+Ensure that the hypothetical answer does not reference new named entities that are not present in the original query."""
+
+def hyde_report_hits(index, query, llm, k=5, seed=None):
+    template = random.Random(seed).choice(index.reports).full_content
+    draft = llm.complete(HYDE_PROMPT.format(query=query, template=template)).strip() or query
+    vec = index.embedder.embed([draft])[0]
+    return [int(rid) for rid, _, _ in index.report_store.search(vec, k=k)], draft
+
+def drift_search_hyde(index, query, llm, top_k_reports=5, max_followups=3):
+    ids, _ = hyde_report_hits(index, query, llm, top_k_reports)
+    # ...then continue exactly as drift_search, using [index.report(i) for i in ids]</code></pre>
+    <p>Why it helps: the bare question has three content words, “risks”, “Kestrel” and “Labs”. Report embeddings are dominated by the vocabulary of what reports discuss: suppliers, acquisitions, contracts, regulation, sea trials. “Risks” rarely appears in them, so similarity to the bare question is driven mostly by “Kestrel Labs”, which favors C0 and C1 because those reports name the company most often. A hypothetical answer written in report style talks about supplier dependence, competition, regulatory demand and funding, which overlaps with C3, C2 and C7. The instruction not to introduce new named entities stops the draft from hallucinating a competitor that then drags in the wrong report.</p>
+    <p>Measuring without a human: use the reference answer's <code>supporting_docs</code> in <code>data/questions.jsonl</code>. For each report, collect the documents of its member entities' text units (<code>_report_sources</code> does this). Compute recall of the supporting documents covered by the top-k reports for both methods over the global questions, with several seeds for the random template, and report mean and spread. With <code>MockLLM</code> and the <code>HashingEmbedder</code> this measures lexical overlap only; the effect is meaningful with a real LLM and embedding model.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why are community reports shuffled before they are batched for the map step?</p>
+  <ol>
+    <li>To make answers vary between runs</li>
+    <li data-correct>So relevant reports are spread over several map calls instead of concentrated in one, where they would compete for one output</li>
+    <li>Because parquet files are unordered</li>
+    <li>To balance token counts across batches exactly</li>
+  </ol>
+  <div class="explain">Stored order often groups related communities. Shuffling (with a fixed seed for reproducibility) spreads relevant material so each map call can give it full attention.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In GraphRAG global search, which map outputs are discarded before the reduce step?</p>
+  <ol>
+    <li>Points below the median score</li>
+    <li>Points from reports with low rank</li>
+    <li data-correct>Points with score 0; the rest are sorted by score and packed until the reduce budget is full</li>
+    <li>Nothing; every point is passed to reduce</li>
+  </ol>
+  <div class="explain">GraphRAG keeps scores above 0 and packs best-first. <code>minigraphrag</code> exposes the cutoff as <code>min_score</code> (default 20). Low-scoring points may still be cut later by the reduce token budget.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Global search over level 2 costs 780,000 input tokens for the question “What are the main themes?”. Roughly what does “What does Lena Park do?” cost with static global search at the same level?</p>
+  <ol>
+    <li>About 5% as much, because one community is relevant</li>
+    <li>About half, because map outputs are shorter</li>
+    <li>Nothing extra, because answers are cached</li>
+    <li data-correct>About the same, because every report at the level is read regardless of the question</li>
+  </ol>
+  <div class="explain">Static global search cost depends on the reports at the level, not on relevance. That is the motivation for dynamic selection, and why such a question belongs to local search anyway.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In dynamic community selection, a level-0 report is rated below the threshold. What happens to its children?</p>
+  <ol>
+    <li data-correct>They are never rated; the whole subtree is pruned</li>
+    <li>They are rated with a lower threshold</li>
+    <li>They are included automatically</li>
+    <li>They are rated only if their parent's rating is exactly one below the threshold</li>
+  </ol>
+  <div class="explain">Pruning unrated subtrees is where the savings come from, and also where recall can be lost, as with C5 in the worked example.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the role of the HyDE-style step in DRIFT's primer?</p>
+  <ol>
+    <li>It replaces community reports with generated ones</li>
+    <li>It writes the final answer</li>
+    <li data-correct>It embeds a hypothetical answer instead of the bare query, so report retrieval matches the vocabulary reports actually use</li>
+    <li>It generates the follow-up questions</li>
+  </ol>
+  <div class="explain">A draft answer shaped like a report shares far more terms with relevant reports than a short question does, which increases recall of the top-K reports. Follow-ups are produced afterwards from those reports.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which question is the best fit for static global search rather than local search or DRIFT?</p>
+  <ol>
+    <li>“Why did Kestrel Labs start Project Tern?”</li>
+    <li data-correct>“What are the main themes in this corpus?”</li>
+    <li>“Who is the CTO of Kestrel Labs?”</li>
+    <li>“What connects Priya Nair to Deepcast?”</li>
+  </ol>
+  <div class="explain">Themes need every part of the corpus and have no entity anchor. The others are anchored on named entities, where local search is cheaper and more precise.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I put all community reports into one long-context call?</summary>
+  <div><p>For a small index you can, and it is a reasonable baseline. Two things break as the index grows: the reports stop fitting (hundreds of reports at a thousand tokens each exceed any practical window), and models attend unevenly across very long inputs, so middle reports get less weight. Map-reduce bounds each call's input, parallelizes, and makes relevance explicit through scores you can log and filter.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should map calls use a cheaper model than reduce?</summary>
+  <div><p>Often yes. Map calls are many and each only has to extract and score points from a few reports; reduce is one call that has to synthesize well. A common split is a small model for map (and for dynamic selection ratings) and a stronger one for reduce. Evaluate it: a weak map model that under-scores relevant reports silently removes evidence the strong reduce model never sees.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How do I cite sources from a global answer?</summary>
+  <div><p>The answer cites report ids. Each report's community has member entities, and each entity has <code>source_ids</code> pointing at text units and documents. <code>minigraphrag</code>'s <code>_report_sources</code> walks that chain to fill <code>SearchResult.sources</code>. The citation is honest but coarse: it says “this community, drawn from these documents”, not “this sentence”. If users need sentence-level evidence, DRIFT's local follow-ups provide it.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does global search go stale when documents are added?</summary>
+  <div><p>Yes. Reports summarize the graph as it was at indexing time, so a new document only affects global answers after the affected communities are re-detected and their reports regenerated. This is one of the main costs of GraphRAG-style indexing and a key motivation for LightRAG's approach in <a href="16-lightrag.html">Chapter 16</a> and incremental methods in <a href="27-incremental-temporal.html">Chapter 27</a>.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is DRIFT always better than local search?</summary>
+  <div><p>No. The published comparison reports higher comprehensiveness and diversity win rates, which are the dimensions DRIFT is designed to improve. For a precise factual question, more breadth can mean more tokens and more distraction for the same answer. DRIFT also makes many more calls: a primer per fold plus a local search per follow-up per round. Use it for questions where missing a facet is worse than a slower, costlier answer.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a global search cost and quality report</h3>
+  <p>Measure, on the Kestrel index and on a larger corpus of your choice, what each global strategy buys and costs.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A wrapper LLM that counts calls and input and output tokens per stage (rating, map, reduce, primer, local follow-up)</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Runs of static global search at every available level, dynamic selection at thresholds 1, 2 and 3, and DRIFT, on questions 4 and 5 plus three global questions you write</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Concurrent map calls with a configurable limit, and measured wall time</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Context recall of <code>supporting_docs</code> for each run, using report-to-document provenance</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A pairwise LLM-judge comparison (comprehensiveness, diversity) between the cheapest and the most expensive configuration, using <code>llm_judge_pairwise</code></span></li>
+  </ul>
+  <p><strong>Done when</strong> you have a table of tokens, calls, seconds and recall per configuration, and a one-paragraph recommendation for which global strategy to default to on your corpus.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Global search is query-focused summarization over pre-written community reports: shuffle and batch, map with 0–100 helpfulness scores, filter, reduce best-first.</li>
+    <li>Its cost scales with the reports at the chosen level, not with the question; model it as calls, tokens and waves of concurrent calls before you deploy.</li>
+    <li>Coarse levels are cheap and vague, deep levels are detailed and expensive; the right level depends on the question.</li>
+    <li>Dynamic community selection rates reports top-down with a cheap model and prunes irrelevant subtrees unrated, trading some recall for large savings on focused questions.</li>
+    <li>DRIFT primes with report-level context (using a HyDE-style hypothetical answer), then runs local searches for follow-up questions and returns a ranked hierarchy of answers.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://microsoft.github.io/graphrag/query/global_search/">GraphRAG documentation: global search</a>. <span class="venue">GraphRAG docs</span></li>
+  <li>Li, Trinh, Edge and Larson. <a href="https://www.microsoft.com/en-us/research/blog/graphrag-improving-global-search-via-dynamic-community-selection/">GraphRAG: Improving global search via dynamic community selection</a>. <span class="venue">Microsoft Research blog, November 2024</span></li>
+  <li>Whiting, Hills, Guevara Fernández, Trinh, Bradley and Larson. <a href="https://www.microsoft.com/en-us/research/blog/introducing-drift-search-combining-global-and-local-search-methods-to-improve-quality-and-efficiency/">Introducing DRIFT Search: Combining global and local search methods to improve quality and efficiency</a>. <span class="venue">Microsoft Research blog, October 2024</span></li>
+  <li>Gao, Ma, Lin and Callan. <a href="https://arxiv.org/abs/2212.10496">Precise Zero-Shot Dense Retrieval without Relevance Labels</a> (HyDE). <span class="venue">arXiv 2212.10496, 2022</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: global search, dynamic community selection and DRIFT implementations. <span class="venue">GitHub</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+<script>
+GRFSViz.register("ch15-cost", function (el, cfg, api) {
+  const { stage } = api.frame(el, cfg);
+  const summary = api.h("div", { class: "viz-text" }, stage);
+  const chart = api.h("div", {}, stage);
+  chart.style.cssText = "padding:4px 14px 14px;display:grid;gap:8px";
+  const bar = api.controls(el);
+  const inputs = {}, shown = {};
+  (cfg.sliders || []).forEach(function (d) {
+    const label = api.h("label", {}, bar, d.label + " ");
+    const input = api.h("input", { type: "range", min: d.min, max: d.max, step: d.step, value: d.value }, label);
+    const value = api.h("b", {}, label);
+    inputs[d.key] = input; shown[d.key] = value;
+    input.addEventListener("input", render);
+  });
+  const cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+  const P = cfg.promptTokens || 1000, O = cfg.mapOutputTokens || 600, RP = cfg.ratePromptTokens || 400;
+  function n(x) { return Math.round(x).toLocaleString(); }
+  function row(label, parts, max) {
+    const wrap = api.h("div", {}, chart);
+    const head = api.h("div", { class: "viz-sub" }, wrap);
+    const total = parts.reduce(function (a, p) { return a + p.value; }, 0);
+    head.textContent = label + ": " + n(total) + " input tokens";
+    const track = api.h("div", {}, wrap);
+    track.style.cssText = "display:flex;height:16px;border-radius:4px;overflow:hidden;background:var(--panel);border:1px solid var(--rule)";
+    parts.forEach(function (p) {
+      const seg = api.h("div", { title: p.label + ": " + n(p.value) }, track);
+      seg.style.cssText = "height:100%;width:" + (max ? (100 * p.value / max) : 0) + "%;background:" + p.color;
+    });
+  }
+  function render() {
+    const v = {};
+    Object.keys(inputs).forEach(function (k) { v[k] = +inputs[k].value; shown[k].textContent = (k === "rated" || k === "kept") ? v[k] + "%" : v[k].toLocaleString(); });
+    const R = v.reports, r = v.tokens, B = v.batch, c = v.concurrency, t = v.seconds;
+    const M = Math.ceil(R * r / B);
+    const mapIn = R * r + M * P, mapOut = M * O;
+    const reduceIn = Math.min(mapOut, 12000) + P;
+    const wall = Math.ceil(M / c) * t + t;
+    const rated = Math.round(R * v.rated / 100);
+    const kept = Math.max(1, Math.round(R * v.kept / 100));
+    const rateIn = rated * (r + RP);
+    const Md = Math.ceil(kept * r / B);
+    const dynMapIn = kept * r + Md * P;
+    chart.innerHTML = "";
+    const max = Math.max(mapIn, rateIn + dynMapIn);
+    row("Static", [{ label: "map", value: mapIn, color: "var(--c1)" }], max);
+    row("Dynamic", [{ label: "rating (small model)", value: rateIn, color: "var(--c3)" }, { label: "map", value: dynMapIn, color: "var(--c1)" }], max);
+    summary.innerHTML = "<strong>Static:</strong> " + n(M) + " map calls, " + n(mapIn) + " input and " + n(mapOut) +
+      " output tokens, reduce input about " + n(reduceIn) + ", wall time about " + n(wall) + " s." +
+      "<br><strong>Dynamic:</strong> " + n(rated) + " rating calls (" + n(rateIn) + " tokens), then " + n(Md) +
+      " map calls over " + n(kept) + " reports (" + n(dynMapIn) + " tokens).";
+    cap.innerHTML = "Rating tokens usually go to a much cheaper model than map tokens, so weigh the rating segment at a discount. " +
+      (rateIn + dynMapIn < mapIn ? "Here dynamic selection reads fewer tokens overall." : "Here dynamic selection reads more tokens than static: too many reports rated or kept.");
+  }
+  render();
+});
+</script>
+</body>
+</html>

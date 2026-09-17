@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graph RAG from Scratch</title>
+<meta name="description" content="A hands-on course that teaches you to build graph retrieval-augmented generation from first principles: explanations, animations, diagrams, exercises with answers, projects and capstones.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-root=".">
+<main class="home" id="main">
+  <div class="wrap">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">34 chapters · 4 capstones · 3,462 lines of Python · no API key</div>
+        <h1>Build Graph RAG <span class="hl">from scratch.</span></h1>
+        <p class="lede">Vector search finds passages that look like the question. It loses the thread when an answer is spread across documents, when a question is about the whole corpus, or when a fact has changed. This course builds the alternative one stage at a time: extract a graph, cluster it, summarize it, and search it by entities, paths and communities.</p>
+        <p class="sub">Each chapter works one mechanism four ways: a diagram, an interactive figure, graded questions with explanations, and exercises against a small reference implementation you can run offline.</p>
+        <div class="btnrow">
+          <a class="btn primary" id="continue" href="chapters/00-welcome.html">Start with 00 →</a>
+          <a class="btn" href="#curriculum">See the curriculum</a>
+        </div>
+        <div class="termline"><span class="p">$</span>cd code &amp;&amp; pip install -e . &amp;&amp; python -m minigraphrag index --input data/corpus</div>
+      </div>
+
+      <figure class="hero-fig" aria-labelledby="hf-title">
+        <span class="mono-label">Chapter 0 · the whole pipeline</span>
+        <svg viewBox="0 0 620 262" role="img" aria-labelledby="hf-title">
+          <title id="hf-title">GraphRAG pipeline: documents are chunked, extracted into a graph, clustered and summarized offline; a question is routed to local or global search over that index and answered with citations. The example path joins three documents: Marlow Dynamics acquired Deepcast, Deepcast supplied Kestrel Labs, Kestrel Labs started Project Tern.</title>
+          <defs>
+            <marker id="hfa" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="hf-arrow"/></marker>
+            <marker id="hfh" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="hf-arrow hot"/></marker>
+          </defs>
+          <text class="hf-cap" x="4" y="10">INDEX · ONCE, OFFLINE</text>
+          <g>
+            <rect class="hf-box sunk" x="4" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="46" y="36" text-anchor="middle">documents</text><text class="hf-s" x="46" y="49" text-anchor="middle">12 × .md</text>
+            <rect class="hf-box" x="108" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="150" y="36" text-anchor="middle">chunks</text><text class="hf-s" x="150" y="49" text-anchor="middle">text units</text>
+            <rect class="hf-box hot" x="212" y="16" width="92" height="46" rx="5"/><text class="hf-t hot" x="258" y="36" text-anchor="middle">extract</text><text class="hf-s" x="258" y="49" text-anchor="middle">LLM → entities</text>
+            <rect class="hf-box" x="324" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="366" y="36" text-anchor="middle">graph</text><text class="hf-s" x="366" y="49" text-anchor="middle">17 nodes</text>
+            <rect class="hf-box" x="428" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="470" y="36" text-anchor="middle">communities</text><text class="hf-s" x="470" y="49" text-anchor="middle">Leiden</text>
+            <rect class="hf-box" x="532" y="20" width="84" height="38" rx="4"/><text class="hf-t" x="574" y="36" text-anchor="middle">reports</text><text class="hf-s" x="574" y="49" text-anchor="middle">summaries</text>
+            <path class="hf-line" d="M88 39 H106" marker-end="url(#hfa)"/><path class="hf-line" d="M192 39 H210" marker-end="url(#hfa)"/>
+            <path class="hf-line hot" d="M304 39 H322" marker-end="url(#hfh)"/><path class="hf-line" d="M408 39 H426" marker-end="url(#hfa)"/><path class="hf-line" d="M512 39 H530" marker-end="url(#hfa)"/>
+          </g>
+          <text class="hf-cap" x="4" y="92">QUERY · EVERY QUESTION</text>
+          <g>
+            <rect class="hf-box sunk" x="4" y="102" width="110" height="38" rx="4"/><text class="hf-t" x="59" y="118" text-anchor="middle">question</text><text class="hf-s" x="59" y="131" text-anchor="middle">"why Tern?"</text>
+            <rect class="hf-box hot" x="146" y="98" width="170" height="46" rx="5"/><text class="hf-t hot" x="231" y="118" text-anchor="middle">search the graph</text><text class="hf-s" x="231" y="131" text-anchor="middle">local · global · PPR · paths</text>
+            <rect class="hf-box" x="348" y="102" width="110" height="38" rx="4"/><text class="hf-t" x="403" y="118" text-anchor="middle">context</text><text class="hf-s" x="403" y="131" text-anchor="middle">tables + ids</text>
+            <rect class="hf-box good" x="490" y="102" width="126" height="38" rx="4"/><text class="hf-t good" x="553" y="118" text-anchor="middle">answer</text><text class="hf-s" x="553" y="131" text-anchor="middle">with citations</text>
+            <path class="hf-line" d="M114 121 H144" marker-end="url(#hfa)"/><path class="hf-line hot" d="M316 121 H346" marker-end="url(#hfh)"/><path class="hf-line" d="M458 121 H488" marker-end="url(#hfa)"/>
+            <path class="hf-line hot" d="M366 58 V76 H270 V96" marker-end="url(#hfh)"/>
+            <path class="hf-line" d="M574 58 V80 H290 V96" stroke-dasharray="3 3"/>
+          </g>
+          <text class="hf-cap" x="4" y="174">THE PATH BEHIND “WHY DID KESTREL LABS START PROJECT TERN?”</text>
+          <g>
+            <rect class="hf-box" x="4" y="184" width="110" height="26" rx="13"/><text class="hf-t" x="59" y="201" text-anchor="middle">Marlow Dynamics</text>
+            <rect class="hf-box" x="170" y="184" width="84" height="26" rx="13"/><text class="hf-t" x="212" y="201" text-anchor="middle">Deepcast</text>
+            <rect class="hf-box" x="310" y="184" width="100" height="26" rx="13"/><text class="hf-t" x="360" y="201" text-anchor="middle">Kestrel Labs</text>
+            <rect class="hf-box hot" x="466" y="184" width="100" height="26" rx="13"/><text class="hf-t hot" x="516" y="201" text-anchor="middle">Project Tern</text>
+            <path class="hf-line hot" d="M114 197 H168" marker-end="url(#hfh)"/><text class="hf-s" x="141" y="191" text-anchor="middle">acquired</text><text class="hf-note" x="141" y="221" text-anchor="middle">doc 07</text>
+            <path class="hf-line hot" d="M254 197 H308" marker-end="url(#hfh)"/><text class="hf-s" x="281" y="191" text-anchor="middle">supplied</text><text class="hf-note" x="281" y="221" text-anchor="middle">doc 08</text>
+            <path class="hf-line hot" d="M410 197 H464" marker-end="url(#hfh)"/><text class="hf-s" x="437" y="191" text-anchor="middle">started</text><text class="hf-note" x="437" y="221" text-anchor="middle">doc 09</text>
+          </g>
+          <text class="hf-note" x="4" y="243">grey = computed once while indexing · orange = the work a query does</text>
+          <text class="hf-warn" x="4" y="257">Top-k vector search returns one of these three documents; chapter 03 shows why.</text>
+        </svg>
+      </figure>
+    </section>
+  </div>
+
+  <section class="band">
+    <div class="wrap principles">
+      <div><div class="n">01</div><h3>Start from where vector search fails.</h3><p>Multi-hop questions, questions about a whole corpus, and facts that change over time are where plain RAG breaks. Every technique in the course is introduced as a repair for one of those failures.</p></div>
+      <div><div class="n">02</div><h3>The graph is an index, not the answer.</h3><p>Entities, relationships, communities and reports exist so retrieval can find the right evidence. Extraction quality, resolution and token budgets decide whether it does.</p></div>
+      <div><div class="n">03</div><h3>Build it small, then read the frameworks.</h3><p>Each stage is a short module in <code>minigraphrag</code>. Once you have written it, Microsoft GraphRAG, LightRAG, HippoRAG and Graphiti read as variations on code you already know.</p></div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <section>
+      <div class="sec-head">
+        <div><span class="mono-label">Who this is for</span><h2>Who will get the most from this course</h2></div>
+        <p>Prerequisites: Python, and having called an LLM API once. You will not need a GPU or an API key; the reference code runs end to end with a mock model.</p>
+      </div>
+      <div class="who">
+        <a href="chapters/03-where-rag-breaks.html"><h3>Your RAG system misses multi-hop questions</h3><p>See precisely why top-k retrieval drops the connecting document, then fix it with entity graphs, Personalized PageRank and path retrieval.</p><span class="go">03, 17–18 · where RAG breaks →</span></a>
+        <a href="chapters/28-frameworks-in-practice.html"><h3>You are choosing a GraphRAG framework</h3><p>Compare Microsoft GraphRAG, LightRAG, neo4j-graphrag, LlamaIndex and Graphiti by what they extract, how they search and what they cost to index.</p><span class="go">26, 28 · frameworks and cost →</span></a>
+        <a href="chapters/14-local-search.html"><h3>You read the GraphRAG paper and want the details</h3><p>Local search budgets, map-reduce global search, DRIFT, community reports and gleaning, each implemented and measured on one corpus.</p><span class="go">12, 14–15 · local and global search →</span></a>
+        <a href="chapters/11-community-detection.html"><h3>You learn by experimenting</h3><p>Step through Louvain one move at a time, switch seeds on and off in a Personalized PageRank figure, and watch map-reduce search discard community reports below the score threshold. A prediction takes seconds to test.</p><span class="go">11 · try Louvain →</span></a>
+      </div>
+    </section>
+
+    <section id="curriculum">
+      <div class="sec-head">
+        <div><span class="mono-label">The curriculum</span><h2>Seven parts, thirty-four chapters, four capstones</h2></div>
+        <p>Each part begins with a limitation the previous one leaves behind. Read in order the first time through; after that, go straight to the retrieval method you need.</p>
+      </div>
+      <div id="layers"></div>
+    </section>
+  </div>
+
+  <section class="band">
+    <div class="wrap">
+      <span class="mono-label">In every chapter</span>
+      <div class="every">
+        <div><h3>A mechanism diagram</h3><p>Follow text through extraction, the graph through clustering, and a question through retrieval to the tokens the model sees.</p></div>
+        <div><h3>Interactive figures</h3><p>Step through BFS, Louvain, PageRank, map-reduce search and rank fusion on the Kestrel Labs graph.</p></div>
+        <div><h3>Questions and exercises</h3><p>Graded questions with explanations, and warm-up to stretch exercises with worked answers.</p></div>
+        <div><h3>Code you can run</h3><p>Chapter code builds on <code>minigraphrag</code>, a reference implementation with a pytest suite that runs offline on a laptop, with a mock model standing in for the LLM.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <section>
+      <div class="cta">
+        <div><h2>Begin with the map and the toolkit.</h2><p>Chapter 00 sets up the reference code, introduces the Kestrel Labs corpus, and poses the seven questions the rest of the course learns to answer.</p></div>
+        <a class="btn primary" id="cta-btn" href="chapters/00-welcome.html">00 · Welcome →</a>
+      </div>
+    </section>
+  </div>
+</main>
+<script src="assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="assets/js/site.js?v=a3b6d873"></script>
+<script src="assets/js/viz.js?v=6015e47d"></script>
+<script>
+(function () {
+  const G = window.GRFS, api = window.GRFSViz.api, esc = api.escapeHtml;
+  const box = document.getElementById("layers");
+  CURRICULUM.parts.forEach((part, pi) => {
+    const col = api.groupColor(pi + 1);
+    const chs = part.chapters.map((c) => G.flat.find((f) => f.slug === c.slug));
+    const ids = chs.map((c) => G.chapterId(c)).filter(Boolean);
+    const rng = ids.length ? (ids.length > 1 ? ids[0] + "–" + ids[ids.length - 1] : ids[0]) : "";
+    const layer = document.createElement("div");
+    layer.className = "layer";
+    layer.innerHTML = '<div class="layer-head"><span class="dia" style="background:' + col + '"></span><h3>' + esc(part.title) + '</h3><span class="rng">' + rng + '</span><span class="bl">' + esc(part.blurb) + '</span></div><div class="cards"></div>' +
+      (part.bridge ? '<p class="bridge">' + esc(part.bridge) + "</p>" : "");
+    const cards = layer.querySelector(".cards");
+    chs.forEach((ch) => {
+      const a = document.createElement("a");
+      a.className = "ccard";
+      a.href = G.href(ch.slug);
+      const mins = ch.minutes ? (ch.minutes >= 120 ? Math.round(ch.minutes / 60) + " h" : ch.minutes + " min") : "reference";
+      a.innerHTML = '<span class="top"><span><span class="id" style="color:' + col + '">' + esc(G.chapterId(ch) || "REF") + "</span>" + (G.progress[ch.slug] ? '<span class="done-mark" title="Completed">✓</span>' : "") + '</span><span class="min">' + mins + '</span></span><span class="t">' + esc(ch.title) + '</span><span class="d">' + esc(ch.summary) + "</span>";
+      cards.appendChild(a);
+    });
+    box.appendChild(layer);
+  });
+
+  const firstUndone = G.learnable.find((c) => !G.progress[c.slug]);
+  if (G.learnable.some((c) => G.progress[c.slug]) && firstUndone) {
+    const label = G.chapterId(firstUndone) + " · " + firstUndone.title + " →";
+    const btn = document.getElementById("continue");
+    btn.href = G.href(firstUndone.slug);
+    btn.textContent = "Continue with " + G.chapterId(firstUndone) + " →";
+    const cta = document.getElementById("cta-btn");
+    cta.href = G.href(firstUndone.slug);
+    cta.textContent = label;
+  }
+})();
+</script>
+</body>
+</html>

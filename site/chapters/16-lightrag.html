@@ -1,0 +1,715 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dual-level retrieval with LightRAG | Graph RAG from Scratch</title>
+<meta name="description" content="Build LightRAG-style retrieval: key-value profiles for entities and relations, low- and high-level query keywords, one-hop expansion, query modes and incremental updates without community rebuilds.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="16-lightrag" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Dual-level retrieval with LightRAG</h1>
+  <p class="lede">LightRAG gets much of GraphRAG's breadth without community reports: it splits each query into specific and thematic keywords, matches the first against entities and the second against relationships, and expands one hop. You will build it, trace it on Kestrel Labs, and see why its index is cheap to update.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Describe LightRAG's graph-based text indexing: recognition, key-value profiling and deduplication</li>
+      <li>Extract low-level and high-level keywords from a query and explain what each is matched against</li>
+      <li>Implement dual-level retrieval with one-hop expansion and trace the local, global and hybrid modes by hand</li>
+      <li>Update a LightRAG-style index incrementally by merging a new subgraph, and say what this skips compared with GraphRAG</li>
+      <li>Compare LightRAG and Microsoft GraphRAG on cost, freshness and global questions, and state LightRAG's limits</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why a second design</h2>
+<p><a href="15-global-search.html">Chapter 15</a> ended with two costs of GraphRAG's global side. At query time, static global search reads every report at a level. The LightRAG paper measures this on one of its datasets: GraphRAG built 1,399 communities, read the 610 level-2 reports at query time, and at about 1,000 tokens per report that is roughly 610,000 tokens and hundreds of API calls for one question. At update time, new documents change the graph, the communities shift, and reports have to be regenerated.</p>
+<p>LightRAG (Guo et al., 2024) asks whether you can keep the useful part, a graph that connects facts across documents, and drop the expensive part, the community layer. Its answer has two ideas.</p>
+<ul>
+  <li><strong>Put themes on the edges.</strong> During indexing, each relationship gets high-level keywords (“supply-chain dependence”, “acquisition”) as well as a description. Thematic questions can then find relevant relationships directly by vector search, without a report that summarizes a community.</li>
+  <li><strong>Split the query.</strong> One cheap LLM call turns the question into <em>low-level keywords</em> (specific entities and terms) and <em>high-level keywords</em> (concepts and themes). Low-level keywords retrieve entities; high-level keywords retrieve relationships. Both are expanded one hop, merged, and handed to the generator.</li>
+</ul>
+<p>Retrieval then costs one keyword call, a few vector lookups and one generation call, whatever the size of the corpus. Updating the index means extracting the new document and merging its nodes and edges into the graph.</p>
+
+<h2>Graph-based text indexing</h2>
+<p>The paper describes indexing as three functions applied to chunks. You already built all three in Part 2; LightRAG's twist is in what the profiles contain.</p>
+<table>
+  <thead><tr><th>Step</th><th>Paper's name</th><th>What it does</th><th>Course equivalent</th></tr></thead>
+  <tbody>
+    <tr><td>Recognition</td><td>R(·)</td><td>An LLM extracts entities and relationships from each chunk. Relationships come with a description and high-level keywords.</td><td><a href="08-entity-relation-extraction.html">Chapter 8</a>, plus a keywords field</td></tr>
+    <tr><td>Profiling</td><td>P(·)</td><td>Generates a key-value pair per entity and per relation. The key is what retrieval matches; the value is a paragraph used in generation.</td><td>Embedding text choice, <a href="13-storage-indexing.html">Chapter 13</a></td></tr>
+    <tr><td>Deduplication</td><td>D(·)</td><td>Merges identical entities and relations extracted from different chunks, combining their descriptions.</td><td><a href="09-entity-resolution.html">Chapter 9</a>, <code>build_graph</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Key-value profiles</h3>
+<p>In the paper's words, each index key is “a word or short phrase that enables efficient retrieval”, and the value is “a text paragraph summarizing relevant snippets from external data to aid in text generation”. The asymmetry is the important part: entities use their name as the only key, while relations “may have multiple index keys derived from LLM enhancements that include global themes from connected entities”.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 330" role="img" aria-labelledby="kv-title">
+      <title id="kv-title">Key-value profiles for an entity and a relation, and incremental update as a union of graphs</title>
+      <text class="d-text bold" x="10" y="20">Profiles (index time)</text>
+      <rect class="d-box node" x="10" y="32" width="150" height="44" rx="6"/>
+      <text class="d-text small" x="20" y="50">key (entity name)</text>
+      <text class="d-text bold mono" x="20" y="67">DEEPCAST</text>
+      <rect class="d-box" x="172" y="32" width="192" height="44" rx="6"/>
+      <text class="d-text small" x="182" y="50">value</text>
+      <text class="d-text small" x="182" y="67">Sonar supplier to Kestrel 2022–25 ...</text>
+      <line class="d-line" x1="160" y1="54" x2="172" y2="54"/>
+
+      <rect class="d-box edge" x="10" y="92" width="150" height="78" rx="6"/>
+      <text class="d-text small" x="20" y="110">keys (themes)</text>
+      <text class="d-text small mono" x="20" y="128">acquisition</text>
+      <text class="d-text small mono" x="20" y="144">vertical integration</text>
+      <text class="d-text small mono" x="20" y="160">supply control</text>
+      <rect class="d-box" x="172" y="92" width="192" height="78" rx="6"/>
+      <text class="d-text small" x="182" y="110">value (Marlow–Deepcast)</text>
+      <text class="d-text small" x="182" y="128">Marlow Dynamics acquired Deepcast</text>
+      <text class="d-text small" x="182" y="144">in April 2025 and reserved its</text>
+      <text class="d-text small" x="182" y="160">production for its own programs.</text>
+      <line class="d-line" x1="160" y1="131" x2="172" y2="131"/>
+      <text class="d-text small" x="10" y="192">Entities are matched by name-like keywords;</text>
+      <text class="d-text small" x="10" y="208">relations by theme-like keywords.</text>
+
+      <line class="d-line faint" x1="380" y1="10" x2="380" y2="320"/>
+      <text class="d-text bold" x="395" y="20">Incremental update (new document)</text>
+      <circle class="d-node" cx="420" cy="80" r="12"/>
+      <circle class="d-node" cx="470" cy="60" r="12"/>
+      <circle class="d-node" cx="470" cy="110" r="12"/>
+      <line class="d-line" x1="431" y1="75" x2="459" y2="64"/>
+      <line class="d-line" x1="431" y1="86" x2="459" y2="105"/>
+      <text class="d-text small" x="400" y="140">existing graph</text>
+      <text class="d-text bold" x="500" y="88">∪</text>
+      <circle class="d-node warm" cx="540" cy="60" r="12"/>
+      <circle class="d-node warm" cx="580" cy="95" r="12"/>
+      <line class="d-line hot" x1="549" y1="68" x2="571" y2="87"/>
+      <text class="d-text small" x="525" y="140">new subgraph</text>
+      <text class="d-text small" x="535" y="44">shared entity</text>
+
+      <rect class="d-box ghost" x="395" y="160" width="275" height="160" rx="6"/>
+      <text class="d-text small" x="407" y="182">1. Extract the new document's chunks only</text>
+      <text class="d-text small" x="407" y="202">2. Same name: merge descriptions, keep</text>
+      <text class="d-text small" x="420" y="218">the node; new name: add a node</text>
+      <text class="d-text small" x="407" y="238">3. Same pair: merge descriptions and</text>
+      <text class="d-text small" x="420" y="254">keywords, add weights</text>
+      <text class="d-text small" x="407" y="274">4. Re-embed only changed profiles</text>
+      <text class="d-text small" x="407" y="294">No communities, so no reports to</text>
+      <text class="d-text small" x="407" y="310">regenerate</text>
+    </svg>
+  </div>
+  <figcaption>Left: an entity profile keyed by name and a relation profile keyed by themes. Right: incremental update is a union of the existing graph and the new document's subgraph, merged on entity names and entity pairs.</figcaption>
+</figure>
+
+<p>In the LightRAG library, the relation extraction record carries <code>relationship_keywords</code> alongside the description, and the text embedded for the relationship vector store puts the keywords first, then the two entity names, then the description. So a query about “supply control” can match the Marlow–Deepcast edge through its keywords even if the description never uses that phrase.</p>
+
+<p><code>minigraphrag</code> reuses the index you built in Part 2 rather than a separate LightRAG index. Its relationship store embeds <code>"{source} {target}: {description}"</code> without extracted keywords, which is enough for the algorithm to work and makes the role of keywords easy to measure: Exercise 16.4 adds them.</p>
+
+<div class="callout note">
+  <span class="callout-title">Deduplication merges rather than drops</span>
+  <p>When the same entity name appears in several chunks, LightRAG keeps one node and combines the descriptions, summarizing them with the LLM when they grow too long; for repeated relations it also combines keywords and adds up weights. That is the same merge rule as <code>build_graph</code> in <a href="09-entity-resolution.html">Chapter 9</a>. It does not do the fuzzy alias resolution from that chapter by default, so “Kestrel” and “Kestrel Labs” can stay separate unless the extractor normalizes them.</p>
+</div>
+
+<h2>Dual-level retrieval</h2>
+<p>The paper distinguishes two kinds of question. <em>Specific</em> questions reference particular entities (“What connects Priya Nair to Deepcast?”) and need <strong>low-level retrieval</strong>: those entities, their attributes and their relationships. <em>Abstract</em> questions are about themes (“What risks does Kestrel Labs face?”) and need <strong>high-level retrieval</strong>, which aggregates information across many related entities. Most real questions have some of both, which is why the default is to do both.</p>
+
+<h3>Step 1: extract keywords</h3>
+<p>One LLM call returns two lists. Here is <code>minigraphrag</code>'s prompt and function:</p>
+
+<pre data-file="minigraphrag/prompts.py"><code class="language-python">KEYWORD_EXTRACTION_PROMPT = """---Role---
+You are a helpful assistant tasked with identifying both high-level and low-level keywords in the user's query.
+
+---Goal---
+Given the query, list both high-level and low-level keywords. High-level keywords focus on overarching concepts or themes, while low-level keywords focus on specific entities, details, or concrete terms.
+
+---Output format---
+Return JSON: {{"high_level_keywords": [...], "low_level_keywords": [...]}}
+
+---Query---
+{query}
+"""</code></pre>
+
+<pre data-file="minigraphrag/search/lightrag.py"><code class="language-python">def extract_keywords(llm: LLM, query: str) -&gt; tuple[list[str], list[str]]:
+    """Return (high_level_keywords, low_level_keywords)."""
+    data = parse_json_response(llm.complete(P.KEYWORD_EXTRACTION_PROMPT.format(query=query), json=True))
+    return [str(k) for k in data.get("high_level_keywords", [])], [str(k) for k in data.get("low_level_keywords", [])]</code></pre>
+
+<p>The current LightRAG prompt is longer and stricter. It defines high-level keywords as “overarching concepts or themes, capturing user's core intent, the subject area, or the type of question being asked” and low-level keywords as “specific entities, proper nouns, technical jargon, product names, or concrete items”. It requires a bare JSON object, forbids keywords not grounded in the query, prefers multi-word phrases for single concepts, and returns two empty lists for vague inputs such as “hello”. The grounding rule matters: a model that “helpfully” adds <code>Marlow Dynamics</code> to the keywords for a question that never mentions it changes what gets retrieved, invisibly.</p>
+
+<table>
+  <thead><tr><th>Question</th><th>Low-level keywords</th><th>High-level keywords</th></tr></thead>
+  <tbody>
+    <tr><td>What connects Priya Nair to Deepcast?</td><td>Priya Nair, Deepcast</td><td>professional connection, relationship</td></tr>
+    <tr><td>What risks does Kestrel Labs face?</td><td>Kestrel Labs</td><td>business risks, supply chain, competition, regulation</td></tr>
+    <tr><td>What are the main themes in this corpus?</td><td>(none)</td><td>main themes, corpus overview</td></tr>
+    <tr><td>Who is the CTO of Kestrel Labs?</td><td>Kestrel Labs, CTO</td><td>leadership role</td></tr>
+  </tbody>
+</table>
+<p>The expected outputs above are what a good model should produce. The second row's high-level list contains words that are <em>implied</em> by “risks” for a company (“supply chain”, “competition”). Whether that counts as grounded is a judgment call; the stricter LightRAG prompt pushes against it, which makes high-level retrieval more literal.</p>
+
+<h3>Step 2: match and expand</h3>
+<ul>
+  <li><strong>Low level.</strong> Join the low-level keywords into one string, embed it, and search the <em>entity</em> vector store for the top <em>k</em>. Then gather those entities' one-hop relationships. LightRAG sorts them by edge degree (the sum of the endpoint degrees) and then by weight.</li>
+  <li><strong>High level.</strong> Join the high-level keywords, embed, and search the <em>relationship</em> vector store for the top <em>k</em>. Keep them in similarity order, then gather their endpoint entities.</li>
+</ul>
+<p>The paper calls the expansion step incorporating high-order relatedness: for retrieved nodes and edges, it gathers the neighboring nodes in their local subgraph (one hop). Finally, text chunks are attached through the <code>source_id</code>s of the retrieved entities and relations, everything is truncated to token budgets per section, and the generator answers. In the library, the default <code>top_k</code> is 40 (entities in local mode, relationships in global mode), <code>chunk_top_k</code> is 20, and separate budgets apply to entities (6,000 tokens), relations (8,000) and the whole context (30,000). These defaults can change between releases; check <code>lightrag/constants.py</code>.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "LightRAG query pipeline",
+  "subtitle": "Hybrid mode",
+  "perRow": 4,
+  "stages": [
+    {"label": "Keyword extraction", "detail": "One LLM call returns <code>high_level_keywords</code> and <code>low_level_keywords</code> as JSON. Use a fast, non-reasoning model: it is on every query's latency path."},
+    {"label": "Low-level to entities", "detail": "Embed the joined low-level keywords, top-k over the <strong>entity</strong> vector store. 'Priya Nair, Deepcast' hits PRIYA NAIR and DEEPCAST."},
+    {"label": "One-hop relationships", "detail": "All edges of the hit entities, sorted by edge degree then weight. Hubs rise to the top here."},
+    {"label": "High-level to relations", "detail": "Embed the joined high-level keywords, top-k over the <strong>relationship</strong> vector store, whose text includes relation keywords."},
+    {"label": "Endpoint entities", "detail": "Collect the source and target of each retrieved relationship. Themes lead back to concrete actors."},
+    {"label": "Merge", "detail": "Combine local and global entities and relations without duplicates. LightRAG interleaves them round-robin; <code>minigraphrag</code> puts the top local edges first, then global, then the rest."},
+    {"label": "Attach chunks", "detail": "Text units cited by the retrieved entities and relations, ranked by how many cite them. Mix mode also adds plain vector-search chunks."},
+    {"label": "Budget and generate", "detail": "Truncate each table to its token budget, render Entities, Relationships and Sources, and generate the answer."}
+  ]
+}
+</script>
+</div>
+
+<h3>The implementation</h3>
+<p><code>minigraphrag</code>'s <code>build_lightrag_context</code> implements local, global and hybrid modes over the standard index:</p>
+
+<pre data-file="minigraphrag/search/lightrag.py"><code class="language-python">def build_lightrag_context(index, query: str, high_keywords: list[str], low_keywords: list[str], top_k: int = 10,
+                           max_context_tokens: int = 4000, mode: str = "hybrid") -&gt; tuple[str, dict]:
+    G = index.graph
+    embed = lambda text: index.embedder.embed([text])[0]  # noqa: E731
+    entities: list[str] = []
+    edges: list[tuple[str, str]] = []
+
+    if mode in ("local", "hybrid"):
+        hits = index.entity_store.search(embed(", ".join(low_keywords) or query), k=top_k)
+        entities += [name for name, _, _ in hits]
+        one_hop = [(e, n) for e in entities for n in G.neighbors(e)]
+        one_hop.sort(key=lambda e: (-G.edges[e].get("combined_degree", 0), -G.edges[e].get("weight", 0)))
+        edges += one_hop
+    if mode in ("global", "hybrid"):
+        hits = index.relationship_store.search(embed(", ".join(high_keywords) or query), k=top_k)
+        global_edges = [(m["source"], m["target"]) for _, _, m in hits]
+        edges = global_edges + edges if mode == "global" else edges[: top_k] + global_edges + edges[top_k:]
+        entities += [n for e in global_edges for n in e]
+
+    entities = list(dict.fromkeys(entities))
+    seen, unique_edges = set(), []
+    for u, v in edges:
+        key = tuple(sorted((u, v)))
+        if key not in seen:
+            seen.add(key)
+            unique_edges.append((u, v))
+
+    third = max_context_tokens // 3
+    entity_rows = _fill([[G.nodes[e]["human_id"], e, G.nodes[e].get("type", ""), G.nodes[e].get("description", "")]
+                         for e in entities], third)
+    rel_rows = _fill([[G.edges[e]["human_id"], e[0], e[1], G.edges[e].get("description", ""), G.edges[e].get("weight", 0)]
+                      for e in unique_edges], third)
+    # Text units ranked by how many of the retrieved entities and relationships cite them.
+    unit_counts = Counter(u for e in entities for u in G.nodes[e].get("source_ids", []))
+    unit_counts.update(u for e in unique_edges for u in G.edges[e].get("source_ids", []))
+    unit_rows = _fill([[u, index.text_units[u].text] for u, _ in unit_counts.most_common() if u in index.text_units], third)
+
+    context = "\n\n".join([
+        format_table("Entities", ["id", "entity", "type", "description"], entity_rows),
+        format_table("Relationships", ["id", "source", "target", "description", "weight"], rel_rows),
+        format_table("Sources", ["id", "text"], unit_rows),
+    ])
+    data = {"entities": [r[1] for r in entity_rows], "relationships": [(r[1], r[2]) for r in rel_rows],
+            "sources": [{"id": r[0], "text": r[1]} for r in unit_rows],
+            "high_level_keywords": high_keywords, "low_level_keywords": low_keywords}
+    return context, data
+
+
+def lightrag_search(index, query: str, llm: LLM, mode: str = "hybrid", top_k: int = 10,
+                    max_context_tokens: int = 4000, response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; SearchResult:
+    high, low = extract_keywords(llm, query)
+    context, data = build_lightrag_context(index, query, high, low, top_k, max_context_tokens, mode)
+    answer = generate_answer(llm, query, context, response_type)
+    return SearchResult(answer, f"lightrag-{mode}", context, data,
+                        doc_ids_for_units(index, [s["id"] for s in data["sources"]]), llm_calls=2)</code></pre>
+
+<p>Three simplifications compared with the library: the budget is split evenly in thirds, text units are ranked by citation count rather than LightRAG's more elaborate chunk selection and optional reranking, and there is no <code>mix</code> or <code>naive</code> mode (Exercise 16.5 adds mix). The <code>llm_calls=2</code> at the end is the whole query-time LLM budget: keywords plus generation, whatever the corpus size.</p>
+
+<pre data-file="terminal"><code class="language-bash">python -m minigraphrag query --method lightrag "What connects Priya Nair to Deepcast?" --show-context</code></pre>
+
+<h2>Tracing it on Kestrel Labs</h2>
+<p>Take question 5, “What risks does Kestrel Labs face?”, with the keywords from the table above, <em>k</em> = 5, and a relationship store whose texts include relation keywords such as those in this profile table:</p>
+<table>
+  <thead><tr><th>id</th><th>Relationship</th><th>Relation keywords (keys)</th></tr></thead>
+  <tbody>
+    <tr><td>4</td><td>DEEPCAST – KESTREL LABS</td><td>sonar supply, single-supplier dependence</td></tr>
+    <tr><td>5</td><td>MARLOW DYNAMICS – DEEPCAST</td><td>acquisition, vertical integration, supply control</td></tr>
+    <tr><td>6</td><td>PROJECT TERN – DEEPCAST</td><td>component replacement, in-house sonar</td></tr>
+    <tr><td>16</td><td>MARLOW DYNAMICS – KESTREL LABS</td><td>market competition, civilian customers</td></tr>
+    <tr><td>24</td><td>PROJECT SENTINEL – OCEAN HEALTH ACT</td><td>regulatory demand, compliance monitoring</td></tr>
+    <tr><td>2</td><td>BRIGHTWATER CAPITAL – KESTREL LABS</td><td>venture funding, Series A, Series B</td></tr>
+    <tr><td>20</td><td>KESTREL LABS – PROJECT SENTINEL</td><td>reef monitoring program</td></tr>
+  </tbody>
+</table>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Low-level versus high-level matches",
+  "subtitle": "What risks does Kestrel Labs face? (k = 5)",
+  "height": 420,
+  "scoreDigits": 2,
+  "nodes": [
+    {"id": "OKAFOR", "label": "DR. MIRA OKAFOR", "group": 2, "x": 14, "y": 10},
+    {"id": "VEHL", "label": "JONAS VEHL", "group": 2, "x": 40, "y": 10},
+    {"id": "BRIGHTWATER", "label": "BRIGHTWATER CAPITAL", "group": 1, "x": 70, "y": 10},
+    {"id": "LENA", "label": "LENA PARK", "group": 2, "x": 91, "y": 24},
+    {"id": "PORT", "label": "PORT AVALON", "group": 5, "x": 10, "y": 40},
+    {"id": "KESTREL", "label": "KESTREL LABS", "group": 1, "x": 46, "y": 44},
+    {"id": "TERN", "label": "PROJECT TERN", "group": 4, "x": 72, "y": 40},
+    {"id": "COUNCIL", "label": "CITY COUNCIL", "group": 1, "x": 12, "y": 70},
+    {"id": "SENTINEL", "label": "PROJECT SENTINEL", "group": 4, "x": 34, "y": 70},
+    {"id": "PRIYA", "label": "PRIYA NAIR", "group": 2, "x": 56, "y": 70},
+    {"id": "DEEPCAST", "label": "DEEPCAST", "group": 1, "x": 90, "y": 58},
+    {"id": "MARLOW", "label": "MARLOW DYNAMICS", "group": 1, "x": 78, "y": 86},
+    {"id": "OHA", "label": "OCEAN HEALTH ACT", "group": 6, "x": 24, "y": 88}
+  ],
+  "edges": [
+    {"source": "KESTREL", "target": "OKAFOR", "label": "9"},
+    {"source": "KESTREL", "target": "VEHL", "label": "13"},
+    {"source": "KESTREL", "target": "BRIGHTWATER", "label": "2"},
+    {"source": "KESTREL", "target": "LENA", "label": "15"},
+    {"source": "BRIGHTWATER", "target": "LENA", "label": "3"},
+    {"source": "KESTREL", "target": "PORT", "label": "17"},
+    {"source": "KESTREL", "target": "TERN", "label": "21"},
+    {"source": "KESTREL", "target": "COUNCIL", "label": "18"},
+    {"source": "KESTREL", "target": "SENTINEL", "label": "20"},
+    {"source": "KESTREL", "target": "PRIYA", "label": "19"},
+    {"source": "KESTREL", "target": "DEEPCAST", "label": "4"},
+    {"source": "KESTREL", "target": "MARLOW", "label": "16"},
+    {"source": "MARLOW", "target": "DEEPCAST", "label": "5"},
+    {"source": "TERN", "target": "DEEPCAST", "label": "6"},
+    {"source": "SENTINEL", "target": "OHA", "label": "24"},
+    {"source": "COUNCIL", "target": "OHA", "label": "23"},
+    {"source": "VEHL", "target": "TERN", "label": "14"},
+    {"source": "PRIYA", "target": "TERN", "label": "28"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "4": "Project", "5": "Location", "6": "Law"},
+  "steps": [
+    {"caption": "<strong>Keywords.</strong> Low-level: <em>Kestrel Labs</em>. High-level: <em>business risks, supply chain, competition, regulation</em>. The two lists go to two different vector stores.", "dim": false},
+    {"caption": "<strong>Low level: entity match.</strong> 'Kestrel Labs' is closest to KESTREL LABS (0.81); the next entities by similarity are far weaker. With k = 5 the other hits are Kestrel's people and projects, but the hub dominates.", "active": ["KESTREL"], "scores": {"KESTREL": 0.81}},
+    {"caption": "<strong>Low level: one-hop expansion.</strong> All 11 of KESTREL LABS's edges, sorted by edge degree then weight: 20, 21, 19, 17, 4, 18, 16, 9, 13, 2, 15. Relevant edges 4 (supplier) and 16 (competitor) sit in the middle of a list headed by Sentinel, Tern and Priya Nair's CTO role.", "active": ["KESTREL"], "visited": ["OKAFOR", "VEHL", "BRIGHTWATER", "LENA", "PORT", "TERN", "COUNCIL", "SENTINEL", "PRIYA", "DEEPCAST", "MARLOW"], "edges": ["KESTREL>SENTINEL", "KESTREL>TERN", "KESTREL>PRIYA", "KESTREL>PORT", "KESTREL>DEEPCAST", "KESTREL>COUNCIL", "KESTREL>MARLOW", "KESTREL>OKAFOR", "KESTREL>VEHL", "KESTREL>BRIGHTWATER", "KESTREL>LENA"]},
+    {"caption": "<strong>High level: relationship match.</strong> The theme keywords match relation keys directly: 4 single-supplier dependence (0.66), 5 supply control (0.61), 16 market competition (0.58), 24 regulatory demand (0.55), 6 in-house sonar (0.47). None of these needed an entity in the query.", "active": [], "edges": ["KESTREL>DEEPCAST", "MARLOW>DEEPCAST", "KESTREL>MARLOW", "SENTINEL>OHA", "TERN>DEEPCAST"], "dim": true},
+    {"caption": "<strong>High level: endpoint entities.</strong> The matched relations bring in their endpoints: DEEPCAST, KESTREL LABS, MARLOW DYNAMICS, PROJECT SENTINEL, OCEAN HEALTH ACT, PROJECT TERN. Themes led back to the concrete actors behind each risk, including the Ocean Health Act, which is two hops from KESTREL LABS.", "active": ["DEEPCAST", "KESTREL", "MARLOW", "SENTINEL", "OHA", "TERN"], "edges": ["KESTREL>DEEPCAST", "MARLOW>DEEPCAST", "KESTREL>MARLOW", "SENTINEL>OHA", "TERN>DEEPCAST"]},
+    {"caption": "<strong>Hybrid merge.</strong> The context holds the top local edges and all global edges, deduplicated. Supply (4, 5), execution (6, 21), competition (16) and regulation (24) are covered after two LLM calls in total. The reef-concentration risk is not: no relation key mentions it.", "active": ["KESTREL", "DEEPCAST", "MARLOW", "SENTINEL", "OHA", "TERN"], "visited": ["PRIYA", "PORT", "COUNCIL"], "edges": ["KESTREL>DEEPCAST", "MARLOW>DEEPCAST", "KESTREL>MARLOW", "SENTINEL>OHA", "TERN>DEEPCAST", "KESTREL>TERN"], "visitedEdges": ["KESTREL>SENTINEL", "KESTREL>PRIYA", "KESTREL>PORT", "KESTREL>COUNCIL"]}
+  ]
+}
+</script>
+</div>
+
+<p>Edge numbers are the curated Kestrel graph's <code>human_id</code>s from Chapter 14, and the one-hop ordering in step 3 follows from that graph's degrees; the similarity scores are illustrative. Compare with the other methods on the same question:</p>
+<ul>
+  <li><strong>Local search</strong> (Chapter 14) anchors on KESTREL LABS just like low-level retrieval, and has the same hub problem.</li>
+  <li><strong>Global search</strong> (Chapter 15) found all five reference risks, including concentration on one reef and one partner, because community reports summarize those facts. It paid one map call per batch of reports plus a reduce call, even on this tiny index.</li>
+  <li><strong>LightRAG hybrid</strong> found four of five with two calls. What it can find is limited by what the relation keywords and descriptions say: a risk that is never stated as a relationship theme cannot be matched.</li>
+</ul>
+
+<h3>Query modes</h3>
+<p>The LightRAG README lists five retrieval modes, and the library's <code>QueryParam</code> accepts one more:</p>
+<table>
+  <thead><tr><th>Mode</th><th>What it retrieves</th><th>Good for</th><th>In <code>minigraphrag</code></th></tr></thead>
+  <tbody>
+    <tr><td><code>local</code></td><td>Entities matched by low-level keywords, plus their relationships and chunks</td><td>Specific objects and detailed facts</td><td><code>mode="local"</code></td></tr>
+    <tr><td><code>global</code></td><td>Relationships matched by high-level keywords, plus their endpoint entities and chunks</td><td>Themes and cross-document relations</td><td><code>mode="global"</code></td></tr>
+    <tr><td><code>hybrid</code></td><td>Both of the above, merged</td><td>Questions with an anchor and a theme</td><td><code>mode="hybrid"</code> (default)</td></tr>
+    <tr><td><code>naive</code></td><td>Vector search over chunks only, no graph</td><td>Baseline; simple lookups</td><td><code>basic_search</code></td></tr>
+    <tr><td><code>mix</code></td><td>Local, global and naive results merged</td><td>The library's default; widest context</td><td>Exercise 16.5</td></tr>
+    <tr><td><code>bypass</code></td><td>No retrieval; the query goes straight to the LLM</td><td>Chat turns that need no documents</td><td>n/a</td></tr>
+  </tbody>
+</table>
+<p>With the library itself, the calls look like this (the API is asynchronous and storages must be initialized first):</p>
+<pre data-file="examples/lightrag_library.py"><code class="language-python">import asyncio
+from pathlib import Path
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+
+async def main():
+    rag = LightRAG(working_dir="./kestrel_lightrag",
+                   embedding_func=openai_embed, llm_model_func=gpt_4o_mini_complete)
+    await rag.initialize_storages()
+    for path in sorted(Path("data/corpus").glob("*.md")):
+        await rag.ainsert(path.read_text())
+    for mode in ("local", "global", "hybrid", "mix"):
+        answer = await rag.aquery("What risks does Kestrel Labs face?", param=QueryParam(mode=mode))
+        print(mode, answer[:300])
+
+asyncio.run(main())</code></pre>
+
+<h2>Incremental updates</h2>
+<p>The paper's update procedure is short. For a new document, run the same indexing steps to get its graph, then combine the new graph with the original “by taking the union of the node sets” and of the edge sets. Because there is no community structure, nothing else depends on the global shape of the graph: no partition to recompute, no reports to regenerate. Merging is the same deduplication used at build time: same entity name means one node with combined descriptions; same entity pair means one edge with combined descriptions, keywords and weights. Only profiles that changed need new embeddings.</p>
+<p>The paper's comparison point is GraphRAG, which must dismantle and regenerate its community structure and reports when new data arrives; for a new batch the size of its Legal dataset it estimates around 1,399 × 2 × 5,000 tokens to rebuild the original and new reports. Microsoft GraphRAG later added an incremental update workflow that merges new outputs into an existing index, but it still recomputes communities and regenerates the affected reports. That cost is inherent to having a community layer.</p>
+
+<p><code>minigraphrag</code> has no incremental API, but the union is a few lines over two graphs produced by <code>build_graph</code>:</p>
+<pre data-file="examples/lightrag_update.py"><code class="language-python">import networkx as nx
+from minigraphrag.graph_build import add_rank_attributes
+
+def merge_subgraph(G: nx.Graph, H: nx.Graph) -&gt; set[str]:
+    """Union H (a new document's graph) into G in place. Returns the names whose profiles changed."""
+    changed = set()
+    for n, d in H.nodes(data=True):
+        if n not in G:
+            G.add_node(n, **{k: (list(v) if isinstance(v, list) else v) for k, v in d.items()})
+        else:
+            g = G.nodes[n]
+            for key in ("descriptions", "source_ids", "aliases"):
+                g[key] = list(dict.fromkeys(g.get(key, []) + d.get(key, [])))
+            g["description"] = " ".join(g["descriptions"])      # re-summarize if it grows too long
+            g["frequency"] = len(g["source_ids"])
+        changed.add(n)
+    for u, v, d in H.edges(data=True):
+        if not G.has_edge(u, v):
+            G.add_edge(u, v, **{k: (list(x) if isinstance(x, list) else x) for k, x in d.items()})
+        else:
+            g = G.edges[u, v]
+            g["descriptions"] = list(dict.fromkeys(g.get("descriptions", []) + d.get("descriptions", [])))
+            g["source_ids"] = list(dict.fromkeys(g.get("source_ids", []) + d.get("source_ids", [])))
+            g["weight"] = g.get("weight", 0.0) + d.get("weight", 0.0)
+            g["description"] = " ".join(g["descriptions"])
+        changed.update((u, v))
+    add_rank_attributes(G)   # degrees change; note this also renumbers human_id
+    return changed</code></pre>
+
+<p>Suppose the Kestrel index was built from documents 01 to 11 in early March 2026, and the interview (document 12, recorded 26 March 2026) arrives later. Merging its subgraph adds the “Chief Scientist” and “CTO since March 2026” facts to JONAS VEHL, PRIYA NAIR and their edges to KESTREL LABS, adds the competition edge between Marlow Dynamics and Kestrel Labs if earlier documents had not produced it, and appends new descriptions to PROJECT TERN and DEEPCAST. Only those nodes and edges are re-embedded. Two consequences need care:</p>
+<ul>
+  <li><strong>Contradictions accumulate.</strong> PRIYA NAIR's description now says “lead engineer on Project Sentinel” and “CTO since March 2026”, and JONAS VEHL's says both CTO and Chief Scientist. A union keeps both. Dated claims or a temporal graph (<a href="27-incremental-temporal.html">Chapter 27</a>) are needed to answer “Who is the CTO?” reliably.</li>
+  <li><strong>Deletions are not unions.</strong> Removing a document means subtracting its contributions from every node and edge it touched and re-summarizing the rest. The LightRAG library supports deleting by document id and rebuilds affected entities and relations from the remaining chunks' cached extractions, which is why it keeps those caches.</li>
+</ul>
+
+<h2>LightRAG versus Microsoft GraphRAG</h2>
+<table>
+  <thead><tr><th>Aspect</th><th>Microsoft GraphRAG</th><th>LightRAG</th></tr></thead>
+  <tbody>
+    <tr><td>Index structure</td><td>Entity graph + hierarchical communities + reports</td><td>Entity graph with key-value profiles; relations carry theme keywords</td></tr>
+    <tr><td>Indexing LLM cost</td><td>Extraction, summaries, plus one report per community at every level</td><td>Extraction (with keywords) and summaries; no reports</td></tr>
+    <tr><td>Query cost, specific questions</td><td>Local search: one generation call</td><td>Keywords + generation: two calls</td></tr>
+    <tr><td>Query cost, global questions</td><td>Map-reduce over many reports; dynamic selection reduces it</td><td>Same two calls</td></tr>
+    <tr><td>Whole-corpus questions (“main themes”)</td><td>Strong: reports summarize every region of the graph</td><td>Weaker: retrieves top-k relations similar to generic theme words; no guarantee of coverage</td></tr>
+    <tr><td>Adding documents</td><td>Recompute communities, regenerate affected reports</td><td>Union the new subgraph; re-embed changed profiles</td></tr>
+    <tr><td>Provenance</td><td>Report and record ids down to text units</td><td>Entity, relation and chunk references</td></tr>
+    <tr><td>Status in 2026</td><td>Maintenance mode</td><td>Actively developed, many storage backends</td></tr>
+  </tbody>
+</table>
+
+<div class="callout paper">
+  <span class="callout-title">Guo et al., LightRAG (2024)</span>
+  <p>The paper evaluates on four UltraDomain datasets (Agriculture, CS, Legal and Mix) against naive RAG, RQ-RAG, HyDE and GraphRAG, using GPT-4o-mini as a pairwise judge of comprehensiveness, diversity, empowerment and overall quality. Against GraphRAG the margins are small: LightRAG wins on Agriculture, CS and Legal, and on Mix the two are close to a coin flip (GraphRAG edges comprehensiveness 50.4% to 49.6%, LightRAG edges the overall score by the same margin). The ablations report a significant decline across nearly all datasets when high-level retrieval is removed, and no significant decline, sometimes a small gain, when the original text chunks are removed from the context.</p>
+</div>
+
+<h3>Critiques and limits</h3>
+<ul>
+  <li><strong>Evaluation without ground truth.</strong> The headline results are LLM-judged win rates on generated questions, the same protocol GraphRAG used. They measure preferences for broad answers, not correctness. Independent benchmarks such as GraphRAG-Bench (<a href="https://arxiv.org/abs/2506.05690">2506.05690</a>) and DIGIMON (<a href="https://arxiv.org/abs/2503.04338">2503.04338</a>) compare graph RAG methods under shared settings and find that rankings depend on the task; evaluate on your own questions (<a href="25-evaluation.html">Chapter 25</a>).</li>
+  <li><strong>“Global” means matched by theme, which does not guarantee coverage.</strong> High-level retrieval returns the top-k relations nearest to the theme keywords. A question like “What are the main themes?” has generic keywords that match arbitrary relations. There is no step that guarantees every region of the graph is considered, which is exactly what community reports provide.</li>
+  <li><strong>Keyword quality is a single point of failure.</strong> Missing low-level keywords turn a specific question into a thematic one; invented keywords retrieve the wrong entities. Log keywords with every query.</li>
+  <li><strong>Hubs.</strong> One-hop expansion sorted by edge degree puts the hub's edges first, the same problem as local search. Degree damping from Exercise 14.5 applies here too.</li>
+  <li><strong>Union updates do not resolve conflicts.</strong> Merged descriptions keep outdated facts next to new ones until something re-summarizes or invalidates them.</li>
+  <li><strong>Relation keywords cost extraction tokens.</strong> They are cheaper than community reports but not free, and their quality depends on the extraction model.</li>
+</ul>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 16.1 <span class="level">Warm-up</span></h4>
+  <p>Write the low-level and high-level keywords a good extractor should return for canonical questions 1, 2 and 7. For each, say which LightRAG mode you expect to do best and why.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <table>
+      <thead><tr><th>Question</th><th>Low-level</th><th>High-level</th><th>Best mode</th></tr></thead>
+      <tbody>
+        <tr><td>1. Why did Kestrel Labs start Project Tern?</td><td>Kestrel Labs, Project Tern</td><td>motivation, project origin</td><td><code>hybrid</code>: the entities anchor it, and the cause lives on relations (Deepcast supply, Marlow acquisition) that one-hop expansion from Tern reaches (edge 6) and theme matching can reach (“supply”)</td></tr>
+        <tr><td>2. Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?</td><td>Halden Reef bleaching, drones</td><td>investor, board oversight, detection</td><td><code>hybrid</code> or <code>global</code>: “board member” and “investor” match edges 15 and 2 as themes, “Halden Reef bleaching” anchors the event; the chain is three hops, so neither side alone connects it. Path retrieval (Chapter 18) is the better tool</td></tr>
+        <tr><td>7. Who supplied Kestrel's sonar in 2024?</td><td>Kestrel, sonar, 2024</td><td>supplier relationship</td><td><code>local</code> or <code>hybrid</code>: “Kestrel” maps to KESTREL LABS, edge 4 is the answer; “2024” cannot be matched by embeddings and needs claims or the chunk text</td></tr>
+      </tbody>
+    </table>
+    <p>“Sonar” and “2024” are low-level by LightRAG's definition (concrete terms) but do not correspond to entity names. Joined into the low-level query string they dilute the entity match; that is one reason the library also attaches chunks.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 16.2 <span class="level">Core</span></h4>
+  <p>Trace <code>build_lightrag_context</code> in hybrid mode with <code>top_k=3</code> for “What connects Priya Nair to Deepcast?”. Assume the entity store returns PRIYA NAIR, DEEPCAST, MARLOW DYNAMICS and the relationship store returns edges 22 (Priya–Marlow), 5 (Marlow–Deepcast) and 4 (Kestrel–Deepcast), in that order. Combined degrees: 19 → 15, 4 → 14, 16 → 14, 27 → 11, 28 → 9, 6 → 8, 22 → 7, 5 → 6; weights: 19 → 8, 4 → 8, 16 → 5. Give the final entity order and the deduplicated relationship order.</p>
+  <details class="hint"><summary>Hint</summary><p>One-hop edges are generated per entity, so an edge between two hit entities appears twice before deduplication. In hybrid mode the edge list is <code>edges[:top_k] + global_edges + edges[top_k:]</code>.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>One-hop edges</strong> of the three hits: PRIYA NAIR gives 19, 22, 27, 28; DEEPCAST gives 4, 5, 6; MARLOW DYNAMICS gives 22, 5, 16. Sorted by (−combined degree, −weight): 19 (15), 4 (14, w 8), 16 (14, w 5), 27 (11), 28 (9), 6 (8), 22, 22 (7), 5, 5 (6).</p>
+    <p><strong>Hybrid list</strong>: first three local edges [19, 4, 16], then global [22, 5, 4], then the rest [27, 28, 6, 22, 22, 5, 5]. Deduplicated in order: <strong>19, 4, 16, 22, 5, 27, 28, 6</strong>.</p>
+    <p><strong>Entities</strong>: the local hits [PRIYA NAIR, DEEPCAST, MARLOW DYNAMICS] plus endpoints of the global edges (PRIYA NAIR, MARLOW DYNAMICS, MARLOW DYNAMICS, DEEPCAST, KESTREL LABS, DEEPCAST), deduplicated: <strong>PRIYA NAIR, DEEPCAST, MARLOW DYNAMICS, KESTREL LABS</strong>.</p>
+    <p>Observation: the top local slots go to hub edges 19 (Priya–Kestrel), 4 and 16 (Kestrel–Marlow), and the actually connecting edges 22 and 5 appear only because the high-level search found them. If a tight relationship budget kept only three rows, the evidence the answer rests on would be gone; with <code>top_k=3</code> and the global edges placed fourth and fifth, it survives. Edge 16 is included even though neither Priya nor Deepcast touches it: it came in through MARLOW DYNAMICS, a third entity hit.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 16.3 <span class="level">Core</span></h4>
+  <p>Build an index from documents 01 to 11 only, then add document 12 with <code>merge_subgraph</code>. (a) Which nodes and edges changed? (b) Which vectors must be recomputed? (c) What is the cost difference against rebuilding the whole index, counted in extraction calls? (d) Show a query whose answer gets worse after the merge unless you handle time.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from pathlib import Path
+import shutil, tempfile
+from minigraphrag.chunking import chunk_documents
+from minigraphrag.extraction import extract_from_unit
+from minigraphrag.graph_build import build_graph
+from minigraphrag.indexer import IndexConfig, build_index, entity_embedding_text, relationship_embedding_text
+from minigraphrag.llm import MockLLM
+from minigraphrag.resolution import resolve_entities
+
+llm, cfg = MockLLM(), IndexConfig()
+early = Path(tempfile.mkdtemp())
+for p in sorted(Path("data/corpus").glob("*.md"))[:11]:
+    shutil.copy(p, early / p.name)
+index = build_index(early, ".index_early", llm, config=cfg)
+
+new_docs = {p.stem: p.read_text() for p in Path("data/corpus").glob("12_*.md")}
+units = chunk_documents(new_docs, cfg.chunk_size, cfg.chunk_overlap)
+extractions = [extract_from_unit(llm, u, cfg.entity_types, cfg.max_gleanings) for u in units]
+raw = [e for ex in extractions for e in ex.entities]
+# Resolve new names against the existing graph's names so aliases land on existing nodes.
+name_map = resolve_entities(raw + [type(raw[0])(n, d.get("type", ""), d.get("description", ""))
+                                   for n, d in index.graph.nodes(data=True)])
+H = build_graph(extractions, llm=llm, name_map=name_map)
+
+changed = merge_subgraph(index.graph, H)
+print(len(units), "new units;", len(changed), "changed nodes:", sorted(changed))
+G = index.graph
+changed_edges = [(u, v) for u, v in G.edges() if u in changed and v in changed
+                 and any(s.startswith("12_") for s in G.edges[u, v].get("source_ids", []))]
+texts = [entity_embedding_text(n, G.nodes[n]) for n in changed] + \
+        [relationship_embedding_text(u, v, G.edges[u, v]) for u, v in changed_edges]
+print("re-embed", len(texts), "profiles")</code></pre>
+    <p>(a) Document 12 mentions Kestrel Labs, Mira Okafor, Jonas Vehl, Priya Nair, Project Tern, Project Sentinel, Deepcast, Marlow Dynamics, Port Avalon City Council, the Ocean Health Act, Halden Reef, Tidewater Institute, Ana Ruiz, Lena Park and Brightwater Capital, so most existing nodes gain a description and a source id; edges between entities co-mentioned in its two chunks gain descriptions and weight. It introduces no entity type the index lacked, so few or no new nodes appear.</p>
+    <p>(b) Re-embed the changed nodes' and edges' profile texts, plus the two new text units. Unchanged profiles keep their vectors. <code>add_rank_attributes</code> renumbers <code>human_id</code> if new names were added, so the vector store metadata must be refreshed too (see Chapter 13 on idempotent ids).</p>
+    <p>(c) Rebuild: 24 text units × (1 extraction + 1 gleaning + 1 claim call), about 72 extraction-side calls with the default config, plus description summaries and one report per community (four on the mock index). Incremental: 2 units × 3 = about 6 calls, plus summaries for the nodes whose description lists grew. No community or report calls. With GraphRAG-style reports you would also regenerate the reports of every community containing a changed entity, which here is nearly all of them.</p>
+    <p>(d) “Who is the CTO of Kestrel Labs?” Before the merge the graph says Jonas Vehl. After it, both PRIYA NAIR and JONAS VEHL carry CTO descriptions and edges to KESTREL LABS. A generator may answer “Jonas Vehl and Priya Nair” or pick either. Fix: keep dated claims and prefer the most recent valid one, or use the bi-temporal edges from Chapter 27.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 16.4 <span class="level">Core</span></h4>
+  <p>Add relation keywords to <code>minigraphrag</code>. Write <code>relation_keywords(llm, u, v, description)</code> that asks for 2 to 4 high-level theme keywords, store them on the edge as <code>keywords</code>, and build a relationship store whose texts follow LightRAG's layout: keywords, then endpoint names, then description. Explain, with the Marlow–Deepcast edge, why this should improve global-mode matching for “What supply chain risks exist?”.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.llm import parse_json_response
+from minigraphrag.vector_store import VectorStore
+
+KEYWORDS_PROMPT = """List 2 to 4 short high-level keywords (themes, not names) that summarize this relationship.
+Return JSON: {{"keywords": ["...", "..."]}}
+
+Source: {u}
+Target: {v}
+Description: {description}"""
+
+def relation_keywords(llm, u, v, description):
+    data = parse_json_response(llm.complete(KEYWORDS_PROMPT.format(u=u, v=v, description=description), json=True))
+    return [str(k).strip() for k in data.get("keywords", []) if str(k).strip()][:4]
+
+def build_keyword_relationship_store(index, llm):
+    G = index.graph
+    ids, texts, meta = [], [], []
+    for u, v, d in G.edges(data=True):
+        d["keywords"] = relation_keywords(llm, u, v, d.get("description", ""))
+        ids.append(str(d["human_id"]))
+        texts.append(f"{', '.join(d['keywords'])}\t{u}\n{v}\n{d.get('description', '')}")
+        meta.append({"source": u, "target": v})
+    store = VectorStore()
+    store.add(ids, index.embedder.embed(texts), meta)
+    index.relationship_store = store      # build_lightrag_context reads this attribute
+    return store</code></pre>
+    <p>The Marlow–Deepcast description is about a specific deal: “Marlow Dynamics acquired Deepcast in April 2025 and reserved production for its own programs.” The query “supply chain risks” shares no content words with it. Keywords such as “vertical integration, supply control, supplier acquisition” put the theme vocabulary into the embedded text, so the high-level query lands near it. The cost is one extra LLM call per relationship at index time (or, as LightRAG does, one extra field in the extraction output at no extra call). Measure it: for the global canonical questions, compare the rank of the relationships whose <code>source_ids</code> fall in the questions' <code>supporting_docs</code>, with and without keywords. With <code>MockLLM</code> and the hashing embedder the gain is lexical only; with real models it is semantic.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 16.5 <span class="level">Stretch</span></h4>
+  <p>Implement <code>mix</code> mode: combine hybrid graph retrieval with plain vector search over text units, interleaving chunk lists round-robin with deduplication, as LightRAG does. Keep the same three-way token budget. Then argue for which of the seven canonical questions mix should beat hybrid.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from itertools import zip_longest
+from minigraphrag.context import format_table
+from minigraphrag.search.common import SearchResult, doc_ids_for_units, generate_answer
+from minigraphrag.search.lightrag import build_lightrag_context, extract_keywords, _fill
+
+def round_robin(*lists):
+    seen, out = set(), []
+    for group in zip_longest(*lists):
+        for item in group:
+            if item is not None and item not in seen:
+                seen.add(item)
+                out.append(item)
+    return out
+
+def lightrag_mix_search(index, query, llm, top_k=10, max_context_tokens=4000):
+    high, low = extract_keywords(llm, query)
+    _, data = build_lightrag_context(index, query, high, low, top_k, max_context_tokens, mode="hybrid")
+    kg_units = [s["id"] for s in data["sources"]]
+    vec_units = [uid for uid, _, _ in index.text_unit_store.search(index.embedder.embed([query])[0], k=top_k)]
+    unit_ids = round_robin(kg_units, vec_units)
+
+    G, third = index.graph, max_context_tokens // 3
+    entity_rows = _fill([[G.nodes[e]["human_id"], e, G.nodes[e].get("type", ""), G.nodes[e].get("description", "")]
+                         for e in data["entities"]], third)
+    rel_rows = _fill([[G.edges[e]["human_id"], e[0], e[1], G.edges[e].get("description", ""), G.edges[e].get("weight", 0)]
+                      for e in data["relationships"]], third)
+    unit_rows = _fill([[u, index.text_units[u].text] for u in unit_ids if u in index.text_units], third)
+    context = "\n\n".join([format_table("Entities", ["id", "entity", "type", "description"], entity_rows),
+                           format_table("Relationships", ["id", "source", "target", "description", "weight"], rel_rows),
+                           format_table("Sources", ["id", "text"], unit_rows)])
+    answer = generate_answer(llm, query, context)
+    return SearchResult(answer, "lightrag-mix", context, {"sources": [{"id": r[0]} for r in unit_rows]},
+                        doc_ids_for_units(index, [r[0] for r in unit_rows]), llm_calls=2)</code></pre>
+    <p>The graph context from hybrid mode is reused; only the sources table changes. Round-robin gives each list's best chunk a slot before either list's second-best, so neither retrieval path can starve the other.</p>
+    <p>Where mix should win: question 7 (“Who supplied Kestrel's sonar in 2024?”), because the year and the word “sonar” match the supply agreement chunk lexically and semantically while neither is an entity or theme; and single-hop lookups like “How far is Halden Reef from Port Avalon?”, where the answer is a number in one chunk. Question 6 (current CTO) benefits if vector search surfaces the 2026 interview. Where mix should not help, and may hurt by displacing graph-selected chunks within the fixed budget: questions 1 and 3, whose evidence is spread across documents that are not similar to the question text.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">In LightRAG, what are high-level keywords matched against?</p>
+  <ol>
+    <li>Entity names</li>
+    <li>Community reports</li>
+    <li data-correct>Relationship profiles, whose indexed text includes relation keywords</li>
+    <li>Raw text chunks</li>
+  </ol>
+  <div class="explain">Low-level keywords go to the entity store; high-level keywords go to the relationship store. There are no community reports in LightRAG.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What is the key asymmetry in LightRAG's key-value profiles?</p>
+  <ol>
+    <li data-correct>Entities are keyed by their name only; relations can have several theme keys generated by the LLM</li>
+    <li>Entities have no values; relations have no keys</li>
+    <li>Relations are keyed by name; entities by theme</li>
+    <li>Both are keyed by chunk id</li>
+  </ol>
+  <div class="explain">The paper: entities use their names as the sole index key, whereas relations may have multiple index keys derived from LLM enhancements including global themes from connected entities.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">How many LLM calls does a <code>minigraphrag</code> <code>lightrag_search</code> query make, and how does it grow with corpus size?</p>
+  <ol>
+    <li>One per community report; grows linearly</li>
+    <li>One per retrieved entity; grows with <code>top_k</code></li>
+    <li>Three; grows logarithmically</li>
+    <li data-correct>Two (keywords and generation); constant in corpus size</li>
+  </ol>
+  <div class="explain">Retrieval is vector search and graph lookups. Only keyword extraction and answer generation call the LLM.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A new document is added to a LightRAG index. What does the paper's update procedure avoid?</p>
+  <ol>
+    <li>Extracting entities from the new document</li>
+    <li data-correct>Recomputing a community structure and regenerating community reports</li>
+    <li>Embedding changed entity profiles</li>
+    <li>Merging descriptions of entities that already exist</li>
+  </ol>
+  <div class="explain">The new document's graph is unioned with the existing one. Extraction, merging and re-embedding of changed profiles still happen; there is simply no community layer to rebuild.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">For “What are the main themes in this corpus?”, why is GraphRAG's global search likely to beat LightRAG's global mode?</p>
+  <ol>
+    <li>LightRAG cannot parse broad questions</li>
+    <li>LightRAG's keyword extraction fails on questions without entities</li>
+    <li data-correct>Community reports summarize every region of the graph, while LightRAG only retrieves the top-k relations nearest to generic theme words</li>
+    <li>GraphRAG uses a larger model</li>
+  </ol>
+  <div class="explain">Coverage is the difference. Map-reduce considers every report at a level; top-k relationship search has no mechanism to ensure all themes are represented.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which LightRAG mode merges local, global and plain chunk vector search, and is the library's default?</p>
+  <ol>
+    <li><code>hybrid</code></li>
+    <li><code>naive</code></li>
+    <li data-correct><code>mix</code></li>
+    <li><code>bypass</code></li>
+  </ol>
+  <div class="explain"><code>hybrid</code> merges local and global graph retrieval; <code>mix</code> adds naive vector retrieval of chunks and is the default in the current library. <code>bypass</code> skips retrieval entirely.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Is LightRAG a replacement for GraphRAG?</summary>
+  <div><p>For many applications it is a cheaper alternative with similar answers on entity-centered and moderately thematic questions, and much easier updates. It is not a drop-in replacement for whole-corpus sensemaking, where community reports give coverage guarantees LightRAG does not have. Teams often combine ideas: a LightRAG-style index for day-to-day queries and freshness, plus periodic community reports for global questions.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Why not skip keyword extraction and embed the query directly?</summary>
+  <div><p>A single embedding of “What risks does Kestrel Labs face?” mixes an entity signal and a theme signal. Against the entity store the theme words are noise; against the relationship store the entity name drags results toward Kestrel's edges. Splitting sends each signal to the store that can use it. The cost is one small LLM call; <code>build_lightrag_context</code> falls back to the raw query when a keyword list is empty.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How big should top_k be?</summary>
+  <div><p>The library defaults to 40 with token budgets that trim the result, which suits large graphs where many entities share similar names and descriptions. On a Kestrel-sized graph, 40 is the whole graph. Start small (5 to 10), look at which retrieved relations actually appear in good answers, and increase only while context recall improves. Remember that one-hop expansion multiplies: 10 entities with an average degree of 8 produce up to 80 candidate edges.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does LightRAG need a graph database?</summary>
+  <div><p>No. Its default storages are in-memory with local files (NetworkX-style graph, JSON key-value stores, a file-based vector store), which its README describes as suitable for testing rather than production. For production it recommends PostgreSQL, which can serve all storage types, and it supports Neo4j and other graph databases. The trade-offs from <a href="13-storage-indexing.html">Chapter 13</a> apply unchanged.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can I use LightRAG's dual-level idea inside GraphRAG local search?</summary>
+  <div><p>Yes, and it is a good upgrade. Extract low-level keywords to pick seed entities (more precise than embedding the whole question), and use high-level keywords to rerank out-of-network relationships by similarity to the theme. That directly addresses the hub flooding problem from Chapter 14 while keeping local search's budgeted tables and citations.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: LightRAG versus GraphRAG on a growing corpus</h3>
+  <p>Measure freshness, cost and answer quality by growing the Kestrel corpus one document at a time.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>An ingest loop that adds documents 01 to 12 in date order, updating a LightRAG-style index with <code>merge_subgraph</code> and, separately, rebuilding the full <code>minigraphrag</code> index after each document</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Relation keywords from Exercise 16.4 and the mix mode from Exercise 16.5</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A table of LLM calls and tokens per ingest step for both approaches</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>After the final document: context recall of <code>supporting_docs</code> and exact-match or token F1 on all questions in <code>data/questions.jsonl</code> for LightRAG local, global, hybrid and mix, GraphRAG local and global, and basic search</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A note on every question whose answer was wrong because of merged, outdated descriptions</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can state, with your numbers, how much indexing cost incremental merging saved over twelve documents and which question types paid for it in accuracy.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>LightRAG indexes a graph of key-value profiles: entities keyed by name, relations keyed by LLM-generated theme keywords, with merged descriptions as values.</li>
+    <li>At query time one LLM call splits the question into low-level keywords (matched to entities) and high-level keywords (matched to relations); both are expanded one hop and merged.</li>
+    <li>Retrieval costs two LLM calls regardless of corpus size, and updates are a union of the new document's subgraph with no communities to rebuild.</li>
+    <li>Modes are local, global, hybrid, naive and mix (the default), plus bypass; hybrid and mix cover questions that have both an anchor and a theme.</li>
+    <li>The price is coverage and consistency: no guarantee that whole-corpus questions see every region, hub-biased expansion, and unresolved contradictions after merges.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Guo, Xia, Yu, Ao and Huang. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>HKUDS. <a href="https://github.com/HKUDS/LightRAG">LightRAG repository</a>: README (query modes, storage backends) and <code>lightrag/prompt.py</code> (keyword extraction prompt). <span class="venue">GitHub</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Xiang et al. <a href="https://arxiv.org/abs/2506.05690">When to use Graphs in RAG: A Comprehensive Analysis for Graph Retrieval-Augmented Generation</a> (GraphRAG-Bench). <span class="venue">arXiv 2506.05690, 2025</span></li>
+  <li>Zhou et al. <a href="https://arxiv.org/abs/2503.04338">In-depth Analysis of Graph-based RAG in a Unified Framework</a> (DIGIMON). <span class="venue">arXiv 2503.04338, 2025</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

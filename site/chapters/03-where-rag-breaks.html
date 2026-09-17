@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Where vector RAG breaks | Graph RAG from Scratch</title>
+<meta name="description" content="Run the canonical Kestrel questions through vector RAG and see exactly where retrieval fails: multi-hop chains, global sensemaking, aliases, split facts, stale evidence and top-k dilution.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="03-where-rag-breaks" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Where vector RAG breaks</h1>
+  <p class="lede">The baseline from Chapter 2 answers “who supplied the sonar?” well. This chapter runs the harder canonical questions through the same pipeline, shows chunk by chunk what retrieval returns and what it misses, and names each failure precisely enough that the rest of the course can fix it.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Trace a multi-hop question through vector retrieval and identify the missing bridge evidence</li>
+      <li>Explain why global “sensemaking” questions have no good nearest neighbor, using the query-focused summarization framing</li>
+      <li>Recognize alias, split-fact, staleness and dilution failures in retrieved context</li>
+      <li>Implement iterative retrieval with follow-up queries and explain why it is only a partial fix</li>
+      <li>Map each failure type to the GraphRAG technique and chapter that addresses it</li>
+    </ul>
+  </div>
+</header>
+
+<h2>The setup: same index, harder questions</h2>
+<p>Every number in this chapter comes from the Chapter 2 baseline, unchanged: the 12 Kestrel documents cut into 24 text units of 300 words with 50 words of overlap, embedded with <code>HashingEmbedder</code>, searched with exact cosine top-<em>k</em>, <em>k</em> = 5 unless stated. You can reproduce all of them with <code>build_vector_index</code> from Chapter 2 and <code>store.search</code>.</p>
+<p>Because the hashing embedder only sees shared words, you might suspect the failures are just a weak embedder. Some are. The important ones are not, and for each failure this chapter separates the part a better embedding model would fix from the part it structurally cannot. The test is simple: <em>does any single chunk contain what the question needs, in words or meaning close to the question?</em> If not, no similarity function over single chunks can rank the right evidence first.</p>
+
+<p>Here is the retrieval footprint of the seven canonical questions at a glance. Each row is a question; each column is a document. The supporting documents come from <code>data/questions.jsonl</code>.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 320" role="img" aria-labelledby="grid-title">
+      <title id="grid-title">Grid of canonical questions 1 to 7 against documents 01 to 12, marking which supporting documents vector search retrieved at k equals 5 and which it missed</title>
+      <text class="d-text small" x="238" y="34" text-anchor="middle">01</text>
+      <text class="d-text small" x="274" y="34" text-anchor="middle">02</text>
+      <text class="d-text small" x="310" y="34" text-anchor="middle">03</text>
+      <text class="d-text small" x="346" y="34" text-anchor="middle">04</text>
+      <text class="d-text small" x="382" y="34" text-anchor="middle">05</text>
+      <text class="d-text small" x="418" y="34" text-anchor="middle">06</text>
+      <text class="d-text small" x="454" y="34" text-anchor="middle">07</text>
+      <text class="d-text small" x="490" y="34" text-anchor="middle">08</text>
+      <text class="d-text small" x="526" y="34" text-anchor="middle">09</text>
+      <text class="d-text small" x="562" y="34" text-anchor="middle">10</text>
+      <text class="d-text small" x="598" y="34" text-anchor="middle">11</text>
+      <text class="d-text small" x="634" y="34" text-anchor="middle">12</text>
+      <text class="d-text small" x="12" y="34">Question</text>
+      <text class="d-text small" x="12" y="63">Q1 Why Project Tern?</text>
+      <rect class="d-box ghost" x="225" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="261" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="297" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="333" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="369" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="405" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="441" y="48" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="454" y="63" text-anchor="middle">miss</text>
+      <rect class="d-box bad" x="477" y="48" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="490" y="63" text-anchor="middle">miss</text>
+      <rect class="d-box good" x="513" y="48" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="526" y="63" text-anchor="middle">hit</text>
+      <rect class="d-box edge" x="549" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="585" y="48" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="621" y="48" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="12" y="93">Q2 Investor&#39;s board member</text>
+      <rect class="d-box edge" x="225" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="261" y="78" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="274" y="93" text-anchor="middle">miss</text>
+      <rect class="d-box ghost" x="297" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="333" y="78" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="346" y="93" text-anchor="middle">hit</text>
+      <rect class="d-box edge" x="369" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="405" y="78" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="418" y="93" text-anchor="middle">hit</text>
+      <rect class="d-box ghost" x="441" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="477" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="513" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="549" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="585" y="78" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="621" y="78" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="12" y="123">Q3 Priya Nair to Deepcast</text>
+      <rect class="d-box ghost" x="225" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="261" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="297" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="333" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="369" y="108" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="382" y="123" text-anchor="middle">miss</text>
+      <rect class="d-box ghost" x="405" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="441" y="108" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="454" y="123" text-anchor="middle">hit</text>
+      <rect class="d-box edge" x="477" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="513" y="108" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="526" y="123" text-anchor="middle">miss</text>
+      <rect class="d-box ghost" x="549" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="585" y="108" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="621" y="108" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="12" y="153">Q4 Main themes</text>
+      <rect class="d-box bad" x="225" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="238" y="153" text-anchor="middle">miss</text>
+      <rect class="d-box good" x="261" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="274" y="153" text-anchor="middle">hit</text>
+      <rect class="d-box edge" x="297" y="138" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="333" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="346" y="153" text-anchor="middle">miss</text>
+      <rect class="d-box edge" x="369" y="138" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="405" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="418" y="153" text-anchor="middle">hit</text>
+      <rect class="d-box bad" x="441" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="454" y="153" text-anchor="middle">miss</text>
+      <rect class="d-box bad" x="477" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="490" y="153" text-anchor="middle">miss</text>
+      <rect class="d-box ghost" x="513" y="138" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="549" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="562" y="153" text-anchor="middle">miss</text>
+      <rect class="d-box bad" x="585" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="598" y="153" text-anchor="middle">miss</text>
+      <rect class="d-box ghost" x="621" y="138" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="12" y="183">Q5 Risks Kestrel faces</text>
+      <rect class="d-box ghost" x="225" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="261" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="297" y="168" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="310" y="183" text-anchor="middle">hit</text>
+      <rect class="d-box ghost" x="333" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="369" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="405" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="441" y="168" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="454" y="183" text-anchor="middle">miss</text>
+      <rect class="d-box bad" x="477" y="168" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="490" y="183" text-anchor="middle">miss</text>
+      <rect class="d-box ghost" x="513" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="549" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="585" y="168" width="30" height="22" rx="4"/>
+      <rect class="d-box bad" x="621" y="168" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="634" y="183" text-anchor="middle">miss</text>
+      <text class="d-text small" x="12" y="213">Q6 Who is the CTO?</text>
+      <rect class="d-box bad" x="225" y="198" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="238" y="213" text-anchor="middle">miss</text>
+      <rect class="d-box edge" x="261" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="297" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="333" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="369" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="405" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="441" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="477" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="513" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="549" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="585" y="198" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="621" y="198" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="634" y="213" text-anchor="middle">hit</text>
+      <text class="d-text small" x="12" y="243">Q7 Sonar supplier in 2024</text>
+      <rect class="d-box ghost" x="225" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="261" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="297" y="228" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="310" y="243" text-anchor="middle">hit</text>
+      <rect class="d-box ghost" x="333" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="369" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="405" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="441" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="477" y="228" width="30" height="22" rx="4"/>
+      <text class="d-text small" x="490" y="243" text-anchor="middle">hit</text>
+      <rect class="d-box ghost" x="513" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box edge" x="549" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="585" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box ghost" x="621" y="228" width="30" height="22" rx="4"/>
+      <rect class="d-box good" x="12" y="266" width="22" height="16" rx="3"/>
+      <text class="d-text small" x="42" y="278">needed and retrieved</text>
+      <rect class="d-box bad" x="196" y="266" width="22" height="16" rx="3"/>
+      <text class="d-text small" x="226" y="278">needed but not retrieved</text>
+      <rect class="d-box edge" x="404" y="266" width="22" height="16" rx="3"/>
+      <text class="d-text small" x="434" y="278">retrieved, not listed as needed</text>
+      <text class="d-text small" x="12" y="304">Top-5 chunks, HashingEmbedder, 300-word chunks. Supporting documents from data/questions.jsonl.</text>
+    </svg>
+  </div>
+  <figcaption>Question 7, a direct lookup, is fully covered. The multi-hop and global rows are where red appears, and question 4's row is mostly red because its evidence spans eight documents. Question 3 shows two misses, yet its top-ranked chunk, from the 2026 interview (not in the reference list), restates most of the connection; more on that below.</figcaption>
+</figure>
+
+<h2>Multi-hop questions: the evidence does not look like the question</h2>
+
+<h3>Question 1: “Why did Kestrel Labs start Project Tern?”</h3>
+<p>The answer is a chain of three facts from three documents:</p>
+<ol>
+  <li><strong>Marlow Dynamics acquired Deepcast</strong> in April 2025 and ended outside supply contracts (document 07, a trade-press article).</li>
+  <li><strong>Deepcast stopped supplying Kestrel Labs</strong>: “Deepcast will not renew our supply agreement” (document 08, the board memo).</li>
+  <li><strong>Kestrel built its own sonar</strong>: “Project Tern will replace the Deepcast sonar in Project Sentinel” (document 09, the engineering blog).</li>
+</ol>
+<p>Top-5 retrieval for the question:</p>
+<table>
+  <thead><tr><th>Rank</th><th>Chunk</th><th>Cosine</th><th>What it contributes</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>10_brightwater_series_b-001</code></td><td>0.434</td><td>“We cannot depend on a single outside supplier … Project Tern, our in-house sonar program, is the answer to that.” No supplier named.</td></tr>
+    <tr><td>2</td><td><code>09_kestrel_eng_blog_project_tern-000</code></td><td>0.326</td><td>Fact 3: Tern replaces Deepcast sonar; “Deepcast units will no longer be available to us.” No reason given.</td></tr>
+    <tr><td>3</td><td><code>05_kestrel_blog_priya_nair-000</code></td><td>0.321</td><td>Priya Nair's 2023 profile. Mentions Marlow Dynamics, as her former employer only.</td></tr>
+    <tr><td>4</td><td><code>02_brightwater_series_a-001</code></td><td>0.278</td><td>Series A boilerplate; matches “Kestrel Labs”.</td></tr>
+    <tr><td>5</td><td><code>02_brightwater_series_a-000</code></td><td>0.240</td><td>Series A announcement; matches “Kestrel Labs”.</td></tr>
+  </tbody>
+</table>
+<p>The board memo's first chunk ranks 11th of 24. The Marlow acquisition article's best chunk ranks <strong>21st of 24</strong>. A capable model given this context will write something like “Kestrel started Project Tern to stop depending on an outside sonar supplier after Deepcast units became unavailable.” That is fluent, cited and missing the actual cause. It is the worst kind of wrong answer: a plausible partial one.</p>
+
+<div class="viz" data-viz="embedding-space">
+<script type="application/json">
+{
+  "title": "Question 1 lands next to the effect, far from the cause",
+  "points": [
+    {"label": "10 Series B: “single supplier”", "x": 44, "y": 24, "group": 2},
+    {"label": "09 Tern blog (fact 3)", "x": 28, "y": 48, "group": 1},
+    {"label": "05 Priya Nair profile", "x": 48, "y": 52, "group": 2},
+    {"label": "02 Series A (part 2)", "x": 60, "y": 14, "group": 2},
+    {"label": "02 Series A (part 1)", "x": 62, "y": 44, "group": 2},
+    {"label": "08 Board memo (fact 2)", "x": 12, "y": 70, "group": 1},
+    {"label": "07 Marlow buys Deepcast (fact 1)", "x": 8, "y": 90, "group": 1},
+    {"label": "03 Deepcast supply deal", "x": 50, "y": 82, "group": 2},
+    {"label": "06 Bleaching note", "x": 76, "y": 90, "group": 2},
+    {"label": "11 Council minutes", "x": 74, "y": 64, "group": 2}
+  ],
+  "query": {"label": "Why did Kestrel Labs start Project Tern?", "x": 36, "y": 36},
+  "k": 5,
+  "note": "Teal points hold the three facts the answer needs. Hand-drawn 2-D sketch with distance-based scores; the real ranks are in the table above. Raise k on the slider and watch which teal points arrive last: in this sketch, as in the real ranking (memo 11th, Marlow article 21st), the two missing facts sit far from the question."
+}
+</script>
+</div>
+
+<h3>Why the missing chunks score so low</h3>
+<p>After stopword removal the question is five words: <code>kestrel, labs, start, project, tern</code>. The Marlow article shares exactly one of them, <code>labs</code>, and only by accident: it never mentions Kestrel Labs or Project Tern at all. It is a story about a defense contractor buying a sonar maker. The board memo does share <code>kestrel, labs, start, project</code>, but its first chunk is 300 words of supply-chain detail, so those four words are a small part of its vector. It also never names the buyer: it says “Deepcast's change of ownership” and “the new owner”.</p>
+<p>A neural embedder would rank the memo higher, since “sonar supply disruption and proposed response” is semantically close to “why start an in-house sonar project”. It would not rescue the Marlow article, because that article is not about Kestrel, Tern or why anyone started anything. The evidence for hop 1 resembles the evidence for hop 2, not the question. The link between them is a shared entity, Deepcast, and cosine similarity between the question and each chunk has no way to follow a shared entity.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 290" role="img" aria-labelledby="dots-title">
+      <title id="dots-title">Three chunks linked by shared entities; the question is similar only to the third chunk, so the chain through Deepcast is invisible to vector search</title>
+      <defs><marker id="dots-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <rect class="d-box edge" x="220" y="10" width="240" height="40" rx="8"/>
+      <text class="d-text bold" x="340" y="35" text-anchor="middle">Why did Kestrel start Tern?</text>
+      <rect class="d-box bad" x="10" y="100" width="200" height="118" rx="8"/>
+      <text class="d-text bold" x="22" y="124">07 Marlow buys Deepcast</text>
+      <text class="d-text small" x="22" y="146">Marlow Dynamics acquired</text>
+      <text class="d-text small" x="22" y="162"><tspan class="d-text small bold">Deepcast</tspan>; no new outside</text>
+      <text class="d-text small" x="22" y="178">supply contracts.</text>
+      <text class="d-text small" x="22" y="204">rank 21 of 24</text>
+      <rect class="d-box bad" x="240" y="100" width="200" height="118" rx="8"/>
+      <text class="d-text bold" x="252" y="124">08 Board memo</text>
+      <text class="d-text small" x="252" y="146"><tspan class="d-text small bold">Deepcast</tspan> will not renew after</text>
+      <text class="d-text small" x="252" y="162">its change of ownership;</text>
+      <text class="d-text small" x="252" y="178">build our own sonar module.</text>
+      <text class="d-text small" x="252" y="204">rank 11 of 24</text>
+      <rect class="d-box good" x="470" y="100" width="200" height="118" rx="8"/>
+      <text class="d-text bold" x="482" y="124">09 Tern blog</text>
+      <text class="d-text small" x="482" y="146">Project Tern will replace the</text>
+      <text class="d-text small" x="482" y="162"><tspan class="d-text small bold">Deepcast</tspan> sonar in Sentinel.</text>
+      <text class="d-text small" x="482" y="204">rank 2 of 24</text>
+      <line class="d-line hot" x1="400" y1="50" x2="540" y2="96" marker-end="url(#dots-arr)"/>
+      <text class="d-text small" x="486" y="66">high similarity</text>
+      <line class="d-line dash" x1="300" y1="50" x2="330" y2="96"/>
+      <line class="d-line dash" x1="260" y1="50" x2="110" y2="96"/>
+      <text class="d-text small" x="112" y="70">low similarity</text>
+      <path class="d-line dash" d="M110,218 C110,262 340,262 340,218"/>
+      <path class="d-line dash" d="M340,218 C340,262 570,262 570,218"/>
+      <text class="d-text small" x="225" y="276" text-anchor="middle">shared entity: Deepcast</text>
+      <text class="d-text small" x="455" y="276" text-anchor="middle">shared entity: Deepcast</text>
+    </svg>
+  </div>
+  <figcaption>The dots are connected by an entity the question never names. Vector search scores each box against the question independently, so only the box on the right lights up. A graph stores the dashed links explicitly.</figcaption>
+</figure>
+
+<div class="callout paper">
+  <span class="callout-title">Larson and Truitt, the GraphRAG announcement (2024)</span>
+  <p>The blog post that introduced GraphRAG named this failure directly: baseline RAG struggles to connect the dots when answering requires traversing disparate pieces of information through their shared attributes to produce new synthesized insights. The chain Marlow → Deepcast → Kestrel → Tern is that kind of traversal.</p>
+</div>
+
+<h3>Question 2: a fragile success</h3>
+<p>“Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?” needs three hops: the bleaching was detected by Sentinel drones (document 06), Kestrel Labs runs Sentinel (document 04), and Lena Park of Brightwater Capital sits on Kestrel's board (document 02). Top-5 retrieval covers all three facts anyway: the research note ranks 1st, the Sentinel launch post 2nd, and at rank 4 the <em>Series B</em> press release contributes “Lena Park, partner at Brightwater Capital and a member of the Kestrel Labs board”, a sentence that sits in the same chunk as a mention of the 2024 bleaching event.</p>
+<p>That is luck, not capability. Remove the Series B press release from the corpus and rerun the query: the top 5 become the research note, the launch post, Priya Nair's profile, the founding article and the research note again. The Series A release, the only other source of the board fact, ranks 11th. Nothing about the question changed; a redundant document disappeared. Vector RAG answers multi-hop questions reliably only when some document already states the connection in one place.</p>
+
+<h3>Question 3: someone already connected the dots</h3>
+<p>“What connects Priya Nair to Deepcast?” is answered almost entirely by the top-ranked chunk, the first part of the 2026 leadership interview. In it the host says Priya “joined in 2023 from Marlow Dynamics”, and Mira Okafor says “Marlow Dynamics bought Deepcast last year”. The Marlow article ranks 3rd. The retrieved context supports the chain Priya → Marlow → Deepcast. What is missing is the second path, Priya co-leads Project Tern, which replaces Deepcast sonar: the Tern blog ranks 7th.</p>
+<p>The lesson generalizes. On real corpora, multi-hop questions often seem to work in demos because someone wrote a summary, an FAQ or an interview that connects the facts. The questions your users care about most are frequently the ones nobody has written up yet.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "What vector search sees versus the paths the questions need",
+  "height": 400,
+  "directed": false,
+  "nodes": [
+    {"id": "brightwater", "label": "Brightwater Capital", "group": 2, "x": 10, "y": 12},
+    {"id": "lena", "label": "Lena Park", "group": 3, "x": 10, "y": 48},
+    {"id": "kestrel", "label": "Kestrel Labs", "group": 2, "x": 34, "y": 36},
+    {"id": "sentinel", "label": "Project Sentinel", "group": 4, "x": 34, "y": 76},
+    {"id": "bleach", "label": "2024 bleaching", "group": 5, "x": 10, "y": 86},
+    {"id": "deepcast", "label": "Deepcast", "group": 2, "x": 60, "y": 12},
+    {"id": "marlow", "label": "Marlow Dynamics", "group": 2, "x": 88, "y": 12},
+    {"id": "tern", "label": "Project Tern", "group": 4, "x": 60, "y": 48},
+    {"id": "priya", "label": "Priya Nair", "group": 3, "x": 88, "y": 48},
+    {"id": "vehl", "label": "Jonas Vehl", "group": 3, "x": 70, "y": 82}
+  ],
+  "edges": [
+    {"source": "marlow", "target": "deepcast", "label": "acquired"},
+    {"source": "deepcast", "target": "kestrel", "label": "supplied"},
+    {"source": "kestrel", "target": "tern", "label": "runs"},
+    {"source": "tern", "target": "deepcast", "label": "replaces sonar"},
+    {"source": "priya", "target": "marlow", "label": "formerly at"},
+    {"source": "priya", "target": "tern", "label": "co-leads"},
+    {"source": "vehl", "target": "tern", "label": "co-leads"},
+    {"source": "vehl", "target": "kestrel", "label": "co-founded"},
+    {"source": "kestrel", "target": "sentinel", "label": "runs"},
+    {"source": "sentinel", "target": "bleach", "label": "detected"},
+    {"source": "lena", "target": "kestrel", "label": "board member"},
+    {"source": "lena", "target": "brightwater", "label": "partner at"},
+    {"source": "brightwater", "target": "kestrel", "label": "invested in"}
+  ],
+  "legend": {"2": "Organization", "3": "Person", "4": "Project", "5": "Event"},
+  "steps": [
+    {"caption": "The part of the Kestrel graph that the three multi-hop questions depend on. Vector RAG never builds this structure: it stores 24 chunks and compares each one to the question on its own."},
+    {"caption": "<strong>Question 1, vector view.</strong> The top-5 chunks mention Kestrel, Tern, Deepcast, Priya Nair, Vehl, Lena Park, Brightwater and even Marlow Dynamics (as Priya's former employer). The relations they state are highlighted. The one that explains everything is not among them.", "active": ["kestrel", "tern"], "visited": ["deepcast", "priya", "vehl", "lena", "brightwater", "marlow", "sentinel"], "visitedEdges": ["kestrel>tern", "tern>deepcast", "priya>marlow", "priya>tern", "vehl>tern", "lena>brightwater", "lena>kestrel", "brightwater>kestrel"]},
+    {"caption": "<strong>The missing edges.</strong> “Marlow Dynamics acquired Deepcast” lives in document 07, ranked 21 of 24. “Deepcast stopped supplying Kestrel” comes from the board memo, ranked 11. Neither chunk resembles the question.", "active": ["marlow", "deepcast"], "visited": ["kestrel"], "edges": ["marlow>deepcast", "deepcast>kestrel"]},
+    {"caption": "<strong>The path the answer needs:</strong> Marlow Dynamics <em>acquired</em> Deepcast, which <em>supplied</em> Kestrel Labs, which <em>runs</em> Project Tern, which <em>replaces</em> the Deepcast sonar. In a graph this is a walk of three or four hops from the entity the question names.", "active": ["marlow", "deepcast", "kestrel", "tern"], "edges": ["marlow>deepcast", "deepcast>kestrel", "kestrel>tern", "tern>deepcast"]},
+    {"caption": "<strong>Question 3</strong> has two paths from Priya Nair to Deepcast: through her former employer, and through the project she co-leads. The top-ranked interview chunk states the first. The second needs the Tern blog, ranked 7th.", "active": ["priya", "deepcast"], "visited": ["marlow", "tern"], "edges": ["priya>marlow", "marlow>deepcast", "priya>tern", "tern>deepcast"]},
+    {"caption": "<strong>Question 2</strong> is a three-hop path from the event to the investor. Vector search found it only because a redundant press release restated the board fact next to the bleaching event. A graph finds it by walking edges, whether or not anyone wrote the summary.", "active": ["bleach", "brightwater"], "visited": ["sentinel", "kestrel", "lena"], "edges": ["bleach>sentinel", "sentinel>kestrel", "kestrel>lena", "lena>brightwater"]}
+  ]
+}
+</script>
+</div>
+
+<h2>Global questions: no chunk is about the whole corpus</h2>
+
+<h3>Question 4: “What are the main themes in this corpus?”</h3>
+<p>This question has no nearest neighbor. Its content words after tokenization are <code>main, theme, corpu</code> (the crude plural stripper eats the s of “corpus”). The best chunk scores 0.078; from rank 6 on, every chunk scores zero or slightly below. The “top 5” is noise: the Series A release twice, Priya Nair's profile, the Deepcast supply deal and the bleaching note, chosen because a word like “main” happens to appear.</p>
+<p>A better embedder produces nonzero scores and a different noisy top 5, but it cannot fix the underlying problem. The reference answer names four themes: reef science and monitoring; supply-chain risk and vertical integration; funding and growth; regulation creating demand. Evidence for them is spread over eight documents. No single chunk is about “themes”, and five chunks cannot cover eight documents. Even with perfect ranking, the model would see a sample and summarize the sample.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Edge et al., From Local to Global (2024)</span>
+  <p>The GraphRAG paper frames questions like “What are the main themes in the dataset?” as <em>query-focused summarization</em> (QFS) over an entire corpus, a sensemaking task rather than a lookup. It argues that RAG fails on such global questions because they are not answered by retrieving a few relevant records, and proposes community summaries built at indexing time and combined with map-reduce at query time. You will build that pipeline in Chapters 11, 12 and 15.</p>
+</div>
+
+<h3>Question 5: “What risks does Kestrel Labs face?”</h3>
+<p>This one sits between local and global. There is a chunk about risk, and retrieval finds it: the 2022 Deepcast supply deal (rank 4) quotes an analyst on single-source components. But the full answer is spread across four documents written over four years: that 2022 analysis, the Marlow acquisition in 2025 (rank 19), the board memo calling supply “the most serious operational risk” (rank 9), and the 2026 interview in which the CEO lists execution risk on Tern, competition from Marlow, dependence on the Ocean Health Act and concentration on one reef and one partner (rank 10). Top-5 context yields a one-risk answer. The chunks that list the most risks rank 9th and 10th because the question's other words, “Kestrel Labs”, are everywhere in the corpus and dominate the similarity.</p>
+
+<table>
+  <thead><tr><th>Question type</th><th>What “relevant” means</th><th>Why top-<em>k</em> struggles</th></tr></thead>
+  <tbody>
+    <tr><td>Local lookup (Q7)</td><td>One or two chunks that state the fact</td><td>It usually does not</td></tr>
+    <tr><td>Multi-hop (Q1–Q3)</td><td>A set of chunks linked by shared entities</td><td>Later hops do not resemble the question</td></tr>
+    <tr><td>Aggregative (Q5)</td><td>Every chunk that contributes one item to a list</td><td>Items are scattered; <em>k</em> caps how many can appear</td></tr>
+    <tr><td>Global sensemaking (Q4)</td><td>The corpus as a whole, summarized</td><td>No chunk is about the whole; no ranking helps</td></tr>
+  </tbody>
+</table>
+
+<h2>Lost relationships: aliases, split facts, stale facts and dilution</h2>
+
+<h3>Aliases and indirect references</h3>
+<p>The same entity appears under different surface forms, and some references never use a name at all:</p>
+<ul>
+  <li>The bleaching research note says “the Sentinel program” and “Sentinel drones”, never “Project Sentinel” and never “Kestrel Labs”.</li>
+  <li>The council minutes call Tidewater Institute “TWI” and Kestrel's CEO “the vendor's CEO”.</li>
+  <li>The board memo calls Marlow Dynamics “the new owner”. No embedding model can resolve that without reading another document.</li>
+  <li>The 2026 interview says “Tern”, “Okafor”, “Vehl” and “Nair”.</li>
+</ul>
+<p>Neural embedders handle easy aliases (“TWI” near “Tidewater” may or may not work, depending on the model). Coreference across documents, such as “the new owner” meaning Marlow Dynamics, needs the fact to be resolved once, at indexing time, and stored. That is what entity extraction and resolution do in <a href="08-entity-relation-extraction.html">Chapters 8</a> and <a href="09-entity-resolution.html">9</a>.</p>
+
+<h3>Facts split across chunk boundaries</h3>
+<p>With 120-word chunks, the Series B press release is cut in the middle of Okafor's quote. Chunk <code>10_brightwater_series_b-002</code> ends mid-sentence: “Project Tern, our in-house sonar program, is the”. Chunk <code>-003</code> starts 20 words earlier, at “outside supplier for the most important part of our drones,” and carries the quote through “is the answer to that”, but it has lost the opening “Spring 2025 taught us that we cannot depend on a single”. One vector holds the cause without the conclusion; the other holds the conclusion without its time anchor. And neither names the supplier, which appears only in other documents. Overlap protects short facts; it cannot protect relationships that span more than the overlap.</p>
+<p>The effect on question 1 is stark. Count a fact as present when any retrieved chunk states it, whichever document it comes from:</p>
+<table>
+  <thead><tr><th>Chunk size (overlap)</th><th>Units</th><th><em>k</em> = 3</th><th><em>k</em> = 5</th><th><em>k</em> = 10</th></tr></thead>
+  <tbody>
+    <tr><td>300 words (50)</td><td>24</td><td>2 of 3 facts</td><td>2 of 3</td><td>3 of 3</td></tr>
+    <tr><td>120 words (20)</td><td>58</td><td>0 of 3</td><td>0 of 3</td><td>0 of 3</td></tr>
+    <tr><td>60 words (10)</td><td>111</td><td>0 of 3</td><td>0 of 3</td><td>0 of 3</td></tr>
+  </tbody>
+</table>
+<p>At 300 words, <em>k</em> = 3 already gives two facts, both from the Tern blog's first chunk: Tern replaces the Deepcast sonar, and Deepcast units are no longer available. The third arrives at <em>k</em> = 10, and not from the acquisition article, which is still 21st. It comes from the 2026 interview at rank 6, where Okafor mentions in passing that “Marlow Dynamics bought Deepcast last year”. At 120 words, even ten chunks contain none of the three: the top ranks go to fragments of the Series B and Series A releases, the Sentinel launch post and Priya Nair's profile, which repeat “Kestrel Labs” and “Project”, plus the Tern blog's first fragment, which announces the project and stops before the sentence about Deepcast (that sentence is in the blog's third fragment, at rank 18). Smaller chunks sharpen single-fact matching and shred multi-fact reasoning.</p>
+
+<h3>Stale facts</h3>
+<p>Question 6, “Who is the CTO of Kestrel Labs?”, retrieves the 2026 interview chunk at rank 5, which says Priya Nair has been CTO since March 2026. At rank 6 comes the 2022 supply deal article, which calls Jonas Vehl the chief technology officer, and the 2021 founding article and the 2025 board memo say the same. Cosine similarity has no notion of time: an old statement of a fact scores as high as a new one, and more old statements mean more chances to outrank the new one. With <em>k</em> = 5 a careful model reads the datelines carried by each document's first chunk and answers correctly. With a slightly different embedder, or <em>k</em> = 6 and a less careful model, it answers “Jonas Vehl”. Question 15 in <code>questions.jsonl</code>, “Who was the CTO when the bleaching event was detected?”, needs time-aware reasoning on purpose. Temporal facts are the subject of <a href="10-claims-temporal.html">Chapter 10</a> and <a href="27-incremental-temporal.html">Chapter 27</a>.</p>
+
+<h3>Top-k dilution</h3>
+<p>Two kinds of noise crowd the top-<em>k</em>. <strong>Redundancy</strong>: overlapping chunks of the same document, like the two Series B chunks at ranks 2 and 3 for question 7, spend two slots on one piece of evidence. <strong>Hub words</strong>: “Kestrel Labs” appears in almost every document, so any question that names Kestrel rewards chunks that repeat the name, which is why the Series A boilerplate keeps appearing in the top 5 for questions 1, 5 and 6.</p>
+<p>The instinctive fix is a bigger <em>k</em>. Chapter 2's smoke test showed multi-hop recall rising from 0.60 at <em>k</em> = 5 to 0.88 at <em>k</em> = 10. But on this corpus <em>k</em> = 10 means reading 42% of all chunks, precision drops, the evidence that matters lands in the middle of a long context, and on a corpus of 100,000 chunks the same <em>k</em> would still be a tiny sample. Raising <em>k</em> converts a retrieval problem into a long-context problem; it does not solve it.</p>
+
+<h2>Partial fixes: rewriting, decomposition and iterative retrieval</h2>
+<p>Before graphs, the RAG community attacked multi-hop failures by making retrieval a loop. Self-Ask (Press et al., 2022) prompts the model to ask itself follow-up questions. IRCoT (Trivedi et al., 2022) interleaves retrieval with chain-of-thought, using each reasoning step as the next query. ReAct (Yao et al., 2022) generalizes this to tool use. The shared idea: read what you retrieved, notice the bridge entity, and search for it.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "Iterative retrieval on question 1",
+  "perRow": 3,
+  "stages": [
+    {"label": "Hop 1 retrieve", "detail": "Search the original question with k = 3: <span class=\"viz-chip node\">10 Series B-001</span> <span class=\"viz-chip node\">09 Tern blog-000</span> <span class=\"viz-chip node\">05 Priya Nair-000</span>"},
+    {"label": "Read and reason", "detail": "The LLM reads: Tern replaces Deepcast sonar; Deepcast units are no longer available. It notices the bridge entity <strong>Deepcast</strong> and the open question: why?"},
+    {"label": "Follow-up query", "detail": "The LLM writes: “Why are Deepcast sonar units no longer available?”"},
+    {"label": "Hop 2 retrieve", "detail": "New top 3: <span class=\"viz-chip node\">08 Board memo-000 0.290</span> <span class=\"viz-chip node\">07 Marlow buys Deepcast-000 0.252</span> <span class=\"viz-chip node\">09 Tern blog-000 0.234</span>. The two missing facts arrive."},
+    {"label": "Stop check", "detail": "The LLM judges the evidence sufficient: acquisition, end of supply, in-house replacement. Two retrievals and two LLM calls so far; the answer will be the third."},
+    {"label": "Answer", "detail": "Generate from the union of retrieved chunks with citations to 07, 08 and 09."}
+  ]
+}
+</script>
+</div>
+
+<p>The numbers in that animation are real hashing-embedder results. Iterative retrieval works here. A reference implementation looks like this:</p>
+
+<pre data-file="examples/ch03_iterative.py"><code class="language-python">from minigraphrag.context import format_table
+from minigraphrag.search.common import generate_answer
+
+FOLLOW_UP_PROMPT = """You are answering a question by searching a document collection one query at a time.
+
+Question: {question}
+
+Evidence so far:
+{evidence}
+
+If the evidence fully answers the question, reply with exactly DONE.
+Otherwise reply with ONE short search query for the most important missing fact.
+Use specific names that appear in the evidence."""
+
+def iterative_search(index, question: str, llm, max_hops: int = 3, k: int = 3):
+    seen: list[str] = []
+    query, calls = question, 0
+    for hop in range(max_hops):
+        qvec = index.embedder.embed([query])[0]
+        for unit_id, _, _ in index.text_unit_store.search(qvec, k=k):
+            if unit_id not in seen:
+                seen.append(unit_id)
+        if hop == max_hops - 1:
+            break
+        evidence = "\n---\n".join(index.text_units[u].text[:800] for u in seen)
+        reply = llm.complete(FOLLOW_UP_PROMPT.format(question=question, evidence=evidence)).strip()
+        calls += 1
+        if not reply or reply.upper().startswith("DONE"):
+            break
+        query = reply.splitlines()[0]
+    context = format_table("Sources", ["id", "text"], [[u, index.text_units[u].text] for u in seen])
+    return generate_answer(llm, question, context), seen, calls + 1</code></pre>
+
+<p>This needs a real model: <code>MockLLM</code> does not recognize the follow-up prompt and replies <code>OK</code>, which becomes a useless query. Exercise 3.3 shows how to test the loop offline with scripted follow-ups.</p>
+
+<h3>Why iterative retrieval is only a partial fix</h3>
+<table>
+  <thead><tr><th>Limitation</th><th>What happens on Kestrel</th></tr></thead>
+  <tbody>
+    <tr><td>The model must spot the bridge entity in raw text</td><td>Hop 1 must surface a chunk that names Deepcast. If the Series B chunk alone had been retrieved (“a single outside supplier”), there would be no name to follow.</td></tr>
+    <tr><td>Errors compound</td><td>A bad follow-up (“Kestrel Labs sonar history”) retrieves the 2022 supply deal and another Series B chunk, and the loop drifts. Each hop multiplies the chance of going off track.</td></tr>
+    <tr><td>Cost and latency scale with hops</td><td>Each hop adds an embedding call, a search and an LLM call that reads the growing evidence. Latency grows roughly with the number of hops, and each LLM call reads a longer context than the last.</td></tr>
+    <tr><td>Aliases still break queries</td><td>A follow-up for “who owns Deepcast now?” works; a follow-up built from the memo's “the new owner” does not.</td></tr>
+    <tr><td>Global questions do not decompose</td><td>“Main themes” has no natural follow-up query. Covering eight documents by hopping means reading most of the corpus, one slow step at a time.</td></tr>
+    <tr><td>Nothing is learned</td><td>The link Marlow → Deepcast → Kestrel is rediscovered, at full cost, for every user who asks a related question.</td></tr>
+  </tbody>
+</table>
+
+<p>GraphRAG moves that work from query time to indexing time. Entities and relationships are extracted once, aliases are resolved once, communities are summarized once. At query time, following a bridge entity is a dictionary lookup instead of an LLM call. Iterative, agentic retrieval does not disappear; in <a href="18-paths-and-agents.html">Chapter 18</a> and <a href="30-agentic-graphrag.html">Chapter 30</a> the agent walks a graph instead of guessing search strings.</p>
+
+<h2>A failure taxonomy and the GraphRAG toolbox</h2>
+<p>Here is every failure from this chapter, what causes it, and where in the course it gets fixed.</p>
+
+<table>
+  <thead><tr><th>Failure</th><th>Kestrel symptom</th><th>Root cause</th><th>GraphRAG technique</th><th>Chapters</th></tr></thead>
+  <tbody>
+    <tr><td>Missing bridge evidence (multi-hop)</td><td>Q1 retrieves Tern's effect, not Marlow's acquisition (rank 21)</td><td>Chunks scored independently against the question</td><td>Entity-relationship graph; neighborhood expansion from query entities; Personalized PageRank; path retrieval</td><td><a href="08-entity-relation-extraction.html">8</a>, <a href="14-local-search.html">14</a>, <a href="17-ppr-hipporag.html">17</a>, <a href="18-paths-and-agents.html">18</a></td></tr>
+    <tr><td>Global sensemaking</td><td>Q4 top 5 is noise; evidence spans 8 documents</td><td>No chunk is about the whole corpus</td><td>Community detection, community reports, map-reduce global search, hierarchical summaries</td><td><a href="11-community-detection.html">11</a>, <a href="12-community-reports.html">12</a>, <a href="15-global-search.html">15</a></td></tr>
+    <tr><td>Aggregation</td><td>Q5 gets one risk out of five</td><td><em>k</em> caps how many list items can appear</td><td>Entity-centric context tables; claims; community-level answers</td><td><a href="10-claims-temporal.html">10</a>, <a href="14-local-search.html">14</a>, <a href="15-global-search.html">15</a></td></tr>
+    <tr><td>Aliases and coreference</td><td>“Sentinel program”, “TWI”, “the new owner”</td><td>Different surface forms for one entity</td><td>Extraction with descriptions; entity resolution and merging</td><td><a href="08-entity-relation-extraction.html">8</a>, <a href="09-entity-resolution.html">9</a></td></tr>
+    <tr><td>Split relationships</td><td>“Spring 2025” and “Project Tern” in different 120-word chunks</td><td>Chunk boundaries cut sentences and paragraphs</td><td>Relationships as first-class records with provenance; text units sized for extraction</td><td><a href="07-chunking-text-units.html">7</a>, <a href="08-entity-relation-extraction.html">8</a></td></tr>
+    <tr><td>Stale facts</td><td>Q6: 2022 “CTO Jonas Vehl” competes with 2026 “Priya is our CTO”</td><td>Similarity ignores time</td><td>Claims with dates; bi-temporal edges; as-of queries</td><td><a href="10-claims-temporal.html">10</a>, <a href="27-incremental-temporal.html">27</a></td></tr>
+    <tr><td>Top-k dilution</td><td>Duplicate Series B chunks; Series A boilerplate on “Kestrel Labs”</td><td>Similarity rewards repetition and hub words</td><td>Token-budgeted context across entities, relations and sources; reranking; hybrid fusion</td><td><a href="14-local-search.html">14</a>, <a href="21-hybrid-design-patterns.html">21</a>, <a href="22-context-construction.html">22</a></td></tr>
+    <tr><td>Vocabulary mismatch</td><td>“CTO” vs. “chief technology officer” scores 0 with hashing</td><td>Lexical embedder; or exact names blurred by neural ones</td><td>Neural embeddings plus BM25 with rank fusion; entity-name matching</td><td><a href="02-vector-rag.html">2</a>, <a href="21-hybrid-design-patterns.html">21</a></td></tr>
+    <tr><td>Unexplainable answers</td><td>A correct answer to Q1 cannot show the chain it used</td><td>Context is a bag of chunks, not a path</td><td>Path-based context and provenance for every hop</td><td><a href="18-paths-and-agents.html">18</a>, <a href="21-hybrid-design-patterns.html">21</a>, <a href="23-graph-reasoning.html">23</a></td></tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+  <span class="callout-title">GraphRAG is not free, and not always better</span>
+  <p>Every fix in the right-hand columns costs indexing time and LLM calls, adds components that can fail, and can lose to vector RAG on simple lookups like question 7. The goal for the rest of the course is to know which failures your questions hit and to pay only for the techniques that fix them. <a href="25-evaluation.html">Chapter 25</a> and <a href="26-cost-scaling.html">Chapter 26</a> make that trade-off measurable.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 3.1 <span class="level">Warm-up</span></h4>
+  <p>For question 1, by hand: (a) list the bridge entity between each consecutive pair of the three evidence documents (07, 08, 09); (b) using the tokenized question <code>kestrel, labs, start, project, tern</code>, state which of those words each of the three documents contains, and explain why the memo still ranks only 11th.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) 07 → 08: <strong>Deepcast</strong> (acquired in 07; will not renew in 08). 08 → 09: <strong>Deepcast</strong> again (its sonar is what Tern replaces), plus the in-house sonar module the memo proposes, which becomes <strong>Project Tern</strong>. Document 08 never names the project; it only proposes “a dedicated internal engineering project”. Linking the proposal to Tern relies on the blog's dates and its statement that Deepcast units are no longer available. The 07 → 08 link also requires resolving “the new owner” to Marlow Dynamics.</p>
+    <p>(b) Document 07 contains only <code>labs</code>, and that only by coincidence (“university labs”). Document 08 contains <code>kestrel, labs, start, project</code>. Document 09 contains <code>kestrel, labs, project, tern</code>.</p>
+    <p>The memo shares four of five words yet ranks 11th because cosine similarity normalizes by vector length. The memo's first chunk has 300 words of supply-chain detail, so the four shared words are a small fraction of its vector. Short, name-dense chunks such as the Series A boilerplate, which repeats “Kestrel Labs” many times, point more directly at a question that says “Kestrel Labs”. And the memo lacks <code>tern</code>, the most distinctive word in the question.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 3.2 <span class="level">Core</span></h4>
+  <p>Test how fragile question 2's success is. Build the Chapter 2 index twice: once on the full corpus and once without <code>10_brightwater_series_b</code>. For each, print the top 5 for question 2 and check whether any retrieved chunk says Lena Park sits on Kestrel's board. Then find the rank of the best chunk from <code>02_brightwater_series_a</code> in the reduced index.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import re
+from ch02_vector_rag import VectorIndex
+from minigraphrag.chunking import chunk_documents, load_documents
+from minigraphrag.embeddings import HashingEmbedder
+from minigraphrag.vector_store import VectorStore
+
+Q2 = "Which investor's board member oversees the company whose drones detected the Halden Reef bleaching?"
+BOARD = re.compile(r"Lena Park[^.]*board")
+
+def index_from(docs, emb):
+    units = chunk_documents(docs, 300, 50)
+    store = VectorStore()
+    store.add([u.id for u in units], emb.embed([u.text for u in units]), [{"doc_id": u.doc_id} for u in units])
+    return VectorIndex({u.id: u for u in units}, store, emb)
+
+emb = HashingEmbedder()
+docs = load_documents("data/corpus")
+for name, subset in [("full", docs), ("without doc 10", {k: v for k, v in docs.items() if k != "10_brightwater_series_b"})]:
+    idx = index_from(subset, emb)
+    ranked = idx.text_unit_store.search(emb.embed([Q2])[0], k=len(idx.text_units))
+    top5 = [uid for uid, _, _ in ranked[:5]]
+    has_board = any(BOARD.search(" ".join(idx.text_units[u].text.split())) for u in top5)
+    series_a = next(r + 1 for r, (uid, _, _) in enumerate(ranked) if uid.startswith("02_"))
+    print(name, top5, "board fact:", has_board, "best Series A rank:", series_a)</code></pre>
+    <p>Full corpus: top 5 are <code>06-000</code>, <code>04-000</code>, <code>05-001</code>, <code>10-000</code>, <code>01-000</code>; the board fact is present (from <code>10-000</code>). Without document 10: <code>06-000</code>, <code>04-000</code>, <code>05-001</code>, <code>01-000</code>, <code>06-001</code>; no board fact. The best Series A chunk ranks <strong>11th</strong> of 22.</p>
+    <p>Interpretation: the “investor” hop is only reachable when some chunk happens to mention the board next to words from the question (drones, bleaching, Halden Reef). The Series A release is about funding in 2022, before Sentinel existed, so it shares almost nothing with the question even though it holds the needed fact. A graph answers the question with the same three hops either way, because the edge Lena Park → board member of → Kestrel Labs exists regardless of which document stated it.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 3.3 <span class="level">Core</span></h4>
+  <p>Run <code>iterative_search</code> on question 1 offline by writing a <code>ScriptedLLM</code> that returns a fixed list of follow-up queries and then <code>DONE</code>, and delegates the final answer to <code>MockLLM</code>. Try two scripts: a good follow-up (“Why are Deepcast sonar units no longer available?”) and a vague one (“Kestrel Labs sonar history”). For each, report the retrieved chunk ids and which of the three facts they contain.</p>
+  <details class="hint"><summary>Hint</summary><p>Distinguish the follow-up prompt from the answer prompt by a phrase only the follow-up prompt contains, such as “one query at a time”.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from ch02_vector_rag import build_vector_index
+from ch03_iterative import iterative_search
+from minigraphrag.embeddings import HashingEmbedder
+from minigraphrag.llm import MockLLM
+
+class ScriptedLLM:
+    def __init__(self, follow_ups):
+        self.follow_ups, self.mock = list(follow_ups), MockLLM()
+    def complete(self, prompt, system=None, json=False):
+        if "one query at a time" in prompt:
+            return self.follow_ups.pop(0) if self.follow_ups else "DONE"
+        return self.mock.complete(prompt, system=system, json=json)
+
+FACTS = {"Marlow acquired Deepcast": "07_marlow_acquires_deepcast",
+         "Deepcast ends supply": "08_kestrel_board_memo_supply",
+         "Tern replaces Deepcast sonar": "09_kestrel_eng_blog_project_tern"}
+index = build_vector_index("data/corpus", HashingEmbedder())
+q1 = "Why did Kestrel Labs start Project Tern?"
+for script in (["Why are Deepcast sonar units no longer available?"], ["Kestrel Labs sonar history"]):
+    answer, seen, calls = iterative_search(index, q1, ScriptedLLM(script), max_hops=3, k=3)
+    found = [f for f, doc in FACTS.items() if any(u.startswith(doc) for u in seen)]
+    print(script[0], seen, found, calls)</code></pre>
+    <p><strong>Good follow-up.</strong> Hop 1 retrieves <code>10_brightwater_series_b-001</code>, <code>09_kestrel_eng_blog_project_tern-000</code>, <code>05_kestrel_blog_priya_nair-000</code>. Hop 2 adds <code>08_kestrel_board_memo_supply-000</code> and <code>07_marlow_acquires_deepcast-000</code> (the Tern chunk is already seen). The script then returns DONE. All three facts are present, from five chunks and three LLM calls in total (two follow-up decisions and the answer). Coverage is document-level here: check that <code>07-000</code> actually contains the acquisition sentence, which it does.</p>
+    <p><strong>Vague follow-up.</strong> Hop 2 adds <code>03_deepcast_supply_agreement-000</code> and <code>10_brightwater_series_b-000</code>: the 2022 supply deal and more of the Series B release. Only the Tern fact is present; the memo and the Marlow article stay out of reach, at the same cost of three LLM calls. A query made of hub words (“Kestrel Labs”, “sonar”) is pulled toward the same chunks as the original question. The quality of iterative retrieval is the quality of its follow-up queries, and a vague follow-up is no better than raising <em>k</em>.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 3.4 <span class="level">Core</span></h4>
+  <p>Classify these questions from <code>questions.jsonl</code> using the failure taxonomy: which failures would vector RAG hit, and which GraphRAG technique would you reach for first? (q15) “Who was the CTO of Kestrel Labs when the Halden Reef bleaching event was detected?” (q17) “Why did the Port Avalon City Council contract Kestrel Labs?” (q19) “Which investor led Kestrel's funding both before and after the Deepcast supply disruption, and how much did those rounds total?” (q23) “Summarize the relationship between Kestrel Labs and Tidewater Institute.”</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <table>
+      <thead><tr><th>Question</th><th>Failures</th><th>First technique</th></tr></thead>
+      <tbody>
+        <tr><td>q15 CTO at bleaching time</td><td>Multi-hop (event date, then role at that date) and stale facts: the 2026 “Priya is CTO” chunk looks most similar to “CTO” but is the wrong time</td><td>Temporal claims with validity intervals, then an as-of lookup at August 2024 (Chapter 10)</td></tr>
+        <tr><td>q17 Why the council contract</td><td>Multi-hop across the council minutes and the Series B release (Ocean Health Act passed July 2025, requires quarterly monitoring); “Why” questions match the effect document better than the cause</td><td>Local search from the entities Port Avalon City Council and Kestrel Labs, expanding to the Ocean Health Act (Chapter 14)</td></tr>
+        <tr><td>q19 Investor before and after disruption</td><td>Multi-hop plus aggregation: two funding rounds in two documents, a date comparison against the disruption in a third, and arithmetic ($12M + $40M = $52M). Note the Series B release itself states the $52M total, which vector RAG might retrieve by luck</td><td>Graph edges Brightwater Capital → invested in → Kestrel Labs with round and date attributes; path or local search over them (Chapters 10 and 14)</td></tr>
+        <tr><td>q23 Kestrel and Tidewater</td><td>Global-within-a-pair: evidence in four documents (founding, Sentinel launch, bleaching note, council minutes); aliases “TWI” and “the institute”</td><td>Entity resolution for TWI, then a relationship-centric summary over all edges between the two entities, or the report of the community that contains both (Chapters 9 and 12)</td></tr>
+      </tbody>
+    </table>
+    <p>Notice that almost no real question hits exactly one failure. That is why GraphRAG systems combine techniques, and why <a href="21-hybrid-design-patterns.html">Chapter 21</a> exists.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 3.5 <span class="level">Stretch</span></h4>
+  <p>Build a poor man's graph without an LLM: for each chunk, find entity mentions with <code>minigraphrag.llm.find_mentions</code> (the mock's gazetteer). Retrieve the top 3 chunks, collect the entities they mention (excluding entities named in the question), and add the 4 other chunks that share the most of those entities. Compare supporting-document recall with plain top-7 at the same budget of 7 chunks. Then weight shared entities by inverse document frequency, log(<em>N</em> / df), and compare again. Does question 1 now retrieve the Marlow article?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import collections, json, math
+from ch02_vector_rag import build_vector_index
+from minigraphrag.embeddings import HashingEmbedder
+from minigraphrag.llm import find_mentions
+
+index = build_vector_index("data/corpus", HashingEmbedder())
+store, units = index.text_unit_store, index.text_units
+mentions = {uid: {m[2].upper() for m in find_mentions(u.text)} for uid, u in units.items()}
+df = collections.Counter(e for ents in mentions.values() for e in ents)
+N = len(units)
+
+def expand(question, k=3, extra=4, idf=False):
+    qvec = index.embedder.embed([question])[0]
+    seeds = [uid for uid, _, _ in store.search(qvec, k)]
+    q_ents = {m[2].upper() for m in find_mentions(question)}
+    bridge = set().union(*(mentions[s] for s in seeds)) - q_ents
+    weight = (lambda e: math.log(N / df[e])) if idf else (lambda e: 1.0)
+    score = {uid: sum(weight(e) for e in mentions[uid] &amp; bridge) for uid in units if uid not in seeds}
+    extra_ids = sorted((u for u in score if score[u] &gt; 0), key=lambda u: -score[u])[:extra]
+    return seeds + extra_ids
+
+def recall(fn):
+    by_type = collections.defaultdict(list)
+    for q in map(json.loads, open("data/questions.jsonl")):
+        got = {units[u].doc_id for u in fn(q["question"])}
+        need = set(q["supporting_docs"])
+        by_type[q["type"]].append(len(got &amp; need) / len(need))
+    return {t: round(sum(v) / len(v), 2) for t, v in by_type.items()}
+
+print("top-7 ", recall(lambda q: [u for u, _, _ in store.search(index.embedder.embed([q])[0], 7)]))
+print("expand", recall(expand))
+print("idf   ", recall(lambda q: expand(q, idf=True)))
+print(expand("Why did Kestrel Labs start Project Tern?", idf=True))</code></pre>
+    <table>
+      <thead><tr><th>Method (7 chunks)</th><th>Single-hop</th><th>Temporal</th><th>Multi-hop</th><th>Global</th></tr></thead>
+      <tbody>
+        <tr><td>Plain top-7</td><td>0.80</td><td>0.77</td><td>0.69</td><td>0.39</td></tr>
+        <tr><td>Top-3 + co-mention expansion</td><td>0.80</td><td>0.67</td><td>0.73</td><td>0.41</td></tr>
+        <tr><td>Top-3 + IDF-weighted expansion</td><td>0.80</td><td>0.67</td><td>0.77</td><td>0.46</td></tr>
+      </tbody>
+    </table>
+    <p>Multi-hop recall improves from 0.69 to 0.77 at the same chunk budget, and global recall rises a little. Temporal recall drops, because expansion displaces lower-ranked but directly relevant chunks.</p>
+    <p>Question 1 still does <strong>not</strong> retrieve the Marlow article. The expanded set is <code>10-001, 09-000, 05-000</code> plus <code>12-001, 12-000, 10-000, 08-000</code>: the memo arrives, the acquisition article does not. The seeds mention seventeen bridge entities, most of them common (Port Avalon, Sentinel, Jonas Vehl and Halden Reef each appear in 13 or 14 of the 24 chunks), and chunks that mention many of them outrank the Marlow article, which shares only Deepcast, Marlow and Marlow Dynamics with the seeds, the last two being one company the gazetteer has not merged. With IDF weights it scores 4.3; the weakest chunk that made the cut scores 5.2. IDF helps but cannot overcome a pile of moderately common entities.</p>
+    <p>What this tells you about the design of real GraphRAG: linking <em>chunks</em> by co-mention is too coarse. You want <em>entities</em> as nodes with typed, described relationships (Marlow Dynamics —acquired→ Deepcast), retrieval that starts from the entities the question names, and scoring that spreads relevance along edges while discounting hubs. That is local search (Chapter 14) and Personalized PageRank (Chapter 17).</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why does the Marlow acquisition article rank 21st of 24 for “Why did Kestrel Labs start Project Tern?”</p>
+  <ol>
+    <li>The article is too long to embed</li>
+    <li>The hashing embedder has too few dimensions</li>
+    <li data-correct>The article never mentions Kestrel Labs or Project Tern; it relates to the answer only through the shared entity Deepcast</li>
+    <li>The article was published after Project Tern started</li>
+  </ol>
+  <div class="explain">Hop-1 evidence resembles hop-2 evidence, not the question. A better embedder cannot invent similarity between a question about Tern and an article that is not about Tern.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Vector RAG answered question 2 at <em>k</em> = 5. What made that possible?</p>
+  <ol>
+    <li data-correct>A redundant press release restated the board fact near a mention of the bleaching event</li>
+    <li>Cosine similarity follows multi-hop chains when <em>k</em> ≥ 5</li>
+    <li>The question contains all the entity names in the path</li>
+    <li>The hashing embedder resolves aliases</li>
+  </ol>
+  <div class="explain">Remove the Series B release and the board fact drops out of the top 5; the Series A release, which also states it, ranks 11th.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">How does the GraphRAG paper characterize “What are the main themes in the dataset?”</p>
+  <ol>
+    <li>A multi-hop question answerable with path retrieval</li>
+    <li>A keyword search task</li>
+    <li>A temporal reasoning task</li>
+    <li data-correct>A query-focused summarization task over the whole corpus, which retrieving a few records cannot answer</li>
+  </ol>
+  <div class="explain">Global sensemaking needs a summary of the corpus, which GraphRAG pre-computes as community reports and combines with map-reduce.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Shrinking chunks from 300 to 120 words made question 1 worse (0 of 3 facts even at <em>k</em> = 10). Which mechanism explains it best?</p>
+  <ol>
+    <li>Smaller chunks have fewer tokens, so they cost less</li>
+    <li data-correct>Relationships spanning more than the overlap are split across vectors, and fragments that repeat the question's names crowd the top ranks</li>
+    <li>Overlap is disabled for small chunks</li>
+    <li>The embedder cannot handle short texts</li>
+  </ol>
+  <div class="explain">Smaller chunks help single-fact matching and hurt facts that need their surrounding sentences. Overlap only protects spans shorter than the overlap.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which is the strongest argument that iterative retrieval does not make GraphRAG unnecessary?</p>
+  <ol>
+    <li>Iterative retrieval never finds multi-hop evidence</li>
+    <li>LLMs cannot write search queries</li>
+    <li data-correct>It rediscovers the same links at query time for every question, with compounding errors, and does not help global questions</li>
+    <li>It requires a vector database</li>
+  </ol>
+  <div class="explain">On question 1 it works with a good follow-up. But its cost, fragility and inability to summarize the corpus are exactly what indexing-time graph construction addresses.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Question 6 retrieves both a 2022 chunk calling Jonas Vehl CTO and a 2026 chunk naming Priya Nair. Which technique addresses the root cause?</p>
+  <ol>
+    <li>A larger <em>k</em></li>
+    <li>A neural embedder</li>
+    <li>Maximal marginal relevance</li>
+    <li data-correct>Facts with validity times, so retrieval can ask what was true as of a date</li>
+  </ol>
+  <div class="explain">Similarity has no notion of time. Claims and bi-temporal edges (Chapters 10 and 27) make “current” and “as of” explicit.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Aren't these failures just artifacts of the toy hashing embedder?</summary>
+  <div><p>Some are: vocabulary mismatch (“CTO” vs. “chief technology officer”) and some alias cases improve a lot with a neural embedder. The structural ones do not. The Marlow article is not about Kestrel or Tern in any embedding space; “main themes” is not answered by any single chunk; similarity has no notion of time; and a chunk boundary splits a relationship regardless of how the halves are embedded. Exercise: rerun this chapter's tables with <code>get_embedder("st:all-MiniLM-L6-v2")</code> or <code>"openai"</code> and see which rows change.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Would a long-context model with the whole corpus in the prompt avoid all this?</summary>
+  <div><p>For a 12-document corpus, mostly yes, and Chapter 1 recommends trying it. Every fact is present, so the retrieval failures disappear, leaving the reasoning ones: connecting facts across documents, preferring the newest statement, synthesizing themes. Strong models do reasonably well at those on 7,000 tokens. The approach stops working when the corpus outgrows the window or the budget, which is the normal situation for the private data RAG is built for.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Can a reranker fix multi-hop retrieval?</summary>
+  <div><p>A cross-encoder reranker, which reads the question and a chunk together, ranks the candidates it is given more accurately than cosine similarity does. It still scores each chunk against the question on its own, and it only reranks what the first stage retrieved. The Marlow article at rank 21 is neither in the candidate set nor relevant to the question on its own. Rerankers help precision; they do not create bridges.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How common are multi-hop and global questions in practice?</summary>
+  <div><p>It depends heavily on the application. Customer support over product docs is dominated by lookups. Research, due diligence, investigations, incident analysis and “what's going on in these reports?” tasks are dominated by multi-hop and sensemaking questions. Benchmarks such as HotpotQA and MultiHop-RAG were built to test questions whose evidence sits in several documents, which single-hop benchmarks do not exercise. Log your users' real questions and classify a sample before deciding.</p></div>
+</details>
+
+<details class="qa">
+  <summary>If a document already connects the dots, like the 2026 interview, why build a graph?</summary>
+  <div><p>Because you cannot rely on it. Such documents cover a few popular connections, go stale, and are absent for exactly the new questions that make analysis valuable. A graph built from all documents contains the connections whether or not anyone wrote them up, and it can show the path it used, which a summary document cannot.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a failure casebook for your baseline</h3>
+  <p>Turn this chapter's analysis into a reusable diagnostic you will rerun after every GraphRAG technique you build.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A script that, for every question in <code>questions.jsonl</code>, logs the top-<em>k</em> chunk ids with scores, the ranks of all supporting documents and whether each is retrieved</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A fact-level check for questions 1, 2, 3 and 6: a list of regex patterns per required fact, and a report of which facts reached the context</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A casebook entry for at least five failing questions, each labeled with failure types from the taxonomy table and one sentence of evidence</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The iterative search from this chapter run on the multi-hop questions with a real model (or scripted follow-ups), with LLM calls and fact coverage compared against one-shot retrieval</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A prediction, written now, of which GraphRAG chapter will fix each casebook entry, to check later</span></li>
+  </ul>
+  <p><strong>Done when</strong> one command prints a per-question failure report and you have a written list of predictions to test in Parts 2 and 3.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Vector retrieval scores each chunk against the question independently, so evidence linked only through a shared entity is invisible.</li>
+    <li>Multi-hop successes often depend on some document having already written the connection down. Remove it and retrieval fails.</li>
+    <li>Global questions are query-focused summarization over the corpus; no chunk is their nearest neighbor.</li>
+    <li>Aliases, chunk boundaries, stale statements and hub words each lose relationships in their own way.</li>
+    <li>Raising <em>k</em> and iterating queries help partially, at growing cost and fragility, and do not help sensemaking.</li>
+    <li>GraphRAG moves linking, resolution and summarization to indexing time. Use the taxonomy to decide which techniques your questions need.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Larson and Truitt (Microsoft Research). <a href="https://www.microsoft.com/en-us/research/blog/graphrag-unlocking-llm-discovery-on-narrative-private-data/">GraphRAG: Unlocking LLM discovery on narrative private data</a>. <span class="venue">Microsoft Research Blog, 2024</span></li>
+  <li>Trivedi et al. <a href="https://arxiv.org/abs/2212.10509">Interleaving Retrieval with Chain-of-Thought Reasoning for Knowledge-Intensive Multi-Step Questions</a>. <span class="venue">ACL 2023; arXiv 2212.10509</span></li>
+  <li>Press et al. <a href="https://arxiv.org/abs/2210.03350">Measuring and Narrowing the Compositionality Gap in Language Models</a> (Self-Ask). <span class="venue">Findings of EMNLP 2023; arXiv 2210.03350</span></li>
+  <li>Yao et al. <a href="https://arxiv.org/abs/2210.03629">ReAct: Synergizing Reasoning and Acting in Language Models</a>. <span class="venue">ICLR 2023; arXiv 2210.03629</span></li>
+  <li>Yang et al. <a href="https://arxiv.org/abs/1809.09600">HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering</a>. <span class="venue">EMNLP 2018; arXiv 1809.09600</span></li>
+  <li>Tang and Yang. <a href="https://arxiv.org/abs/2401.15391">MultiHop-RAG: Benchmarking Retrieval-Augmented Generation for Multi-Hop Queries</a>. <span class="venue">arXiv 2401.15391, 2024</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

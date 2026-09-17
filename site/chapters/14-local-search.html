@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local search: entity-anchored retrieval | Graph RAG from Scratch</title>
+<meta name="description" content="Implement GraphRAG local search: seed entities from embeddings, rank relationships, text units and reports around them, split a token budget, and answer with checkable citations.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="14-local-search" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Local search: entity-anchored retrieval</h1>
+  <p class="lede">Local search answers questions about specific things by starting from the entities a query is about and collecting the evidence around them. You will implement GraphRAG's version step by step and trace it by hand on “Why did Kestrel Labs start Project Tern?”</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Map a query to seed entities with description embeddings, and explain why names alone are not enough</li>
+      <li>Rank candidate relationships (in-network, then out-of-network by shared links and rank), text units and community reports around the seeds</li>
+      <li>Split a context window into proportional token budgets and fill each slice best-first</li>
+      <li>Render context as id-bearing tables and verify the model's <code>[Data: …]</code> citations</li>
+      <li>Diagnose the main failure modes, wrong seeds and hub flooding, and apply fixes</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why anchor retrieval on entities</h2>
+<p>Ask plain vector RAG (<a href="02-vector-rag.html">Chapter 2</a>) “Why did Kestrel Labs start Project Tern?” and it retrieves the chunks that look most like the question: the engineering blog post announcing Tern, and perhaps the Series B press release that mentions it. The blog post says Deepcast units “will no longer be available to us” but not why. The explanation is in a trade press article about Marlow Dynamics buying Deepcast, which never mentions Kestrel Labs or Tern. By similarity to the question it ranks low. That is the multi-hop failure from <a href="03-where-rag-breaks.html">Chapter 3</a>.</p>
+<p>The graph already contains the missing link. The Tern chunk produced the edge PROJECT TERN – DEEPCAST, and the trade article produced MARLOW DYNAMICS – DEEPCAST. Local search exploits this in three moves:</p>
+<ol>
+  <li><strong>Anchor.</strong> Find the entities the question is about by comparing the query with entity descriptions.</li>
+  <li><strong>Expand.</strong> Collect what is attached to those entities: relationships, including ones that lead one step outside the anchor set, the chunks they were extracted from, their communities' reports and their claims.</li>
+  <li><strong>Budget.</strong> Rank each pool, give each pool a share of the context window, and fill it best-first.</li>
+</ol>
+<p>The result is a context that follows the structure of the corpus rather than the wording of the question. GraphRAG's documentation describes the method as suited to questions “that require an understanding of specific entities mentioned in the input documents”. For themes across the whole corpus you want <a href="15-global-search.html">global search</a> instead.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 330" role="img" aria-labelledby="ls-pools-title">
+      <title id="ls-pools-title">Local search: seed entities feed four candidate pools, each ranked by its own rule, then packed into one context window</title>
+      <defs>
+        <marker id="ls-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker>
+      </defs>
+      <rect class="d-box" x="10" y="130" width="134" height="60" rx="6"/>
+      <text class="d-text bold" x="22" y="154">Query</text>
+      <text class="d-text small" x="22" y="174">embed, top-k entities</text>
+      <rect class="d-box node" x="160" y="130" width="140" height="60" rx="6"/>
+      <text class="d-text bold" x="172" y="154">Seed entities</text>
+      <text class="d-text small" x="172" y="174">ordered by similarity</text>
+      <line class="d-line" x1="144" y1="160" x2="158" y2="160" marker-end="url(#ls-arrow)"/>
+
+      <rect class="d-box edge" x="320" y="10" width="200" height="62" rx="6"/>
+      <text class="d-text bold" x="332" y="32">Relationships</text>
+      <text class="d-text small" x="332" y="50">in-network first, then outside</text>
+      <text class="d-text small" x="332" y="64">by shared links, then rank</text>
+      <rect class="d-box" x="320" y="88" width="200" height="62" rx="6"/>
+      <text class="d-text bold" x="332" y="110">Text units</text>
+      <text class="d-text small" x="332" y="128">by seed order, then how many</text>
+      <text class="d-text small" x="332" y="142">of the seed's edges they support</text>
+      <rect class="d-box comm" x="320" y="166" width="200" height="62" rx="6"/>
+      <text class="d-text bold" x="332" y="188">Community reports</text>
+      <text class="d-text small" x="332" y="206">by how many seeds are members,</text>
+      <text class="d-text small" x="332" y="220">then report rank</text>
+      <rect class="d-box" x="320" y="244" width="200" height="62" rx="6"/>
+      <text class="d-text bold" x="332" y="266">Claims</text>
+      <text class="d-text small" x="332" y="284">about the seed entities,</text>
+      <text class="d-text small" x="332" y="298">with dates and status</text>
+      <line class="d-line" x1="300" y1="150" x2="318" y2="41" marker-end="url(#ls-arrow)"/>
+      <line class="d-line" x1="300" y1="155" x2="318" y2="119" marker-end="url(#ls-arrow)"/>
+      <line class="d-line" x1="300" y1="165" x2="318" y2="197" marker-end="url(#ls-arrow)"/>
+      <line class="d-line" x1="300" y1="170" x2="318" y2="275" marker-end="url(#ls-arrow)"/>
+
+      <rect class="d-box ghost" x="560" y="10" width="110" height="296" rx="6"/>
+      <text class="d-text bold" x="572" y="32">Context</text>
+      <rect class="d-box comm" x="572" y="46" width="86" height="40" rx="4"/>
+      <text class="d-text small" x="580" y="70">reports 15%</text>
+      <rect class="d-box edge" x="572" y="94" width="86" height="80" rx="4"/>
+      <text class="d-text small" x="580" y="130">entities and</text>
+      <text class="d-text small" x="580" y="144">relationships</text>
+      <text class="d-text small" x="580" y="158">(+ claims) 35%</text>
+      <rect class="d-box" x="572" y="182" width="86" height="112" rx="4"/>
+      <text class="d-text small" x="580" y="240">text units 50%</text>
+      <line class="d-line" x1="520" y1="41" x2="570" y2="134" marker-end="url(#ls-arrow)"/>
+      <line class="d-line" x1="520" y1="119" x2="570" y2="238" marker-end="url(#ls-arrow)"/>
+      <line class="d-line" x1="520" y1="197" x2="570" y2="66" marker-end="url(#ls-arrow)"/>
+      <line class="d-line" x1="520" y1="275" x2="570" y2="150" marker-end="url(#ls-arrow)"/>
+    </svg>
+  </div>
+  <figcaption>The shape of local search. Every pool is ranked independently and then cut to its share of the window. The percentages are GraphRAG's configuration defaults (community 0.15, text units 0.5, the remainder for entities, relationships and claims); <code>minigraphrag</code> uses the same split.</figcaption>
+</figure>
+
+<h2>The algorithm, step by step</h2>
+<p>This section follows Microsoft GraphRAG's <code>LocalSearchMixedContext.build_context</code> and <code>minigraphrag.search.local.build_local_context</code> side by side. They agree on the structure; where the details differ, both are shown.</p>
+
+<h3>Step 1: map the query to seed entities</h3>
+<p>Embed the query <em>q</em> and score every entity <em>e</em> by the cosine similarity between the query vector and the vector of the entity's embedding text, <code>name: description</code> (<a href="13-storage-indexing.html">Chapter 13</a>):</p>
+<p style="text-align:center"><em>sim</em>(<em>q</em>, <em>e</em>) = (<strong>v</strong><sub><em>q</em></sub> · <strong>v</strong><sub><em>e</em></sub>) / (‖<strong>v</strong><sub><em>q</em></sub>‖ ‖<strong>v</strong><sub><em>e</em></sub>‖)</p>
+<p>Take the top <em>k</em> as seeds, in similarity order. That order matters later: it decides whose text units go first. GraphRAG's details:</p>
+<ul>
+  <li>It asks the vector store for <em>k</em> × 2 results (an “oversample scaler” of 2), so that excluded entities can be dropped and <em>k</em> still remain. The configured default is <code>top_k_entities = 10</code>.</li>
+  <li><code>exclude_entity_names</code> removes entities you never want as seeds; <code>include_entity_names</code> forces entities in, placed before the similarity matches.</li>
+  <li>If the query is empty, it falls back to the highest-rank entities.</li>
+</ul>
+<p><code>minigraphrag</code> adds one cheap boost GraphRAG does not have: any entity whose name or alias appears literally in the query goes first, and among those the entity with the fewest source text units leads, because a rare name says more about the question than a hub does. Embeddings are good at meaning and surprisingly bad at rare proper nouns, especially the offline <code>HashingEmbedder</code>, so this rescues questions that name their subject outright.</p>
+
+<pre data-file="minigraphrag/search/local.py"><code class="language-python">def map_query_to_entities(index, query: str, top_k: int = 10, include_name_matches: bool = True) -&gt; list[str]:
+    """Entities most relevant to the query, by description embedding.
+
+    GraphRAG uses embeddings only; `include_name_matches` additionally puts
+    entities whose name or alias literally occurs in the query first, a cheap
+    and very effective boost.
+    """
+    G = index.graph
+    hits = [name for name, _, _ in index.entity_store.search(index.embedder.embed([query])[0], k=top_k * 2)]
+    mentioned = []
+    if include_name_matches:
+        q = query.upper()
+        for n, d in G.nodes(data=True):
+            if any(re.search(rf"(?&lt;!\w){re.escape(s)}(?!\w)", q) for s in [n, *d.get("aliases", [])]):
+                mentioned.append(n)
+    # Rarer entities first: "PROJECT TERN" says more about the question than the hub "KESTREL LABS".
+    mentioned.sort(key=lambda n: len(G.nodes[n].get("source_ids", [])))
+    return list(dict.fromkeys(mentioned + hits))[:top_k]</code></pre>
+
+<h3>Step 2: rank candidate relationships</h3>
+<p>Let <em>S</em> be the set of seeds. Every relationship touching <em>S</em> is a candidate, and they fall into two groups:</p>
+<ul>
+  <li><strong>In-network</strong>: both endpoints are in <em>S</em>. These describe how the seeds relate to each other, which is usually what the question is about. They all go first, sorted by rank (GraphRAG's relationship rank is <code>combined_degree</code>, the sum of the endpoint degrees).</li>
+  <li><strong>Out-of-network</strong>: one endpoint is outside <em>S</em>. These are how local search reaches one hop beyond its seeds. For each outside entity <em>x</em>, count its <em>links</em>: the number of distinct seeds it is connected to. Sort out-of-network relationships by (links of the outside endpoint, rank), both descending.</li>
+</ul>
+<p>The links count is the heart of the method. An outside entity connected to several seeds is a <em>bridge</em>: it probably sits on the path the question is asking about. Out-of-network relationships are then cut to a budget of <code>top_k_relationships</code> × |<em>S</em>|; in-network ones are never cut at this stage. The configured default for <code>top_k_relationships</code> is 10.</p>
+
+<pre data-file="graphrag/query/context_builder/local_context.py (abridged)"><code class="language-python"># First priority: relationships between selected entities
+in_network = get_in_network_relationships(selected_entities, relationships, ranking_attribute)
+# Second priority: relationships from a selected entity to an outside entity
+out_network = get_out_network_relationships(selected_entities, relationships, ranking_attribute)
+
+# links = number of selected entities each outside entity is connected to
+for rel in out_network:
+    rel.attributes["links"] = out_network_entity_links[outside_endpoint(rel)]
+out_network.sort(key=lambda r: (r.attributes["links"], r.rank), reverse=True)
+
+relationship_budget = top_k_relationships * len(selected_entities)
+return in_network + out_network[:relationship_budget]</code></pre>
+
+<p><code>minigraphrag</code> implements the same two groups but breaks ties among out-of-network edges by edge <code>weight</code> (summed extraction strength) instead of combined degree, and it applies only the token budget, not the count budget:</p>
+
+<pre data-file="minigraphrag/search/local.py"><code class="language-python">in_network = [(u, v) for u, v in G.subgraph(entities).edges()]
+out_network = [(e, n) for e in entities for n in G.neighbors(e) if n not in selected]
+# External neighbours linked to several selected entities are the best bridges.
+links = Counter(n for _, n in out_network)
+out_network.sort(key=lambda e: (-links[e[1]], -G.edges[e].get("weight", 0)))
+edges = list(dict.fromkeys(tuple(e) for e in in_network + out_network))</code></pre>
+
+<div class="callout note">
+  <span class="callout-title">Ranking by combined degree favors hubs</span>
+  <p>Combined degree is a cheap proxy for importance: an edge between two well-connected entities is probably central. It is also biased toward whatever is attached to the biggest hub. Keep that in mind; it is the root of the hub flooding failure later in this chapter.</p>
+</div>
+
+<h3>Step 3: rank candidate text units</h3>
+<p>Candidate text units are the <code>source_ids</code> of the seed entities. GraphRAG walks seeds in similarity order. For each seed it takes that seed's text units not already taken and scores each by how many of <em>that seed's</em> relationships list the unit as a source. The final order is by (seed position ascending, relationship count descending). The effect: all chunks of the best seed come first, and within a seed, chunks that support many of its edges beat chunks that merely mention it.</p>
+<pre data-file="graphrag/query/structured_search/local_search/mixed_context.py (abridged)"><code class="language-python">for index, entity in enumerate(selected_entities):
+    entity_relationships = [r for r in relationships if entity.title in (r.source, r.target)]
+    for text_id in entity.text_unit_ids or []:
+        if text_id not in seen and text_id in text_units:
+            unit = text_units[text_id]
+            num_relationships = count_relationships(entity_relationships, unit)
+            seen.add(text_id)
+            unit_info_list.append((unit, index, num_relationships))
+
+# sort by entity order and the number of relationships desc
+unit_info_list.sort(key=lambda x: (x[1], -x[2]))</code></pre>
+<p><code>minigraphrag</code>'s variant keeps the seed order but counts, for each unit, how many of <em>all selected</em> relationships (in-network and out-of-network) cite it. That lets a chunk supporting a bridge edge rise within its seed's group.</p>
+
+<h3>Step 4: rank community reports and gather claims</h3>
+<p>For each seed, look up the communities it belongs to and count matches per community. Sort communities by (number of seeds in it, report rank) descending. A community that contains four of your seeds is almost certainly about your question; its report gives the model background that no single chunk states, such as “Kestrel's supply chain depended on one vendor”.</p>
+<p>Claims (GraphRAG calls them covariates) are filtered to those whose subject is a seed. They add dated, status-tagged facts, which is especially useful for temporal questions such as “Who supplied Kestrel's sonar in 2024?”. <code>minigraphrag</code>'s <code>build_local_context</code> does not include claims yet; the project at the end of this chapter adds them.</p>
+
+<h3>Step 5: split the budget and fill each slice</h3>
+<p>Given a total <em>T</em> tokens for data (after any conversation history is subtracted), GraphRAG computes three slices:</p>
+<table>
+  <thead><tr><th>Slice</th><th>Formula</th><th>GraphRAG defaults, <em>T</em> = 12,000</th><th><code>minigraphrag</code> defaults, <em>T</em> = 8,000</th></tr></thead>
+  <tbody>
+    <tr><td>Community reports</td><td>⌊<em>T</em> × <code>community_prop</code>⌋</td><td>0.15 → 1,800</td><td>0.15 → 1,200</td></tr>
+    <tr><td>Entities, relationships, claims</td><td>⌊<em>T</em> × (1 − <code>community_prop</code> − <code>text_unit_prop</code>)⌋</td><td>0.35 → 4,200</td><td>0.35 → 2,800</td></tr>
+    <tr><td>Text units</td><td>⌊<em>T</em> × <code>text_unit_prop</code>⌋</td><td>0.5 → 6,000</td><td>0.5 → 4,000</td></tr>
+  </tbody>
+</table>
+<p>The two proportions must sum to at most 1, and GraphRAG raises an error otherwise. Each slice is filled greedily from its ranked list until the next row would overflow. Unused tokens in one slice are not handed to another. Inside the local slice, GraphRAG adds the entity table first, then grows the relationship and claim tables one seed at a time, and stops (reverting to the previous state) as soon as adding the next seed's rows would exceed the slice.</p>
+
+<div class="viz" data-viz="token-budget">
+<script type="application/json">
+{
+  "title": "Local search context budget",
+  "subtitle": "Drag the sliders; shares are renormalized",
+  "total": 12000,
+  "parts": [
+    {"label": "Community reports", "share": 0.15},
+    {"label": "Entities + relationships + claims", "share": 0.35},
+    {"label": "Text units", "share": 0.5}
+  ],
+  "note": "GraphRAG's defaults. More text units favor exact quotes and numbers; more reports favor background and themes; more relationships favor multi-hop structure. Try community 0 for fact lookups and community 40 for 'what is the situation around X' questions."
+}
+</script>
+</div>
+
+<h3>Step 6: render tables and generate</h3>
+<p>Each slice becomes a pipe-delimited table headed by <code>-----Name-----</code>, with an <code>id</code> column the model can cite. The context goes into the system prompt; the question is the user turn. Here is <code>minigraphrag</code>'s full context builder, then the generation call:</p>
+
+<pre data-file="minigraphrag/search/local.py"><code class="language-python">def build_local_context(
+    index,
+    query: str,
+    top_k_entities: int = 10,
+    max_context_tokens: int = 8000,
+    community_prop: float = 0.15,
+    text_unit_prop: float = 0.5,
+) -&gt; tuple[str, dict]:
+    """Return (context text, {table name: rows}) for local search."""
+    G = index.graph
+    entities = map_query_to_entities(index, query, top_k_entities)
+    selected = set(entities)
+
+    # --- community reports: communities containing the most selected entities first
+    counts = Counter(c.id for e in entities for c in index.communities_of(e))
+    community_rows = []
+    for cid, _ in sorted(counts.items(), key=lambda x: (-x[1], -(index.report(x[0]).rating if index.report(x[0]) else 0))):
+        report = index.report(cid)
+        if report:
+            community_rows.append([cid, report.title, report.full_content])
+    community_rows = _fill(community_rows, int(max_context_tokens * community_prop))
+
+    # --- entities and relationships share the "local" slice
+    local_budget = int(max_context_tokens * (1 - community_prop - text_unit_prop))
+    entity_rows = _fill([[G.nodes[e]["human_id"], e, G.nodes[e].get("description", ""), G.degree(e)]
+                         for e in entities], local_budget // 2)
+    in_network = [(u, v) for u, v in G.subgraph(entities).edges()]
+    out_network = [(e, n) for e in entities for n in G.neighbors(e) if n not in selected]
+    links = Counter(n for _, n in out_network)
+    out_network.sort(key=lambda e: (-links[e[1]], -G.edges[e].get("weight", 0)))
+    edges = list(dict.fromkeys(tuple(e) for e in in_network + out_network))
+    rel_rows = _fill([[G.edges[e]["human_id"], e[0], e[1], G.edges[e].get("description", ""),
+                       G.edges[e].get("weight", 0)] for e in edges],
+                     local_budget - sum(count_tokens("|".join(map(str, r))) for r in entity_rows))
+
+    # --- text units: from the best entities first, then by how many selected relationships cite them
+    rel_sources = Counter(s for e in edges for s in G.edges[e].get("source_ids", []))
+    unit_order: dict[str, tuple] = {}
+    for rank, e in enumerate(entities):
+        for uid in G.nodes[e].get("source_ids", []):
+            unit_order.setdefault(uid, (rank, -rel_sources[uid]))
+    unit_ids = sorted(unit_order, key=lambda u: unit_order[u])
+    unit_rows = _fill([[u, index.text_units[u].text] for u in unit_ids if u in index.text_units],
+                      int(max_context_tokens * text_unit_prop))
+
+    parts = []
+    if community_rows:
+        parts.append(format_table("Reports", ["id", "title", "content"], community_rows))
+    parts.append(format_table("Entities", ["id", "entity", "description", "number of relationships"], entity_rows))
+    parts.append(format_table("Relationships", ["id", "source", "target", "description", "weight"], rel_rows))
+    parts.append(format_table("Sources", ["id", "text"], unit_rows))
+    data = {
+        "reports": [dict(zip(["id", "title", "content"], r)) for r in community_rows],
+        "entities": [dict(zip(["id", "entity", "description", "degree"], r)) for r in entity_rows],
+        "relationships": [dict(zip(["id", "source", "target", "description", "weight"], r)) for r in rel_rows],
+        "sources": [dict(zip(["id", "text"], r)) for r in unit_rows],
+    }
+    return "\n\n".join(parts), data</code></pre>
+
+<pre data-file="minigraphrag/search/local.py"><code class="language-python">def local_search(index, query: str, llm: LLM, top_k_entities: int = 10, max_context_tokens: int = 8000,
+                 community_prop: float = 0.15, text_unit_prop: float = 0.5,
+                 response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; SearchResult:
+    context, data = build_local_context(index, query, top_k_entities, max_context_tokens, community_prop, text_unit_prop)
+    answer = generate_answer(llm, query, context, response_type)
+    sources = doc_ids_for_units(index, [s["id"] for s in data["sources"]])
+    return SearchResult(answer, "local", context, data, sources, llm_calls=1)</code></pre>
+
+<p>The system prompt, <code>LOCAL_SEARCH_SYSTEM_PROMPT</code> in <code>prompts.py</code>, tells the model to answer from the tables, say so if it does not know, and cite in a fixed format: <code>[Data: &lt;dataset name&gt; (record ids)]</code>. GraphRAG's own prompt gives the example <code>[Data: Sources (15, 16), Reports (1), Entities (5, 7); Relationships (23); Claims (2, 7, 34, 46, 64, +more)]</code> and asks for at most five ids per reference, with <code>+more</code> for the rest.</p>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "One local search call",
+  "perRow": 4,
+  "stages": [
+    {"label": "Embed query", "detail": "One embedding call. With conversation history, GraphRAG appends the previous user questions to the query first."},
+    {"label": "Seed entities", "detail": "Top-k by cosine similarity to <code>name: description</code> vectors, plus include/exclude lists (and name matches in <code>minigraphrag</code>)."},
+    {"label": "Candidate pools", "detail": "Relationships touching the seeds, their text units, their communities' reports, their claims. Pure lookups, no LLM."},
+    {"label": "Rank each pool", "detail": "In-network then bridge edges; text units by seed order and edge support; reports by seed count and rank."},
+    {"label": "Split budget", "detail": "History first, then reports 15%, entities and relationships 35%, text units 50% of what remains."},
+    {"label": "Render tables", "detail": "<code>-----Entities-----</code>, <code>-----Relationships-----</code>, <code>-----Sources-----</code> with short ids."},
+    {"label": "Generate", "detail": "One LLM call: context in the system prompt, question as the user turn, citations required."},
+    {"label": "Verify citations", "detail": "Parse <code>[Data: ...]</code> references and check each id exists in the context you sent. Flag or strip the rest."}
+  ]
+}
+</script>
+</div>
+
+<h2>Worked example: why did Kestrel Labs start Project Tern?</h2>
+<p>This trace uses the clean Kestrel graph from the running example: 17 entities and 31 relationships, with <code>human_id</code>s assigned in sorted name order as <code>add_rank_attributes</code> does, and the two-level community hierarchy <code>hierarchical_communities(G, max_cluster_size=4)</code> produces for it. To keep the tables readable we use <em>k</em> = 4 seeds and <code>top_k_relationships</code> = 2. Similarity scores are illustrative values of the kind a sentence embedding model produces; the ranking steps after them are computed exactly.</p>
+
+<h3>Seeds</h3>
+<table>
+  <thead><tr><th>Order</th><th>id</th><th>Entity</th><th>Similarity</th><th>Degree</th><th>Why it matched</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>15</td><td>PROJECT TERN</td><td>0.74</td><td>5</td><td>Named in the query; description “in-house sonar module program started June 2025”</td></tr>
+    <tr><td>2</td><td>2</td><td>DEEPCAST</td><td>0.58</td><td>3</td><td>Description mentions Kestrel Labs, sonar and Project Tern</td></tr>
+    <tr><td>3</td><td>7</td><td>KESTREL LABS</td><td>0.55</td><td>11</td><td>Named in the query; long, general description dilutes the score</td></tr>
+    <tr><td>4</td><td>6</td><td>JONAS VEHL</td><td>0.47</td><td>2</td><td>Description: co-leads Project Tern</td></tr>
+    <tr><td>(5)</td><td>13</td><td>PRIYA NAIR</td><td>0.44</td><td>4</td><td>Not selected at <em>k</em> = 4</td></tr>
+    <tr><td>(6)</td><td>9</td><td>MARLOW DYNAMICS</td><td>0.39</td><td>3</td><td>Not selected: its description never mentions Tern</td></tr>
+  </tbody>
+</table>
+<p>Marlow Dynamics, the actual cause, is not a seed. Local search has to reach it by expansion.</p>
+
+<div class="viz" data-viz="graph-steps">
+<script type="application/json">
+{
+  "title": "Seed, expand, rank",
+  "subtitle": "Why did Kestrel Labs start Project Tern? (k = 4, top_k_relationships = 2)",
+  "height": 460,
+  "scoreDigits": 2,
+  "nodes": [
+    {"id": "RUIZ", "label": "DR. ANA RUIZ", "group": 2, "x": 9, "y": 9},
+    {"id": "OKAFOR", "label": "DR. MIRA OKAFOR", "group": 2, "x": 31, "y": 9},
+    {"id": "VEHL", "label": "JONAS VEHL", "group": 2, "x": 55, "y": 16},
+    {"id": "BRIGHTWATER", "label": "BRIGHTWATER CAPITAL", "group": 1, "x": 80, "y": 8},
+    {"id": "LENA", "label": "LENA PARK", "group": 2, "x": 82, "y": 25},
+    {"id": "TIDEWATER", "label": "TIDEWATER INSTITUTE", "group": 1, "x": 12, "y": 33},
+    {"id": "TERN", "label": "PROJECT TERN", "group": 4, "x": 69, "y": 38},
+    {"id": "KESTREL", "label": "KESTREL LABS", "group": 1, "x": 45, "y": 48},
+    {"id": "DEEPCAST", "label": "DEEPCAST", "group": 1, "x": 89, "y": 52},
+    {"id": "SENTINEL", "label": "PROJECT SENTINEL", "group": 4, "x": 24, "y": 62},
+    {"id": "PRIYA", "label": "PRIYA NAIR", "group": 2, "x": 72, "y": 58},
+    {"id": "OHA", "label": "OCEAN HEALTH ACT", "group": 6, "x": 43, "y": 80},
+    {"id": "MARLOW", "label": "MARLOW DYNAMICS", "group": 1, "x": 88, "y": 80},
+    {"id": "HALDEN", "label": "HALDEN REEF", "group": 5, "x": 8, "y": 84},
+    {"id": "BLEACH", "label": "2024 BLEACHING", "group": 3, "x": 26, "y": 93},
+    {"id": "PORT", "label": "PORT AVALON", "group": 5, "x": 58, "y": 93},
+    {"id": "COUNCIL", "label": "CITY COUNCIL", "group": 1, "x": 76, "y": 93}
+  ],
+  "edges": [
+    {"source": "HALDEN", "target": "BLEACH", "label": "0"},
+    {"source": "SENTINEL", "target": "BLEACH", "label": "1"},
+    {"source": "KESTREL", "target": "BRIGHTWATER", "label": "2"},
+    {"source": "BRIGHTWATER", "target": "LENA", "label": "3"},
+    {"source": "KESTREL", "target": "DEEPCAST", "label": "4"},
+    {"source": "MARLOW", "target": "DEEPCAST", "label": "5"},
+    {"source": "DEEPCAST", "target": "TERN", "label": "6"},
+    {"source": "RUIZ", "target": "HALDEN", "label": "7"},
+    {"source": "TIDEWATER", "target": "RUIZ", "label": "8"},
+    {"source": "OKAFOR", "target": "KESTREL", "label": "9"},
+    {"source": "OKAFOR", "target": "TIDEWATER", "label": "10"},
+    {"source": "HALDEN", "target": "PORT", "label": "11"},
+    {"source": "SENTINEL", "target": "HALDEN", "label": "12"},
+    {"source": "KESTREL", "target": "VEHL", "label": "13"},
+    {"source": "VEHL", "target": "TERN", "label": "14"},
+    {"source": "KESTREL", "target": "LENA", "label": "15"},
+    {"source": "KESTREL", "target": "MARLOW", "label": "16"},
+    {"source": "KESTREL", "target": "PORT", "label": "17"},
+    {"source": "KESTREL", "target": "COUNCIL", "label": "18"},
+    {"source": "KESTREL", "target": "PRIYA", "label": "19"},
+    {"source": "KESTREL", "target": "SENTINEL", "label": "20"},
+    {"source": "KESTREL", "target": "TERN", "label": "21"},
+    {"source": "PRIYA", "target": "MARLOW", "label": "22"},
+    {"source": "OHA", "target": "COUNCIL", "label": "23"},
+    {"source": "SENTINEL", "target": "OHA", "label": "24"},
+    {"source": "COUNCIL", "target": "PORT", "label": "25"},
+    {"source": "TIDEWATER", "target": "PORT", "label": "26"},
+    {"source": "PRIYA", "target": "SENTINEL", "label": "27"},
+    {"source": "PRIYA", "target": "TERN", "label": "28"},
+    {"source": "SENTINEL", "target": "TERN", "label": "29"},
+    {"source": "TIDEWATER", "target": "SENTINEL", "label": "30"}
+  ],
+  "legend": {"1": "Organization", "2": "Person", "4": "Project", "5": "Location", "3": "Event", "6": "Law"},
+  "steps": [
+    {"caption": "<strong>The Kestrel graph.</strong> 17 entities, 31 relationships. Edge labels are relationship ids. KESTREL LABS is a hub with 11 edges.", "dim": false},
+    {"caption": "<strong>Step 1: seeds.</strong> The query vector is closest to PROJECT TERN (0.74), DEEPCAST (0.58), KESTREL LABS (0.55) and JONAS VEHL (0.47). PRIYA NAIR (0.44) and MARLOW DYNAMICS (0.39) just miss.", "active": ["TERN", "DEEPCAST", "KESTREL", "VEHL"], "scores": {"TERN": 0.74, "DEEPCAST": 0.58, "KESTREL": 0.55, "VEHL": 0.47, "PRIYA": 0.44, "MARLOW": 0.39}},
+    {"caption": "<strong>Step 2a: in-network relationships.</strong> Five edges connect seeds to each other. Sorted by combined degree: 21 (16), 4 (14), 13 (13), 6 (8), 14 (7). All are kept.", "active": ["TERN", "DEEPCAST", "KESTREL", "VEHL"], "edges": ["KESTREL>TERN", "KESTREL>DEEPCAST", "KESTREL>VEHL", "DEEPCAST>TERN", "VEHL>TERN"]},
+    {"caption": "<strong>Step 2b: bridges.</strong> Three outside entities touch two seeds each (links = 2): PROJECT SENTINEL (Kestrel, Tern), PRIYA NAIR (Kestrel, Tern) and MARLOW DYNAMICS (Kestrel, Deepcast). Their six edges rank above every links = 1 edge.", "active": ["TERN", "DEEPCAST", "KESTREL", "VEHL"], "visited": ["SENTINEL", "PRIYA", "MARLOW"], "visitedEdges": ["KESTREL>TERN", "KESTREL>DEEPCAST", "KESTREL>VEHL", "DEEPCAST>TERN", "VEHL>TERN"], "edges": ["KESTREL>SENTINEL", "SENTINEL>TERN", "KESTREL>PRIYA", "PRIYA>TERN", "KESTREL>MARLOW", "MARLOW>DEEPCAST"], "scores": {"SENTINEL": "links 2", "PRIYA": "links 2", "MARLOW": "links 2"}},
+    {"caption": "<strong>Step 2c: budget.</strong> Out-of-network edges are cut to 2 × 4 = 8, ordered by (links, combined degree): 20, 19, 16, 29, 28, <strong>5</strong>, 17, 18. Edge 5, MARLOW DYNAMICS acquired DEEPCAST, gets in at position 6. Edges 9, 2 and 15 to Okafor, Brightwater and Lena Park are cut.", "active": ["TERN", "DEEPCAST", "KESTREL", "VEHL"], "visited": ["SENTINEL", "PRIYA", "MARLOW", "PORT", "COUNCIL"], "visitedEdges": ["KESTREL>TERN", "KESTREL>DEEPCAST", "KESTREL>VEHL", "DEEPCAST>TERN", "VEHL>TERN"], "edges": ["KESTREL>SENTINEL", "KESTREL>PRIYA", "KESTREL>MARLOW", "SENTINEL>TERN", "PRIYA>TERN", "MARLOW>DEEPCAST", "KESTREL>PORT", "KESTREL>COUNCIL"]},
+    {"caption": "<strong>The hub problem.</strong> Five of the eight out-of-network edges start at KESTREL LABS, because its degree inflates every combined-degree score it touches. With k = 10, the hub's 11 edges would crowd the relationship table. Exercise 14.5 fixes this.", "active": ["KESTREL"], "visited": ["BRIGHTWATER", "LENA", "OKAFOR", "PORT", "COUNCIL", "SENTINEL", "PRIYA", "MARLOW", "DEEPCAST", "TERN", "VEHL"], "edges": ["KESTREL>BRIGHTWATER", "KESTREL>LENA", "KESTREL>OKAFOR", "KESTREL>PORT", "KESTREL>COUNCIL", "KESTREL>SENTINEL", "KESTREL>PRIYA", "KESTREL>MARLOW", "KESTREL>DEEPCAST", "KESTREL>TERN", "KESTREL>VEHL"]}
+  ]
+}
+</script>
+</div>
+
+<h3>Relationships that reach the context</h3>
+<table>
+  <thead><tr><th>Position</th><th>id</th><th>Relationship</th><th>Group</th><th>Links</th><th>Combined degree</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>21</td><td>KESTREL LABS runs PROJECT TERN (since June 2025)</td><td>in-network</td><td>n/a</td><td>16</td></tr>
+    <tr><td>2</td><td>4</td><td>DEEPCAST supplied KESTREL LABS (2022–2025)</td><td>in-network</td><td>n/a</td><td>14</td></tr>
+    <tr><td>3</td><td>13</td><td>JONAS VEHL co-founded KESTREL LABS; CTO 2021–March 2026</td><td>in-network</td><td>n/a</td><td>13</td></tr>
+    <tr><td>4</td><td>6</td><td>PROJECT TERN replaces DEEPCAST sonar</td><td>in-network</td><td>n/a</td><td>8</td></tr>
+    <tr><td>5</td><td>14</td><td>JONAS VEHL co-leads PROJECT TERN</td><td>in-network</td><td>n/a</td><td>7</td></tr>
+    <tr><td>6</td><td>20</td><td>KESTREL LABS runs PROJECT SENTINEL</td><td>out</td><td>2</td><td>18</td></tr>
+    <tr><td>7</td><td>19</td><td>PRIYA NAIR is CTO of KESTREL LABS (since March 2026)</td><td>out</td><td>2</td><td>15</td></tr>
+    <tr><td>8</td><td>16</td><td>MARLOW DYNAMICS competes with KESTREL LABS</td><td>out</td><td>2</td><td>14</td></tr>
+    <tr><td>9</td><td>29</td><td>PROJECT TERN modules go into PROJECT SENTINEL drones</td><td>out</td><td>2</td><td>12</td></tr>
+    <tr><td>10</td><td>28</td><td>PRIYA NAIR co-leads PROJECT TERN</td><td>out</td><td>2</td><td>9</td></tr>
+    <tr><td>11</td><td>5</td><td>MARLOW DYNAMICS acquired DEEPCAST (April 2025) and ended outside supply</td><td>out</td><td>2</td><td>6</td></tr>
+    <tr><td>12</td><td>17</td><td>KESTREL LABS is based in PORT AVALON</td><td>out</td><td>1</td><td>15</td></tr>
+    <tr><td>13</td><td>18</td><td>PORT AVALON CITY COUNCIL contracted KESTREL LABS</td><td>out</td><td>1</td><td>14</td></tr>
+  </tbody>
+</table>
+<p>Relationship 5 has the lowest combined degree of all these edges, and it still gets in, because Marlow Dynamics touches two seeds. Without the links criterion, sorting only by combined degree would put it behind every Kestrel edge, and a tight token budget would drop it.</p>
+
+<h3>Text units</h3>
+<p>The seeds' chunks, in GraphRAG order. The relationship count is the number of the seed's own relationships whose sources include the chunk; <code>n_tokens</code> is as recorded in <code>text_units.json</code>.</p>
+<table>
+  <thead><tr><th>Position</th><th>Text unit</th><th>Seed</th><th>Seed edges supported</th><th>n_tokens</th><th>Cumulative</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>09_kestrel_eng_blog_project_tern-000</code></td><td>TERN</td><td>5</td><td>400</td><td>400</td></tr>
+    <tr><td>2</td><td><code>12_interview_leadership_change_2026-000</code></td><td>TERN</td><td>5</td><td>400</td><td>800</td></tr>
+    <tr><td>3</td><td><code>12_interview_leadership_change_2026-001</code></td><td>TERN</td><td>5</td><td>323</td><td>1,123</td></tr>
+    <tr><td>4</td><td><code>09_kestrel_eng_blog_project_tern-001</code></td><td>TERN</td><td>3</td><td>280</td><td>1,403</td></tr>
+    <tr><td>5</td><td><code>10_brightwater_series_b-001</code></td><td>TERN</td><td>3</td><td>271</td><td>1,674</td></tr>
+    <tr><td>6</td><td><code>03_deepcast_supply_agreement-000</code></td><td>DEEPCAST</td><td>1</td><td>400</td><td>2,074</td></tr>
+    <tr><td>7</td><td><code>03_deepcast_supply_agreement-001</code></td><td>DEEPCAST</td><td>1</td><td>220</td><td>2,294</td></tr>
+    <tr><td>8</td><td><code>07_marlow_acquires_deepcast-000</code></td><td>DEEPCAST</td><td>1</td><td>400</td><td>2,694</td></tr>
+    <tr><td>9</td><td><code>07_marlow_acquires_deepcast-001</code></td><td>DEEPCAST</td><td>1</td><td>274</td><td>2,968</td></tr>
+    <tr><td>10</td><td><code>08_kestrel_board_memo_supply-000</code></td><td>DEEPCAST</td><td>1</td><td>400</td><td>3,368</td></tr>
+    <tr><td>11</td><td><code>08_kestrel_board_memo_supply-001</code></td><td>DEEPCAST</td><td>0</td><td>300</td><td>3,668</td></tr>
+    <tr><td>12+</td><td>KESTREL LABS's remaining chunks, then JONAS VEHL's</td><td></td><td></td><td></td><td></td></tr>
+  </tbody>
+</table>
+<p>With GraphRAG's 6,000-token text slice, all eleven fit, plus several Kestrel chunks. With <code>minigraphrag</code>'s 4,000-token slice, the first eleven fit (3,668) and the next 400-token Kestrel chunk would overflow, so the table stops there. Either way the Marlow article (position 8) and the board memo (positions 10 and 11) are in context, and the answer is available. Exercise 14.3 shows what happens with a much smaller budget.</p>
+
+<h3>Community reports</h3>
+<p>In the <code>max_cluster_size = 4</code> hierarchy this trace uses (<a href="15-global-search.html">Chapter 15</a> draws it; <a href="12-community-reports.html">Chapter 12</a> clustered the same graph with <code>max_cluster_size = 5</code>, so its community ids differ), TERN and JONAS VEHL are in community 2 (the Tern team), DEEPCAST in community 3 (Marlow and Deepcast), KESTREL LABS in community 1 (founders and board), and all four are in their level-0 parent, community 0. Match counts: community 0 has 4, community 2 has 2, communities 1 and 3 have 1 each. Community 0's report (“Kestrel Labs: leadership, funding and supply”) goes first, then community 2's; whichever of 1 and 3 has the higher rating comes next if the 1,800-token slice still has room.</p>
+
+<h3>The context and the answer</h3>
+<pre data-file="context sent to the model (abridged)"><code>-----Reports-----
+id|title|content
+0|Kestrel Labs: leadership, funding and supply|# Kestrel Labs: leadership, funding and supply  Kestrel Labs is a Port Avalon drone maker whose ...
+2|Project Tern team|# Project Tern team  Jonas Vehl and Priya Nair co-lead Project Tern, the in-house sonar ...
+
+-----Entities-----
+id|entity|description|number of relationships
+15|PROJECT TERN|In-house sonar module program started by Kestrel Labs in June 2025 to replace Deepcast sonar in Sentinel drones ...|5
+2|DEEPCAST|Sonar hardware supplier to Kestrel Labs from 2022; acquired by Marlow Dynamics in April 2025 ...|3
+7|KESTREL LABS|Ocean-tech startup in Port Avalon founded in 2021 that builds autonomous underwater drones ...|11
+6|JONAS VEHL|Co-founder of Kestrel Labs, CTO from 2021 to March 2026, designed the Sentinel sonar array ...|2
+
+-----Relationships-----
+id|source|target|description|weight
+21|KESTREL LABS|PROJECT TERN|Kestrel Labs started Project Tern in June 2025 to build its own sonar module|9.0
+4|KESTREL LABS|DEEPCAST|Deepcast supplied sonar transducers and boards for every Sentinel drone from 2022|8.0
+...
+5|MARLOW DYNAMICS|DEEPCAST|Marlow Dynamics acquired Deepcast in April 2025 and reserved production for its own programs|9.0
+...
+
+-----Sources-----
+id|text
+09_kestrel_eng_blog_project_tern-000|# Introducing Project Tern: Our Own Sonar, Built in Port Avalon ...
+...
+07_marlow_acquires_deepcast-000|# Marlow Dynamics Buys Sonar Maker Deepcast to Lock Down Its Supply Chain ...
+08_kestrel_board_memo_supply-000|# CONFIDENTIAL: Memo to the Board of Directors ...</code></pre>
+
+<p>A good answer from a capable model looks like this:</p>
+<div class="callout example">
+  <span class="callout-title">Answer</span>
+  <p>Kestrel Labs started Project Tern because it lost its only sonar supplier. Deepcast had supplied the transducers and signal-processing boards in every Sentinel drone since 2022 [Data: Relationships (4); Sources (03_deepcast_supply_agreement-000)]. In April 2025 Marlow Dynamics, a defense-focused competitor, acquired Deepcast and said it would not renew outside supply contracts [Data: Relationships (5); Sources (07_marlow_acquires_deepcast-000)]. The CEO's board memo of 14 May 2025 called this the most serious operational risk the company had faced and recommended building an in-house module, co-led by Jonas Vehl and Priya Nair, at an estimated $3.5 million [Data: Sources (08_kestrel_board_memo_supply-000, 08_kestrel_board_memo_supply-001)]. Kestrel launched Project Tern in June 2025 to replace the Deepcast sonar in Project Sentinel [Data: Entities (15); Relationships (21, 6, 14)].</p>
+</div>
+<p>Every factual sentence carries ids that exist in the tables above, so a reviewer, or a script, can check them.</p>
+
+<h3>Checking citations</h3>
+<p>Models occasionally cite ids that were never in context, or cite a real id for a claim it does not support. You cannot cheaply detect the second, but the first is a regex away, and it is a strong hallucination signal:</p>
+<pre data-file="examples/check_citations.py"><code class="language-python">import re
+
+REF = re.compile(r"\[Data:\s*(.*?)\]", re.S)
+PART = re.compile(r"(\w+)\s*\(([^)]*)\)")
+
+def cited_ids(answer: str) -&gt; dict[str, set[str]]:
+    """{'relationships': {'4', '5'}, 'sources': {...}} from [Data: ...] references."""
+    out: dict[str, set[str]] = {}
+    for ref in REF.findall(answer):
+        for table, ids in PART.findall(ref):
+            vals = {i.strip() for i in ids.split(",") if i.strip() and i.strip() != "+more"}
+            out.setdefault(table.lower(), set()).update(vals)
+    return out
+
+def unknown_citations(answer: str, context_data: dict) -&gt; dict[str, set[str]]:
+    """Ids the answer cites that were not in the context tables it was given."""
+    known = {t: {str(row["id"]) for row in rows} for t, rows in context_data.items()}
+    return {t: ids - known.get(t, set()) for t, ids in cited_ids(answer).items()
+            if ids - known.get(t, set())}
+
+# result = local_search(index, "Why did Kestrel Labs start Project Tern?", llm)
+# print(unknown_citations(result.answer, result.context_data))   # {} when every id is real</code></pre>
+
+<h2>Conversation history</h2>
+<p>In a chat, the follow-up “And who leads it?” has no entity in it. GraphRAG handles this in two places:</p>
+<ul>
+  <li><strong>Entity mapping.</strong> Before embedding, it appends the previous user questions (up to <code>conversation_history_max_turns</code>, default 5) to the current query. “And who leads it?” plus “Why did Kestrel Labs start Project Tern?” maps to PROJECT TERN again.</li>
+  <li><strong>Context.</strong> It renders the recent turns as a conversation table at the top of the context (user turns only by default) and subtracts its tokens from the total before the proportional split.</li>
+</ul>
+<p>Both are blunt. Appending old questions keeps pulling old entities after the user changes topic: if the next question is “What does Brightwater Capital invest in?”, the Tern question still in the window drags Tern-related seeds along and wastes budget. Two common improvements: rewrite the follow-up into a standalone question with a small LLM call before retrieval, or weight recent turns more heavily when you embed them. The rewrite costs one call but produces a query you can log, cache and evaluate like any other.</p>
+
+<pre data-file="examples/standalone_question.py"><code class="language-python">REWRITE_PROMPT = """Rewrite the last user question so it can be understood without the conversation.
+Keep names exactly as written earlier. Return only the rewritten question.
+
+Conversation:
+{history}
+
+Last question: {question}
+Standalone question:"""
+
+def standalone_question(llm, history: list[tuple[str, str]], question: str, max_turns: int = 5) -&gt; str:
+    turns = "\n".join(f"{role}: {text}" for role, text in history[-2 * max_turns:])
+    return llm.complete(REWRITE_PROMPT.format(history=turns, question=question)).strip() or question
+
+# q = standalone_question(llm, [("user", "Why did Kestrel Labs start Project Tern?"),
+#                               ("assistant", "Because Deepcast ...")], "And who leads it?")
+# -&gt; "Who leads Project Tern?"; then local_search(index, q, llm)</code></pre>
+
+<h2>Failure modes and fixes</h2>
+
+<h3>Wrong seed entities</h3>
+<p>Everything downstream depends on step 1. If the seeds are wrong, the relationships, chunks and reports are all about the wrong thing, and the model answers confidently from irrelevant evidence. Typical causes on Kestrel-like corpora:</p>
+<ul>
+  <li><strong>Name-only queries and weak embedders.</strong> “What connects Priya Nair to Deepcast?” is mostly names. A sentence embedding of that query may be closer to a generic “connections” description than to either entity. The literal name-match boost fixes most of these cases.</li>
+  <li><strong>Unresolved aliases.</strong> If resolution left “TWI” and “TIDEWATER INSTITUTE” as separate nodes, half the evidence hangs off a seed you did not pick. Fix resolution (<a href="09-entity-resolution.html">Chapter 9</a>); name matching on <code>aliases</code> helps.</li>
+  <li><strong>Bloated descriptions.</strong> Hubs accumulate long descriptions that mention everything, so they match many queries weakly and crowd out specific entities. Cap summary length and consider embedding a short profile rather than the full summary.</li>
+  <li><strong>Abstract questions.</strong> “What risks does Kestrel face?” has one entity and one theme. Local search will anchor on Kestrel Labs and dump its neighborhood. That question belongs to global search or DRIFT (<a href="15-global-search.html">Chapter 15</a>).</li>
+</ul>
+
+<h3>Hubs flooding the context</h3>
+<p>A hub is an entity with far more edges than typical. In the Kestrel graph, KESTREL LABS has degree 11 while the median is 3. When a hub is a seed, three things go wrong at once: its edges dominate the out-of-network pool, its combined degree inflates the rank of each of those edges, and its many chunks fill the text slice if it is an early seed. The worked example shows the milder version: five of eight out-of-network edges were Kestrel's.</p>
+<p>Mitigations, from cheapest to most involved:</p>
+<table>
+  <thead><tr><th>Fix</th><th>How</th><th>Trade-off</th></tr></thead>
+  <tbody>
+    <tr><td>Cap per-seed relationships</td><td>At most <em>m</em> out-of-network edges per seed before merging lists</td><td>Can drop a relevant hub edge</td></tr>
+    <tr><td>Degree-damped bridge score</td><td>Rank outside entities by links / log<sub>2</sub>(1 + degree) instead of raw links, and ties by weight instead of combined degree</td><td>Slightly penalizes genuinely central entities</td></tr>
+    <tr><td>Exclude known hubs as seeds</td><td><code>exclude_entity_names</code> for the corpus's “about” entity</td><td>Manual; wrong for questions about the hub itself</td></tr>
+    <tr><td>Query-aware reranking</td><td>Embed relationship descriptions and sort candidates by similarity to the query within each group</td><td>Needs a relationship vector store; more compute per query</td></tr>
+    <tr><td>Personalized PageRank from the seeds</td><td>Score candidates by random-walk mass, which naturally discounts hubs' spread-out mass</td><td>A different method: see <a href="17-ppr-hipporag.html">Chapter 17</a></td></tr>
+  </tbody>
+</table>
+
+<h3>Other symptoms</h3>
+<table>
+  <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+  <tbody>
+    <tr><td>Correct entities, answer still misses the cause</td><td>Bridge chunk ranked below the text budget</td><td>Raise <code>text_unit_prop</code>, rank chunks by support for selected relationships, or shorten chunks</td></tr>
+    <tr><td>Answer quotes community report generalities, not facts</td><td><code>community_prop</code> too high for a fact question</td><td>Lower it, or set it to 0 for single-hop lookups</td></tr>
+    <tr><td>Citations to ids not in context</td><td>Model pattern-matching the citation format</td><td>Verify citations; strip or flag unknown ids; lower temperature</td></tr>
+    <tr><td>Two different CTOs in the answer</td><td>Both edges in context without dates</td><td>Include claims with dates, or a temporal graph (<a href="27-incremental-temporal.html">Chapter 27</a>)</td></tr>
+    <tr><td>Latency spikes on some queries</td><td>Hub seeds produce huge candidate pools before trimming</td><td>Cap candidates per seed before sorting; precompute per-entity top edges at index time</td></tr>
+  </tbody>
+</table>
+
+<div class="callout paper">
+  <span class="callout-title">Edge et al., From Local to Global (2024)</span>
+  <p>The GraphRAG paper focuses its evaluation on global, sensemaking questions and positions entity-based retrieval as the complement for questions about specific entities. The local search algorithm in this chapter is documented and implemented in the microsoft/graphrag repository rather than specified in the paper, so treat the defaults (0.15, 0.5, top 10) as engineering choices to tune, not results.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 14.1 <span class="level">Warm-up</span></h4>
+  <p>A chat session has 900 tokens of conversation history. With GraphRAG's defaults (<code>max_context_tokens</code> = 12,000, <code>community_prop</code> = 0.15, <code>text_unit_prop</code> = 0.5), how many tokens does each slice get? How many 400-token chunks fit in the text slice?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>History is subtracted first: 12,000 − 900 = 11,100 tokens remain.</p>
+    <ul>
+      <li>Community reports: ⌊11,100 × 0.15⌋ = 1,665.</li>
+      <li>Entities, relationships and claims: ⌊11,100 × (1 − 0.15 − 0.5)⌋. In floating point, 1 − 0.15 − 0.5 is a hair below 0.35, so 11,100 × it is 3,884.999… and the floor is <strong>3,884</strong>, not 3,885. Harmless, but it is why you should never assert exact slice sizes in tests.</li>
+      <li>Text units: ⌊11,100 × 0.5⌋ = 5,550.</li>
+    </ul>
+    <p>5,550 / 400 = 13.9, so 13 full 400-token chunks fit (5,200 tokens). The table header and row formatting also cost tokens, so in practice it may be 12.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 14.2 <span class="level">Core</span></h4>
+  <p>Canonical question 3: “What connects Priya Nair to Deepcast?” Suppose the seeds are exactly PRIYA NAIR and DEEPCAST, and <code>top_k_relationships</code> = 2. Using GraphRAG's rule, list the in-network relationships, the out-of-network relationships with their links and combined degrees in sorted order, and the ones that survive the count budget. Use these degrees: PRIYA NAIR 4 (Kestrel Labs, Marlow Dynamics, Project Sentinel, Project Tern), DEEPCAST 3 (Kestrel Labs, Marlow Dynamics, Project Tern), KESTREL LABS 11, PROJECT TERN 5, MARLOW DYNAMICS 3, PROJECT SENTINEL 7. Does the answer's key evidence survive?</p>
+  <details class="hint"><summary>Hint</summary><p>Combined degree is the sum of the endpoint degrees. The budget is 2 × 2 = 4 out-of-network edges.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p><strong>In-network:</strong> none. Priya Nair and Deepcast are not directly connected.</p>
+    <p><strong>Out-of-network candidates</strong> and the outside entity's links (how many of the two seeds it touches):</p>
+    <table>
+      <thead><tr><th>id</th><th>Edge</th><th>Outside entity</th><th>Links</th><th>Combined degree</th></tr></thead>
+      <tbody>
+        <tr><td>19</td><td>PRIYA NAIR – KESTREL LABS</td><td>KESTREL LABS</td><td>2</td><td>4 + 11 = 15</td></tr>
+        <tr><td>4</td><td>DEEPCAST – KESTREL LABS</td><td>KESTREL LABS</td><td>2</td><td>3 + 11 = 14</td></tr>
+        <tr><td>28</td><td>PRIYA NAIR – PROJECT TERN</td><td>PROJECT TERN</td><td>2</td><td>4 + 5 = 9</td></tr>
+        <tr><td>6</td><td>DEEPCAST – PROJECT TERN</td><td>PROJECT TERN</td><td>2</td><td>3 + 5 = 8</td></tr>
+        <tr><td>22</td><td>PRIYA NAIR – MARLOW DYNAMICS</td><td>MARLOW DYNAMICS</td><td>2</td><td>4 + 3 = 7</td></tr>
+        <tr><td>5</td><td>MARLOW DYNAMICS – DEEPCAST</td><td>MARLOW DYNAMICS</td><td>2</td><td>3 + 3 = 6</td></tr>
+        <tr><td>27</td><td>PRIYA NAIR – PROJECT SENTINEL</td><td>PROJECT SENTINEL</td><td>1</td><td>4 + 7 = 11</td></tr>
+      </tbody>
+    </table>
+    <p>Sorted by (links, combined degree) descending, the order is the table order: 19, 4, 28, 6, 22, 5, 27. The budget keeps the first four: <strong>19, 4, 28, 6</strong>.</p>
+    <p>Half of the key evidence survives: the Tern path (28, 6) explains “she co-leads Tern, which replaces Deepcast sonar”. The Marlow path (22: she formerly worked at Marlow; 5: Marlow acquired Deepcast) is cut, even though every outside entity here has links = 2, because Marlow's low degree gives its edges the lowest combined degrees. The Kestrel path, the least informative, ranks first because it runs through the hub. Text units may still carry the Marlow facts, but the structured evidence for the most interesting connection is gone.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 14.3 <span class="level">Core</span></h4>
+  <p>Re-run the worked example's text unit selection with a text slice of 2,000 tokens. Which chunks are included? Can the model still explain why Tern exists, and which fact would it most likely get wrong or omit? Propose one change to the ranking that would bring <code>07_marlow_acquires_deepcast-000</code> into this budget, and show that it works on these numbers.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Filling greedily in order: 400, 800, 1,123, 1,403, 1,674, then the next chunk (400 tokens) would make 2,074 &gt; 2,000, so filling stops. Included: the two Tern blog chunks, both interview chunks and the Series B chunk.</p>
+    <p>The interview says “we stopped being a startup the day Deepcast said no”, that Marlow Dynamics bought Deepcast, and that Kestrel is replacing Deepcast hardware; the Series B chunk quotes Okafor on losing the sonar supplier. So the model can still give the causal chain in outline. What goes missing is the specifics that live only in the excluded chunks: the April 2025 date of the acquisition and the end of outside contracts (article 07), and the board memo's option analysis, nine months of inventory and $3.5 million estimate (memo 08). Relationships 4 and 5 are still in the relationship table, so a careful model uses those for the date if the descriptions include it.</p>
+    <p>A tempting fix is to rank all chunks by how many selected relationships they support. On these numbers it does not help: the interview and Tern blog chunks support the most edges, so they still fill the budget, and <code>07-000</code> supports only relationship 5. The problem is redundancy, not support: three of the five kept chunks come from two documents. A fix that works is a <strong>document diversity cap</strong>: keep GraphRAG's order but take at most one chunk per document per seed. Filling 2,000 tokens then goes: TERN's <code>09-000</code> (400), <code>12-000</code> (800), skip <code>12-001</code> and <code>09-001</code> (documents already used), <code>10_brightwater_series_b-001</code> (1,071); then DEEPCAST's <code>03-000</code> (1,471), skip <code>03-001</code>, <code>07_marlow_acquires_deepcast-000</code> (1,871); the next candidate, <code>08-000</code>, would reach 2,271, so filling stops. The acquisition article is now in context. The general lesson: the order in which pools are ranked is a design decision that budget pressure turns into a correctness decision. Always test with a smaller budget than you deploy with.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 14.4 <span class="level">Core</span></h4>
+  <p>Extend <code>unknown_citations</code> from this chapter into a function <code>citation_report(result)</code> that takes a <code>SearchResult</code> from <code>local_search</code> and returns: the fraction of sentences with at least one citation, the list of unknown ids by table, and the document ids actually cited (resolving source ids to <code>doc_id</code>). Test it on the example answer above with a context that is missing relationship 6.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import re
+
+SENTENCE = re.compile(r"(?&lt;=[.!?])\s+(?=[A-Z])")
+
+def citation_report(result, index=None) -&gt; dict:
+    answer, data = result.answer, result.context_data
+    sentences = [s for s in SENTENCE.split(answer.strip()) if s]
+    with_refs = sum(1 for s in sentences if "[Data:" in s)
+    cited = cited_ids(answer)
+    unknown = unknown_citations(answer, data)
+    docs = []
+    if index is not None:
+        for uid in cited.get("sources", set()):
+            if uid in index.text_units:
+                docs.append(index.text_units[uid].doc_id)
+    return {"cited_sentence_ratio": with_refs / max(1, len(sentences)),
+            "unknown": unknown,
+            "cited_docs": sorted(set(docs))}
+
+# Test with a hand-made result
+from minigraphrag.search.common import SearchResult
+answer = ("Deepcast supplied every Sentinel drone since 2022 [Data: Relationships (4)]. "
+          "Kestrel launched Project Tern in June 2025 [Data: Entities (15); Relationships (21, 6, 14)].")
+data = {"entities": [{"id": 15}], "relationships": [{"id": 4}, {"id": 21}, {"id": 14}], "sources": []}
+report = citation_report(SearchResult(answer, "local", "", data))
+assert report["cited_sentence_ratio"] == 1.0
+assert report["unknown"] == {"relationships": {"6"}}</code></pre>
+    <p>Ids are compared as strings: the context stores integers for entities and relationships and strings for text units, and the regex returns strings. The report catches the invented id 6 but cannot tell whether relationship 4 really supports the sentence; for that you need an entailment check against the row's description, covered in <a href="25-evaluation.html">Chapter 25</a>.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 14.5 <span class="level">Stretch</span></h4>
+  <p>Implement a degree-damped out-of-network ranking: sort by links(<em>x</em>) / log<sub>2</sub>(1 + degree(<em>x</em>)) for the outside entity <em>x</em>, then by edge weight. Apply it to Exercise 14.2's seeds (edge weights: 19 → 8, 4 → 8, 28 → 8, 6 → 8, 22 → 6, 5 → 9, 27 → 8) with the same budget of four. Which edges survive now? Then write it as a drop-in replacement for the sort line in <code>build_local_context</code>.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Scores per outside entity (all have links = 2 except Sentinel):</p>
+    <ul>
+      <li>MARLOW DYNAMICS, degree 3: 2 / log<sub>2</sub>4 = 2 / 2 = 1.000</li>
+      <li>PROJECT TERN, degree 5: 2 / log<sub>2</sub>6 = 2 / 2.585 = 0.774</li>
+      <li>KESTREL LABS, degree 11: 2 / log<sub>2</sub>12 = 2 / 3.585 = 0.558</li>
+      <li>PROJECT SENTINEL, degree 7: 1 / log<sub>2</sub>8 = 1 / 3 = 0.333</li>
+    </ul>
+    <p>Sorted by (score, weight) descending: 5 (1.000, 9), 22 (1.000, 6), 28 (0.774, 8), 6 (0.774, 8), 19 (0.558, 8), 4 (0.558, 8), 27 (0.333, 8). The budget of four keeps <strong>5, 22, 28, 6</strong>: both the Marlow path and the Tern path, and the generic hub path is cut. That is exactly the evidence the canonical answer needs.</p>
+    <pre><code class="language-python">import math
+from collections import Counter
+
+def damped_out_network(G, entities, selected):
+    out_network = [(e, n) for e in entities for n in G.neighbors(e) if n not in selected]
+    links = Counter(n for _, n in out_network)
+    def score(edge):
+        outside = edge[1]
+        return (links[outside] / math.log2(1 + G.degree(outside)), G.edges[edge].get("weight", 0))
+    return sorted(out_network, key=score, reverse=True)
+
+# in build_local_context, replace the three out_network lines with:
+# out_network = damped_out_network(G, entities, selected)</code></pre>
+    <p>On the original Tern question (seeds Tern, Deepcast, Kestrel, Vehl) the damped order becomes 5, 16 (Marlow, score 1.0), 19, 28 (Priya, 0.861), 20, 29 (Sentinel, 0.667), then the links = 1 edges. The acquisition edge moves from position 6 to position 1 among out-of-network edges. Check on your evaluation set that it does not hurt questions that are genuinely about the hub, such as “Who works at Kestrel Labs?”.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">What text is the query compared against to pick seed entities in GraphRAG local search?</p>
+  <ol>
+    <li>The raw text units that mention each entity</li>
+    <li data-correct>Embeddings of each entity's name and summarized description</li>
+    <li>Community report summaries</li>
+    <li>Relationship descriptions</li>
+  </ol>
+  <div class="explain">Seeds come from the entity description store (<code>title:description</code> in GraphRAG, <code>name: description</code> in <code>minigraphrag</code>). Reports and text units are pulled in afterwards through the seeds.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Which out-of-network relationship ranks highest?</p>
+  <ol>
+    <li>The one with the highest combined degree</li>
+    <li>The one with the highest extraction weight</li>
+    <li>The one whose outside entity has the lowest degree</li>
+    <li data-correct>The one whose outside entity is connected to the most seeds, with combined degree as the tiebreaker</li>
+  </ol>
+  <div class="explain">Links (distinct seeds touched) come first because an entity adjacent to several seeds is likely a bridge on the path the question asks about. Rank breaks ties.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">With <code>max_context_tokens</code> = 10,000, <code>community_prop</code> = 0.25 and <code>text_unit_prop</code> = 0.5 and no history, how many tokens go to entities, relationships and claims?</p>
+  <ol>
+    <li>3,500</li>
+    <li data-correct>2,500</li>
+    <li>5,000</li>
+    <li>It depends on the number of seeds</li>
+  </ol>
+  <div class="explain">The local slice is T × (1 − 0.25 − 0.5) = 10,000 × 0.25 = 2,500. The number of seeds affects what fills the slice, not its size.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In GraphRAG's text unit ordering, a chunk that supports four of the second seed's relationships and a chunk that supports one of the first seed's relationships compete. Which comes first?</p>
+  <ol>
+    <li>The four-relationship chunk, because support dominates</li>
+    <li>Whichever has fewer tokens</li>
+    <li data-correct>The first seed's chunk, because the sort key is seed position first</li>
+    <li>They are shuffled</li>
+  </ol>
+  <div class="explain">The sort key is (seed index, −relationship count). All of the best seed's chunks precede the next seed's, which is why a small text budget can starve evidence attached to lower-ranked seeds.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A user asks “What does Brightwater Capital invest in?” right after several questions about Project Tern, and local search returns Tern chunks. What is the most likely cause?</p>
+  <ol>
+    <li>Brightwater Capital has no description</li>
+    <li data-correct>Previous user questions were appended to the query for entity mapping, pulling Tern-related seeds</li>
+    <li>The community slice is too large</li>
+    <li>Citations were not verified</li>
+  </ol>
+  <div class="explain">GraphRAG appends up to five previous user turns before embedding. After a topic change they keep dragging old entities. A standalone-question rewrite avoids this.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does KESTREL LABS tend to flood local search contexts?</p>
+  <ol>
+    <li>Its name is in most queries</li>
+    <li>It has the longest text units</li>
+    <li>Community detection puts it in every community</li>
+    <li data-correct>Its high degree gives it many candidate edges, and it inflates the combined-degree rank of each of them</li>
+  </ol>
+  <div class="explain">Degree 11 in a graph with median degree 3 means many out-of-network edges, all with high combined degree. Per-seed caps, degree damping or PPR counteract this.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Should I take the two-hop neighborhood of the seeds?</summary>
+  <div><p>Because it is either too small or far too big. On the Kestrel graph, two hops from Project Tern already reach 15 of 16 other entities through the Kestrel Labs hub. On a real graph, two hops from a hub reach thousands of nodes. Local search takes one hop and ranks aggressively; methods that go further, such as PPR (Chapter 17) and path search (Chapter 18), use scores to decide where to spend the extra hops.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How many seed entities should I use?</summary>
+  <div><p>GraphRAG's default is 10. More seeds mean better recall of the right entity but more candidates competing for the same budget, and the text unit order means later seeds rarely get their chunks in. Evaluate <em>k</em> in {3, 5, 10, 20} on your question set and look at context recall (did the supporting documents reach the context?) before answer quality. For the Kestrel corpus, 5 to 10 is plenty.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Is local search better than vector RAG for single-hop questions?</summary>
+  <div><p>Not necessarily. “How far is Halden Reef from Port Avalon?” is answered by one chunk, and plain vector search finds it directly. Local search also finds it, through HALDEN REEF's text units, but spends budget on relationships and reports that add nothing. Many systems route simple lookups to basic search and multi-entity questions to local search, or run both and fuse the results (Chapter 21).</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should the tables use CSV, markdown or JSON?</summary>
+  <div><p>GraphRAG uses pipe-delimited rows with a <code>-----Name-----</code> header, which is compact and gives the model obvious ids to cite. Markdown tables cost a few more tokens for the separators; JSON costs noticeably more for keys and quotes. The ids and a consistent citation instruction matter more than the syntax. <a href="22-context-construction.html">Chapter 22</a> compares formats on the same context.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What happens when no entity is similar to the query?</summary>
+  <div><p>Top-k always returns <em>k</em> results, however weak. GraphRAG does not apply a similarity floor, so an off-topic question still gets seeds and a confident-looking context. Add a minimum similarity threshold, calibrated on questions you know are out of scope, and fall back to basic search or an honest “not in this corpus” when no seed clears it.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a local search inspector</h3>
+  <p>Build a tool that makes every ranking decision in local search visible, so you can tune it with evidence.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span><code>inspect --question "..."</code> prints seeds with similarity, every candidate relationship with its group, links and rank, and a mark for kept or cut</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The same for text units and reports, with cumulative tokens against each slice</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A claims table added to <code>build_local_context</code>: claims whose subject is a seed, with status and dates, taken from the entities-and-relationships slice</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Citation verification on every answer, with unknown ids reported</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A comparison over the three multi-hop and two temporal canonical questions: context recall of <code>supporting_docs</code> from <code>data/questions.jsonl</code> with GraphRAG's ranking versus the degree-damped ranking</span></li>
+  </ul>
+  <p><strong>Done when</strong> you can point to one question where a ranking change moved a supporting document into the context, and show the inspector output before and after.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Local search anchors on entities similar to the query, then gathers their relationships, text units, community reports and claims.</li>
+    <li>Relationships between seeds come first; outside relationships are ranked by how many seeds the outside entity touches, which surfaces bridges like MARLOW DYNAMICS.</li>
+    <li>A proportional budget (15% reports, 35% entities and relationships, 50% text units by default) is filled best-first per slice; ranking order becomes a correctness issue when budgets are tight.</li>
+    <li>Id-bearing tables let the model cite <code>[Data: Relationships (5)]</code>, and let you verify every id automatically.</li>
+    <li>Wrong seeds and hub flooding are the dominant failures; name matching, degree damping, per-seed caps and query rewriting are the first fixes.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://microsoft.github.io/graphrag/query/local_search/">GraphRAG documentation: local search</a>. <span class="venue">GraphRAG docs</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: <code>LocalSearchMixedContext</code>, <code>local_context.py</code> and the local search system prompt. <span class="venue">GitHub</span></li>
+  <li>Peng et al. <a href="https://arxiv.org/abs/2408.08921">Graph Retrieval-Augmented Generation: A Survey</a>. <span class="venue">arXiv 2408.08921, 2024</span></li>
+  <li>Han et al. <a href="https://arxiv.org/abs/2501.00309">Retrieval-Augmented Generation with Graphs (GraphRAG)</a>. <span class="venue">arXiv 2501.00309, 2025</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

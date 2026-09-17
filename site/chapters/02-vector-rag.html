@@ -1,0 +1,794 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build vector RAG from scratch | Graph RAG from Scratch</title>
+<meta name="description" content="Chunk the Kestrel corpus, embed it, search it with cosine similarity, and assemble a cited prompt: a complete vector RAG baseline in about a hundred lines.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="02-vector-rag" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Build vector RAG from scratch</h1>
+  <p class="lede">Before you can see why GraphRAG exists, you need the thing it improves on, built well and understood down to the dot product. In this chapter you chunk the Kestrel corpus, embed it, search it and assemble a cited prompt, then measure where the result is good enough.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Split documents into overlapping text units and predict how many units a corpus produces</li>
+      <li>Explain what an embedding vector represents and compute cosine similarity by hand</li>
+      <li>Implement exact top-k search over a matrix of unit vectors and wrap it in a small vector store</li>
+      <li>Assemble a grounded prompt with numbered sources and verifiable citations using <code>basic_search</code></li>
+      <li>Describe how approximate nearest-neighbor indexes such as HNSW trade recall for speed</li>
+      <li>Run a retrieval smoke test that measures supporting-document recall by question type</li>
+    </ul>
+  </div>
+</header>
+
+<h2>The shape of a vector RAG system</h2>
+<p>Vector RAG has two phases that run at different times. <strong>Indexing</strong> happens once per corpus change: split documents into pieces, turn each piece into a vector, store the vectors. <strong>Querying</strong> happens per question: turn the question into a vector with the same model, find the nearest stored vectors, paste their text into a prompt, and generate.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 250" role="img" aria-labelledby="arch-title">
+      <title id="arch-title">Vector RAG architecture: an offline indexing pipeline and an online query pipeline that share the embedder and the vector store</title>
+      <defs><marker id="arch-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <text class="d-text bold" x="12" y="24">Indexing (offline, once per corpus change)</text>
+      <rect class="d-box" x="12" y="38" width="112" height="50" rx="6"/>
+      <text class="d-text" x="68" y="68" text-anchor="middle">12 documents</text>
+      <rect class="d-box node" x="160" y="38" width="112" height="50" rx="6"/>
+      <text class="d-text" x="216" y="60" text-anchor="middle">Chunk</text>
+      <text class="d-text small" x="216" y="77" text-anchor="middle">24 text units</text>
+      <rect class="d-box node" x="308" y="38" width="112" height="50" rx="6"/>
+      <text class="d-text" x="364" y="60" text-anchor="middle">Embed</text>
+      <text class="d-text small" x="364" y="77" text-anchor="middle">24 × d matrix</text>
+      <rect class="d-box comm" x="456" y="38" width="130" height="50" rx="6"/>
+      <text class="d-text" x="521" y="60" text-anchor="middle">Vector store</text>
+      <text class="d-text small" x="521" y="77" text-anchor="middle">ids, vectors, metadata</text>
+      <line class="d-line" x1="124" y1="63" x2="156" y2="63" marker-end="url(#arch-arr)"/>
+      <line class="d-line" x1="272" y1="63" x2="304" y2="63" marker-end="url(#arch-arr)"/>
+      <line class="d-line" x1="420" y1="63" x2="452" y2="63" marker-end="url(#arch-arr)"/>
+      <text class="d-text bold" x="12" y="138">Querying (online, per question)</text>
+      <rect class="d-box edge" x="12" y="152" width="112" height="50" rx="6"/>
+      <text class="d-text" x="68" y="182" text-anchor="middle">Question</text>
+      <rect class="d-box node" x="160" y="152" width="112" height="50" rx="6"/>
+      <text class="d-text" x="216" y="174" text-anchor="middle">Embed</text>
+      <text class="d-text small" x="216" y="191" text-anchor="middle">same model</text>
+      <rect class="d-box comm" x="308" y="152" width="112" height="50" rx="6"/>
+      <text class="d-text" x="364" y="174" text-anchor="middle">Top-k search</text>
+      <text class="d-text small" x="364" y="191" text-anchor="middle">cosine</text>
+      <rect class="d-box edge" x="456" y="152" width="100" height="50" rx="6"/>
+      <text class="d-text" x="506" y="174" text-anchor="middle">Prompt</text>
+      <text class="d-text small" x="506" y="191" text-anchor="middle">numbered sources</text>
+      <rect class="d-box good" x="590" y="152" width="80" height="50" rx="6"/>
+      <text class="d-text" x="630" y="182" text-anchor="middle">Answer</text>
+      <line class="d-line" x1="124" y1="177" x2="156" y2="177" marker-end="url(#arch-arr)"/>
+      <line class="d-line" x1="272" y1="177" x2="304" y2="177" marker-end="url(#arch-arr)"/>
+      <line class="d-line" x1="420" y1="177" x2="452" y2="177" marker-end="url(#arch-arr)"/>
+      <line class="d-line" x1="556" y1="177" x2="586" y2="177" marker-end="url(#arch-arr)"/>
+      <line class="d-line dash" x1="364" y1="88" x2="364" y2="148" marker-end="url(#arch-arr)"/>
+      <line class="d-line dash" x1="521" y1="88" x2="400" y2="148" marker-end="url(#arch-arr)"/>
+      <text class="d-text small" x="258" y="122">same embedder</text>
+      <text class="d-text small" x="468" y="122">search the stored vectors</text>
+      <text class="d-text small" x="12" y="236">If the query embedder differs from the index embedder, the vectors live in different spaces and scores are meaningless.</text>
+    </svg>
+  </div>
+  <figcaption>Everything in this chapter fits in these two rows. The dashed lines are the two things both phases share: the embedding model and the stored vectors.</figcaption>
+</figure>
+
+<p>The <code>minigraphrag</code> package already has every piece: <code>chunking.py</code>, <code>embeddings.py</code>, <code>vector_store.py</code> and <code>search/basic.py</code>. You will read each one, understand why it is written that way, and then run the whole pipeline on Kestrel.</p>
+
+<h2>Chunking: choosing the unit of retrieval</h2>
+<p>A retriever returns pieces of documents, not whole documents, for two reasons. Whole documents are too long to put several in a prompt, and one long document embedded as a single vector blurs many topics into one point. The pieces are called <strong>chunks</strong> in vector-RAG vocabulary and <strong>text units</strong> in GraphRAG's. This chapter and the next say chunk, because the thing being retrieved is a plain slice of text; from <a href="07-chunking-text-units.html">Chapter 7</a> on, where the slice also carries extracted entities and provenance, the course says text unit. Chunk size is the first and most consequential knob in any RAG system.</p>
+
+<h3>Fixed windows with overlap</h3>
+<p>The simplest chunker slides a window of <em>S</em> words over the document and advances it by a <strong>stride</strong> of <em>S</em> − <em>O</em> words, where <em>O</em> is the overlap. Consecutive chunks share exactly <em>O</em> words, so a fact that straddles a boundary survives whole in at least one chunk as long as it is at most <em>O</em> words long. A document of <em>N</em> words yields</p>
+<p style="text-align:center">chunks = ⌈(<em>N</em> − <em>O</em>) / (<em>S</em> − <em>O</em>)⌉ &nbsp; (for <em>N</em> &gt; <em>S</em>; otherwise 1)</p>
+<p>The Kestrel founding article has 481 words. With <em>S</em> = 300 and <em>O</em> = 50: ⌈431 / 250⌉ = ⌈1.72⌉ = 2 chunks. Every Kestrel document has between 395 and 492 words, so each yields 2 chunks and the corpus yields <strong>24 text units</strong>, which is exactly what <code>minigraphrag</code> reports.</p>
+
+<div class="viz" data-viz="chunker">
+<script type="application/json">
+{
+  "title": "Chunking the Marlow–Deepcast article",
+  "text": "Marlow Dynamics, the builder of defense-focused underwater vehicles, has acquired sonar hardware supplier Deepcast in an all-cash deal, the companies announced on Tuesday. Terms were not disclosed, but two people familiar with the transaction put the price at between $180 million and $220 million. The acquisition gives Marlow Dynamics direct control over one of the few independent producers of compact multibeam sonar. Marlow has bought Deepcast transducers for its own vehicles for several years, and executives said owning the supplier would secure capacity as the company ramps up production for navy contracts in the region. The bigger question for the industry is what happens to Deepcast's other customers. Deepcast has historically sold to anyone, from university labs to survey firms and small drone makers. In a letter to customers, Deepcast said it would honour existing purchase orders through the end of the second quarter but would not renew or sign outside supply contracts after the acquisition closes. Future production will be reserved for Marlow Dynamics programs.",
+  "size": 40,
+  "overlap": 8,
+  "note": "Small chunks separate the acquisition from its consequences for Deepcast customers. And no chunk, at any size, mentions Kestrel Labs: this article never does. Keep that in mind for Chapter 3."
+}
+</script>
+</div>
+
+<pre data-file="minigraphrag/chunking.py"><code class="language-python">@dataclass
+class TextUnit:
+    """A chunk of a source document; the unit of extraction and of citation."""
+    id: str
+    doc_id: str
+    text: str
+    n_tokens: int
+    start: int  # character offset (inclusive) in the document
+    end: int    # character offset (exclusive)
+
+def chunk_fixed(text: str, size: int = 300, overlap: int = 50, doc_id: str = "doc") -&gt; list[TextUnit]:
+    """Sliding window of `size` words that advances by `size - overlap` words."""
+    if overlap &gt;= size:
+        raise ValueError("overlap must be smaller than size")
+    spans = [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
+    if not spans:
+        return []
+    stride = size - overlap
+    units: list[TextUnit] = []
+    for i, first in enumerate(range(0, len(spans), stride)):
+        window = spans[first : first + size]
+        start, end = window[0][0], window[-1][1]
+        piece = text[start:end]
+        units.append(TextUnit(f"{doc_id}-{i:03d}", doc_id, piece, count_tokens(piece), start, end))
+        if first + size &gt;= len(spans):  # this window reached the end of the document
+            break
+    return units</code></pre>
+
+<p>Three details are worth copying into any chunker you write. Word boundaries come from a regex over the original string, so <code>start</code> and <code>end</code> are exact character offsets, which lets you highlight a cited chunk in the source document. The id <code>07_marlow_acquires_deepcast-000</code> encodes the document and position, so a citation is human-readable. And the loop stops as soon as a window reaches the end, so the last chunk is never a tiny tail that is entirely overlap.</p>
+
+<h3>Sentence packing and size trade-offs</h3>
+<p><code>chunk_by_sentences</code> packs whole sentences until a token budget is reached and repeats the last sentence at the start of the next chunk. Chunks never end mid-sentence, at the cost of uneven sizes. <code>chunk_documents(docs, size, overlap, method="fixed" | "sentences")</code> applies either strategy to a whole corpus. <a href="07-chunking-text-units.html">Chapter 7</a> goes deeper into structure-aware splitting; for now the trade-off is the one that matters:</p>
+
+<table>
+  <thead><tr><th>Chunk size</th><th>Kestrel units (overlap)</th><th>Good for</th><th>Costs</th></tr></thead>
+  <tbody>
+    <tr><td>Small (≈ 60–120 words)</td><td>111 (10), 58 (20)</td><td>Precise matches for single facts; many distinct hits fit in a prompt</td><td>Facts get separated from their subject; “it” and “the company” lose their referent</td></tr>
+    <tr><td>Medium (≈ 200–300 words)</td><td>36 (30), 24 (50)</td><td>A paragraph or two of context around each fact</td><td>Each vector averages several topics, so similarity scores get fuzzier</td></tr>
+    <tr><td>Large (a whole document)</td><td>12 (none)</td><td>Keeps every relationship within a document intact</td><td>Few results fit in the prompt; one vector per document is a blurry summary</td></tr>
+  </tbody>
+</table>
+
+<h2>Embeddings: meaning as geometry</h2>
+<p>An <strong>embedding</strong> is a function that maps a piece of text to a fixed-length vector of numbers, chosen so that texts that should match end up close together. Close is measured by angle. The vector itself has no human-readable coordinates in a neural model; what matters is the geometry: which vectors point in similar directions.</p>
+
+<h3>Cosine similarity</h3>
+<p>For vectors <strong>a</strong> and <strong>b</strong>, cosine similarity is</p>
+<p style="text-align:center">cos(<strong>a</strong>, <strong>b</strong>) = (<strong>a</strong> · <strong>b</strong>) / (‖<strong>a</strong>‖ ‖<strong>b</strong>‖) = Σ<sub>i</sub> a<sub>i</sub>b<sub>i</sub> / (√Σa<sub>i</sub>² · √Σb<sub>i</sub>²)</p>
+<p>It ranges from −1 (opposite) through 0 (unrelated, orthogonal) to 1 (same direction). Length does not matter, only direction, so a long chunk that mentions “sonar” ten times does not automatically beat a short one that mentions it twice. If every vector is first scaled to length 1 (L2-normalized), the denominator is 1 and cosine similarity is just the dot product. That is why stores normalize once at insert time and then search with a single matrix multiplication.</p>
+
+<h3>A worked example in three dimensions</h3>
+<p>Imagine a toy embedding whose three coordinates count the words <em>sonar</em>, <em>supply</em> and <em>reef</em>. The query “sonar supplier” becomes <strong>q</strong> = (1, 1, 0). Three simplified Kestrel chunks:</p>
+<table>
+  <thead><tr><th>Chunk</th><th>Vector (sonar, supply, reef)</th><th>q · c</th><th>‖c‖</th><th>cos(q, c)</th></tr></thead>
+  <tbody>
+    <tr><td>03 Deepcast supply deal</td><td>(3, 2, 0)</td><td>3 + 2 + 0 = 5</td><td>√13 = 3.606</td><td>5 / (1.414 × 3.606) = <strong>0.981</strong></td></tr>
+    <tr><td>09 Project Tern blog</td><td>(3, 0, 1)</td><td>3</td><td>√10 = 3.162</td><td>3 / (1.414 × 3.162) = <strong>0.671</strong></td></tr>
+    <tr><td>06 Bleaching research note</td><td>(1, 0, 4)</td><td>1</td><td>√17 = 4.123</td><td>1 / (1.414 × 4.123) = <strong>0.171</strong></td></tr>
+  </tbody>
+</table>
+<p>‖<strong>q</strong>‖ = √2 = 1.414. Ranking by cosine gives the supply deal, then the Tern blog, then the bleaching note. Converting to angles with arccos makes the geometry visible.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 260" role="img" aria-labelledby="cos-title">
+      <title id="cos-title">Query vector and three chunk vectors drawn as arrows from the origin at angles of 11, 48 and 80 degrees from the query</title>
+      <defs><marker id="cos-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <line class="d-line faint" x1="60" y1="230" x2="400" y2="230"/>
+      <line class="d-line faint" x1="60" y1="230" x2="60" y2="20"/>
+      <line class="d-line hot" x1="60" y1="230" x2="336" y2="156" marker-end="url(#cos-arr)"/>
+      <text class="d-text bold" x="344" y="160">query q</text>
+      <line class="d-line" x1="60" y1="230" x2="320" y2="112" marker-end="url(#cos-arr)"/>
+      <text class="d-text small" x="326" y="110">03 supply deal, 11°</text>
+      <line class="d-line" x1="60" y1="230" x2="166" y2="38" marker-end="url(#cos-arr)"/>
+      <text class="d-text small" x="172" y="38">09 Tern blog, 48°</text>
+      <line class="d-line" x1="60" y1="230" x2="42" y2="46" marker-end="url(#cos-arr)"/>
+      <text class="d-text small" x="12" y="34">06 bleaching note, 80°</text>
+      <rect class="d-box ghost" x="440" y="30" width="226" height="190" rx="8"/>
+      <text class="d-text bold" x="456" y="56">angle = arccos(cosine)</text>
+      <text class="d-text mono" x="456" y="86">cos 0.981 → 11°</text>
+      <text class="d-text mono" x="456" y="110">cos 0.671 → 48°</text>
+      <text class="d-text mono" x="456" y="134">cos 0.171 → 80°</text>
+      <text class="d-text small" x="456" y="166">Smaller angle, more similar.</text>
+      <text class="d-text small" x="456" y="186">Arrow length is irrelevant:</text>
+      <text class="d-text small" x="456" y="204">cosine ignores magnitude.</text>
+    </svg>
+  </div>
+  <figcaption>The toy vectors from the table, drawn by their angle from the query. Real embeddings have hundreds or thousands of dimensions, but ranking still means “which arrows point most nearly the same way”.</figcaption>
+</figure>
+
+<h3>Real embedders and the hashing stand-in</h3>
+<p>Neural embedding models (sentence-transformers models such as <code>all-MiniLM-L6-v2</code>, OpenAI's <code>text-embedding-3-small</code>, and many others) are trained on huge sets of text pairs that should match, such as questions and their answers, so that “CTO” lands near “chief technology officer” and “supplier” near “vendor”. Sentence-BERT (Reimers and Gurevych, 2019) and Dense Passage Retrieval (Karpukhin et al., 2020) are the classic papers behind this style of retriever.</p>
+<p><code>minigraphrag</code> ships three embedders behind one protocol, <code>embed(texts) -&gt; (n, d) array of unit vectors</code>, plus a factory:</p>
+
+<pre data-file="minigraphrag/embeddings.py"><code class="language-python">class HashingEmbedder:
+    """Deterministic bag-of-words hashing embedder (offline)."""
+
+    def __init__(self, dim: int = 512):
+        self.dim = dim
+        self.name = f"hashing:{dim}"
+
+    def _bucket(self, token: str) -&gt; tuple[int, float]:
+        # Python's hash() is randomised per process, so use a stable digest.
+        h = int.from_bytes(hashlib.blake2b(token.encode(), digest_size=8).digest(), "little")
+        return h % self.dim, 1.0 if (h &gt;&gt; 63) &amp; 1 else -1.0  # sign reduces collision bias
+
+    def embed(self, texts: Sequence[str]) -&gt; np.ndarray:
+        mat = np.zeros((len(texts), self.dim), dtype=np.float32)
+        for row, text in enumerate(texts):
+            for tok in simple_tokenize(text):          # lowercase, drop stopwords, strip plural "s"
+                idx, sign = self._bucket(tok)
+                mat[row, idx] += sign
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        return mat / np.where(norms == 0, 1.0, norms)
+
+# OpenAIEmbedder("text-embedding-3-small") and SentenceTransformerEmbedder("all-MiniLM-L6-v2")
+# implement the same embed() method. get_embedder("hashing" | "hashing:256" | "openai" | "st:&lt;model&gt;")</code></pre>
+
+<p><code>HashingEmbedder</code> is the “hashing trick”: each word is hashed to one of 512 buckets, with a sign taken from one bit of the hash, and the vector counts signed bucket hits. It is exactly the toy example above, with 512 hashed dimensions instead of three hand-picked words. It needs no download, is identical on every machine, and makes retrieval behavior observable in tests. What it cannot do is meaning. “CTO” and “chief technology officer” share no words, so their hashing vectors are orthogonal. Keep that in mind when you read retrieval numbers in this chapter and the next: they are lexical-overlap numbers. Swapping in a neural embedder changes the scores. As Chapter 3 shows, it does not change the structural problems.</p>
+
+<div class="viz" data-viz="embedding-space">
+<script type="application/json">
+{
+  "title": "Kestrel documents in a 2-D sketch of embedding space",
+  "points": [
+    {"label": "07 Marlow buys Deepcast", "x": 10, "y": 12, "group": 1},
+    {"label": "03 Deepcast supply deal", "x": 22, "y": 38, "group": 1},
+    {"label": "08 Board memo: supply", "x": 40, "y": 20, "group": 1},
+    {"label": "09 Project Tern blog", "x": 52, "y": 58, "group": 1},
+    {"label": "10 Series B", "x": 46, "y": 44, "group": 2},
+    {"label": "02 Series A", "x": 72, "y": 10, "group": 2},
+    {"label": "01 Founding story", "x": 76, "y": 40, "group": 4},
+    {"label": "05 Priya Nair profile", "x": 62, "y": 74, "group": 4},
+    {"label": "12 Leadership interview", "x": 28, "y": 64, "group": 4},
+    {"label": "04 Sentinel launch", "x": 12, "y": 80, "group": 3},
+    {"label": "06 Bleaching note", "x": 30, "y": 92, "group": 3},
+    {"label": "11 Council minutes", "x": 70, "y": 90, "group": 5}
+  ],
+  "query": {"label": "Who supplied Kestrel's sonar in 2024?", "x": 36, "y": 33},
+  "k": 3,
+  "note": "Positions are a hand-drawn 2-D sketch and the scores are distance-based, not cosine. The real 512-dimensional ranking is in the table below. Drag the query toward the reef documents to see a different neighborhood."
+}
+</script>
+</div>
+
+<h2>Searching: exact top-k and a vector store</h2>
+<p>With all stored vectors as the rows of a matrix <strong>M</strong> (shape <em>N</em> × <em>d</em>) and a normalized query <strong>q</strong>, every cosine score comes out of one matrix-vector product: <strong>s</strong> = <strong>M</strong><strong>q</strong>. Then take the <em>k</em> largest entries.</p>
+
+<pre data-file="minigraphrag/embeddings.py"><code class="language-python">def cosine_top_k(query_vec: np.ndarray, matrix: np.ndarray, k: int = 5) -&gt; list[tuple[int, float]]:
+    """Indices and cosine scores of the k rows of `matrix` most similar to `query_vec`.
+
+    Vectors are assumed L2-normalised, so cosine similarity is a dot product.
+    """
+    if matrix.size == 0:
+        return []
+    scores = matrix @ query_vec.reshape(-1)
+    k = min(k, len(scores))
+    top = np.argpartition(-scores, k - 1)[:k]            # O(N): the k best, unordered
+    top = top[np.argsort(-scores[top], kind="stable")]   # O(k log k): order just those
+    return [(int(i), float(scores[i])) for i in top]</code></pre>
+
+<p>Cost: the product is <em>O</em>(<em>N</em>·<em>d</em>) floating-point work, and <code>argpartition</code> avoids a full <em>O</em>(<em>N</em> log <em>N</em>) sort. For Kestrel that is 24 × 512 ≈ 12,000 multiplications, which is nothing. For 1 million chunks with 1,536-dimensional vectors it is about 1.5 billion multiplications per query and a 6 GB float32 matrix, which is where approximate indexes start to pay off (see below).</p>
+
+<p>A vector store adds the bookkeeping around that function: ids, metadata and persistence.</p>
+
+<pre data-file="minigraphrag/vector_store.py"><code class="language-python">class VectorStore:
+    def __init__(self, dim: int | None = None):
+        self.ids: list[str] = []
+        self.metadata: list[dict] = []
+        self.matrix = np.zeros((0, dim or 0), dtype=np.float32)
+
+    def add(self, ids: list[str], vectors: np.ndarray, metadata: list[dict] | None = None) -&gt; None:
+        vectors = np.asarray(vectors, dtype=np.float32)
+        if len(ids) != len(vectors):
+            raise ValueError("ids and vectors must have the same length")
+        self.matrix = vectors if len(self.ids) == 0 else np.vstack([self.matrix, vectors])
+        self.ids.extend(ids)
+        self.metadata.extend(metadata or [{} for _ in ids])
+
+    def search(self, query_vec: np.ndarray, k: int = 5) -&gt; list[tuple[str, float, dict]]:
+        """Return up to k (id, score, metadata) tuples, best first."""
+        return [(self.ids[i], s, self.metadata[i]) for i, s in cosine_top_k(query_vec, self.matrix, k)]
+
+    # save(path) writes path.npz (vectors) and path.json (ids + metadata); VectorStore.load(path) reads them.</code></pre>
+
+<div class="callout note">
+  <span class="callout-title">Why the store trusts you to normalize</span>
+  <p><code>VectorStore</code> assumes rows are unit vectors, because every <code>minigraphrag</code> embedder returns unit vectors. If you add vectors from somewhere else, normalize them first, or longer vectors will score higher for reasons that have nothing to do with relevance. Production stores such as FAISS, pgvector and LanceDB make you choose the metric (inner product, cosine or L2) explicitly for the same reason.</p>
+</div>
+
+<h2>From hits to a grounded, cited prompt</h2>
+<p>Retrieval gives you ids and scores. The generator needs text, in a format that makes it easy to cite. <code>minigraphrag</code> follows Microsoft GraphRAG's convention: evidence goes into pipe-delimited tables with an id column, and the model cites rows as <code>[Data: Sources (id)]</code>. Here is the real <code>basic_search</code>:</p>
+
+<pre data-file="minigraphrag/search/basic.py"><code class="language-python">def basic_search(index, query: str, llm: LLM, top_k: int = 5, max_context_tokens: int = 4000,
+                 response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; SearchResult:
+    hits = index.text_unit_store.search(index.embedder.embed([query])[0], k=top_k)
+    rows, used = [], 0
+    for unit_id, score, _ in hits:
+        text = index.text_units[unit_id].text
+        if used + count_tokens(text) &gt; max_context_tokens:
+            break
+        rows.append([unit_id, text])
+        used += count_tokens(text)
+    context = format_table("Sources", ["id", "text"], rows)
+    answer = generate_answer(llm, query, context, response_type)
+    return SearchResult(answer, "basic", context, {"sources": [{"id": r[0], "text": r[1]} for r in rows]},
+                        doc_ids_for_units(index, [r[0] for r in rows]), llm_calls=1)</code></pre>
+
+<p>And the pieces it uses from <code>search/common.py</code> and <code>prompts.py</code>:</p>
+
+<pre data-file="minigraphrag/search/common.py"><code class="language-python">@dataclass
+class SearchResult:
+    answer: str
+    method: str
+    context_text: str = ""
+    context_data: dict = field(default_factory=dict)
+    sources: list[str] = field(default_factory=list)  # document ids that reached the context
+    llm_calls: int = 0
+
+def generate_answer(llm: LLM, query: str, context_text: str, response_type: str = DEFAULT_RESPONSE_TYPE) -&gt; str:
+    """Final generation step: the context goes into the system prompt, the question is the user turn."""
+    system = P.LOCAL_SEARCH_SYSTEM_PROMPT.format(context_data=context_text, response_type=response_type)
+    return llm.complete(query, system=system)
+
+# prompts.LOCAL_SEARCH_SYSTEM_PROMPT (abridged):
+# ---Role---
+# You are a helpful assistant responding to questions about data in the tables provided.
+# ---Goal---
+# ... If you don't know the answer, just say so. Do not make anything up.
+# Points supported by data should list their data references as [Data: &lt;dataset name&gt; (record ids)] ...
+# ---Target response length and format---
+# {response_type}
+# ---Data tables---
+# {context_data}</code></pre>
+
+<p>Four design decisions are packed into those few lines:</p>
+<ul>
+  <li><strong>Ids are the chunk ids</strong>, not positions like 1, 2, 3. A position changes when the ranking changes; <code>08_kestrel_board_memo_supply-000</code> means the same thing in every run, in logs and in evaluation.</li>
+  <li><strong>The budget is enforced greedily in rank order.</strong> If the fourth chunk would exceed <code>max_context_tokens</code>, the loop stops there, even if a shorter fifth chunk would still fit. The context is always an unbroken prefix of the ranking.</li>
+  <li><strong>Best evidence first.</strong> Rows appear in similarity order, which puts the most likely evidence at the start of the context, where models use it most reliably (<a href="01-llms-and-context.html">Chapter 1</a>).</li>
+  <li><strong>The result records what reached the model.</strong> <code>SearchResult.sources</code> lists the documents in the context, which is what evaluation needs to separate retrieval failures from generation failures.</li>
+</ul>
+
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "basic_search on “Who supplied Kestrel's sonar in 2024?”",
+  "perRow": 3,
+  "stages": [
+    {"label": "Embed question", "detail": "HashingEmbedder tokenizes to <code>supplied, kestrel, s, sonar, 2024</code> and hashes those words into a 512-dimensional unit vector."},
+    {"label": "Top-5 search", "detail": "Scores against all 24 chunk vectors. Best: <span class=\"viz-chip node\">08 board memo-000 0.269</span> <span class=\"viz-chip node\">10 Series B-001 0.260</span> <span class=\"viz-chip node\">10 Series B-000 0.245</span> <span class=\"viz-chip node\">03 supply deal-000 0.202</span> <span class=\"viz-chip node\">03 supply deal-001 0.171</span>"},
+    {"label": "Budget", "detail": "Five chunks of about 300 words each are well inside the 4,000-token budget, so all five are kept."},
+    {"label": "Format table", "detail": "<code>-----Sources-----</code>, a header <code>id|text</code>, then one row per chunk with newlines and pipes cleaned out."},
+    {"label": "Generate", "detail": "System prompt = rules + data table; user turn = the question. The model answers and cites, for example <code>[Data: Sources (08_kestrel_board_memo_supply-000)]</code>: “Deepcast has supplied every sonar module in our fleet since 2022.”"},
+    {"label": "Return result", "detail": "SearchResult with the answer, the context text, the rows used and sources = 08, 10 and 03 documents; llm_calls = 1."}
+  ]
+}
+</script>
+</div>
+
+<h2>Running it end to end on Kestrel</h2>
+<p><code>basic_search</code> needs an object with three attributes: <code>text_units</code>, <code>text_unit_store</code> and <code>embedder</code>. The full GraphRAG <code>Index</code> built by <code>minigraphrag.indexer.build_index</code> has them, but building it also runs entity extraction and community detection, which you have not learned yet. A small dataclass with the same three attributes is enough for vector RAG:</p>
+
+<pre data-file="examples/ch02_vector_rag.py"><code class="language-python">from dataclasses import dataclass
+
+from minigraphrag.chunking import TextUnit, chunk_documents, load_documents
+from minigraphrag.embeddings import Embedder, get_embedder
+from minigraphrag.llm import get_llm
+from minigraphrag.search.basic import basic_search
+from minigraphrag.vector_store import VectorStore
+
+@dataclass
+class VectorIndex:
+    """The three attributes basic_search reads; a full GraphRAG Index has them too."""
+    text_units: dict[str, TextUnit]
+    text_unit_store: VectorStore
+    embedder: Embedder
+
+def build_vector_index(docs_dir: str, embedder: Embedder, size: int = 300, overlap: int = 50) -&gt; VectorIndex:
+    units = chunk_documents(load_documents(docs_dir), size=size, overlap=overlap)
+    store = VectorStore()
+    store.add([u.id for u in units],
+              embedder.embed([u.text for u in units]),
+              [{"doc_id": u.doc_id} for u in units])
+    return VectorIndex({u.id: u for u in units}, store, embedder)
+
+if __name__ == "__main__":
+    index = build_vector_index("data/corpus", get_embedder("hashing"))   # or "openai", "st:all-MiniLM-L6-v2"
+    llm = get_llm("mock")                                                 # or "openai", "anthropic", "ollama"
+    result = basic_search(index, "Who supplied Kestrel's sonar in 2024?", llm, top_k=5)
+    for row in result.context_data["sources"]:
+        print(row["id"])
+    print("documents in context:", result.sources)
+    print(result.answer)</code></pre>
+
+<p>With the hashing embedder the retrieved chunks and scores are fully deterministic:</p>
+<table>
+  <thead><tr><th>Rank</th><th>Chunk</th><th>Cosine</th><th>Contains the answer?</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>08_kestrel_board_memo_supply-000</code></td><td>0.269</td><td>Yes: “Deepcast has supplied every sonar module in our fleet since 2022.”</td></tr>
+    <tr><td>2</td><td><code>10_brightwater_series_b-001</code></td><td>0.260</td><td>No: mentions “the loss of its sonar supplier” without naming it</td></tr>
+    <tr><td>3</td><td><code>10_brightwater_series_b-000</code></td><td>0.245</td><td>No: overlaps with rank 2</td></tr>
+    <tr><td>4</td><td><code>03_deepcast_supply_agreement-000</code></td><td>0.202</td><td>Yes: the 2022 multi-year supply agreement</td></tr>
+    <tr><td>5</td><td><code>03_deepcast_supply_agreement-001</code></td><td>0.171</td><td>Partly: shipments and the first drones carrying Deepcast sonar</td></tr>
+  </tbody>
+</table>
+<p>This is vector RAG working as intended. The answer, Deepcast, is stated in a single place in plain words that overlap the question. A capable model will answer correctly and cite chunk 08 or 03. With <code>MockLLM</code>, the answer is a set of extracted sentences with <code>[Data: Sources (...)]</code> citations, enough to confirm the plumbing without an API key.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Notice the weak spot already</span>
+  <p>Ranks 2 and 3 are near-duplicates from the Series B press release, which talks about losing a sonar supplier in 2025. Overlapping chunks from the same document often crowd the top-k with repeated evidence. Exercise 2.5 fixes that with maximal marginal relevance. The press release also scores high for a reason that will matter in Chapter 3: it mentions the supply problem without naming either company involved.</p>
+</div>
+
+<h2>Scaling up: approximate nearest-neighbor indexes</h2>
+<p>Exact search is <em>O</em>(<em>N</em>·<em>d</em>) per query. With numpy on one machine that is fast enough well into hundreds of thousands of vectors for many applications, so start there. Beyond that, or under tight latency budgets, you trade a little recall for a lot of speed with an <strong>approximate nearest-neighbor</strong> (ANN) index.</p>
+
+<h3>HNSW intuition</h3>
+<p>Hierarchical Navigable Small World graphs (Malkov and Yashunin) are the most widely used ANN structure, available in FAISS, hnswlib, pgvector, Qdrant, Weaviate and others. The idea is a skip list made of proximity graphs:</p>
+<ol>
+  <li><strong>Every vector is a node</strong> in the bottom layer, linked to up to <em>M</em> near neighbors.</li>
+  <li><strong>Each node also appears in higher layers with exponentially decreasing probability</strong>, so the top layer has a handful of nodes with long-range links.</li>
+  <li><strong>Search is greedy descent.</strong> Start at the entry point in the top layer, repeatedly move to whichever neighbor is closer to the query until no neighbor improves, then drop a layer and continue from there. In the bottom layer, keep a candidate list of size <em>ef</em><sub>search</sub> to avoid stopping at a local optimum.</li>
+</ol>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 280" role="img" aria-labelledby="hnsw-title">
+      <title id="hnsw-title">HNSW: three layers of proximity graphs; the search path descends from a sparse top layer to the dense bottom layer, getting closer to the query at each step</title>
+      <defs><marker id="hnsw-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="d-fill-ink"/></marker></defs>
+      <text class="d-text small" x="12" y="50">Layer 2</text>
+      <text class="d-text small" x="12" y="140">Layer 1</text>
+      <text class="d-text small" x="12" y="232">Layer 0 (all)</text>
+      <line class="d-line faint" x1="110" y1="46" x2="600" y2="46"/>
+      <line class="d-line faint" x1="110" y1="136" x2="600" y2="136"/>
+      <line class="d-line faint" x1="110" y1="228" x2="600" y2="228"/>
+      <line class="d-line" x1="140" y1="46" x2="440" y2="46"/>
+      <circle class="d-node" cx="140" cy="46" r="9"/>
+      <circle class="d-node hot" cx="440" cy="46" r="9"/>
+      <text class="d-text small" x="140" y="26" text-anchor="middle">entry point</text>
+      <line class="d-line" x1="140" y1="136" x2="290" y2="136"/>
+      <line class="d-line" x1="290" y1="136" x2="440" y2="136"/>
+      <line class="d-line" x1="440" y1="136" x2="530" y2="136"/>
+      <circle class="d-node" cx="140" cy="136" r="9"/>
+      <circle class="d-node" cx="290" cy="136" r="9"/>
+      <circle class="d-node" cx="440" cy="136" r="9"/>
+      <circle class="d-node hot" cx="530" cy="136" r="9"/>
+      <line class="d-line" x1="140" y1="228" x2="200" y2="228"/>
+      <line class="d-line" x1="200" y1="228" x2="250" y2="228"/>
+      <line class="d-line" x1="250" y1="228" x2="290" y2="228"/>
+      <line class="d-line" x1="290" y1="228" x2="360" y2="228"/>
+      <line class="d-line" x1="360" y1="228" x2="440" y2="228"/>
+      <line class="d-line" x1="440" y1="228" x2="490" y2="228"/>
+      <line class="d-line" x1="490" y1="228" x2="530" y2="228"/>
+      <line class="d-line" x1="530" y1="228" x2="565" y2="228"/>
+      <circle class="d-node" cx="140" cy="228" r="7"/>
+      <circle class="d-node" cx="200" cy="228" r="7"/>
+      <circle class="d-node" cx="250" cy="228" r="7"/>
+      <circle class="d-node" cx="290" cy="228" r="7"/>
+      <circle class="d-node" cx="360" cy="228" r="7"/>
+      <circle class="d-node" cx="440" cy="228" r="7"/>
+      <circle class="d-node" cx="490" cy="228" r="7"/>
+      <circle class="d-node" cx="530" cy="228" r="7"/>
+      <circle class="d-node hot" cx="565" cy="228" r="7"/>
+      <line class="d-line dash" x1="440" y1="56" x2="440" y2="126" marker-end="url(#hnsw-arr)"/>
+      <line class="d-line dash" x1="530" y1="146" x2="530" y2="219" marker-end="url(#hnsw-arr)"/>
+      <line class="d-line hot" x1="150" y1="40" x2="428" y2="40" marker-end="url(#hnsw-arr)"/>
+      <line class="d-line hot" x1="450" y1="130" x2="518" y2="130" marker-end="url(#hnsw-arr)"/>
+      <line class="d-line hot" x1="538" y1="222" x2="554" y2="222" marker-end="url(#hnsw-arr)"/>
+      <rect class="d-box edge" x="600" y="212" width="72" height="32" rx="6"/>
+      <text class="d-text small" x="636" y="232" text-anchor="middle">query</text>
+      <text class="d-text small" x="340" y="268" text-anchor="middle">Long jumps at the top, short precise steps at the bottom: few distance computations per query.</text>
+    </svg>
+  </div>
+  <figcaption>A one-dimensional cartoon of HNSW. Real indexes link each node to several neighbors in many dimensions; the search idea is the same: greedy moves on sparse upper layers find the right region fast, and the dense bottom layer refines.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Index</th><th>Query cost</th><th>Recall</th><th>Memory and build</th><th>Use when</th></tr></thead>
+  <tbody>
+    <tr><td>Brute force (this chapter)</td><td><em>O</em>(<em>N</em>·<em>d</em>)</td><td>Exact</td><td>Just the matrix; no build</td><td>Up to hundreds of thousands of vectors, or when you need exact results for evaluation</td></tr>
+    <tr><td>HNSW</td><td>Empirically close to logarithmic in <em>N</em></td><td>High, tunable with <em>ef</em><sub>search</sub></td><td>Extra memory for links; slower inserts</td><td>Low-latency search over millions of vectors</td></tr>
+    <tr><td>IVF (inverted file with clustering)</td><td>Scan only the <em>nprobe</em> nearest clusters</td><td>Tunable with <em>nprobe</em></td><td>Needs a training pass (k-means)</td><td>Very large collections, often combined with quantization</td></tr>
+    <tr><td>Product quantization</td><td>Fast approximate distances on compressed codes</td><td>Lower; often reranked exactly</td><td>Much smaller vectors</td><td>When memory is the binding constraint</td></tr>
+  </tbody>
+</table>
+
+<p>None of these change <em>what</em> is retrieved in principle; they only approximate the exact top-k faster. If exact top-k does not contain the evidence, a faster index will not either. That is the subject of the next chapter.</p>
+
+<h2>A retrieval smoke test</h2>
+<p>Before tuning anything, measure. <code>data/questions.jsonl</code> lists 23 Kestrel questions with a type (single-hop, multi-hop, temporal, global), a reference answer and the <code>supporting_docs</code> that contain the evidence. That is enough for a retrieval-only metric that needs no LLM: <strong>supporting-document recall@k</strong>, the fraction of a question's supporting documents that appear among the documents of the top-<em>k</em> chunks.</p>
+
+<pre data-file="examples/ch02_smoke_test.py"><code class="language-python">import collections
+import json
+
+from ch02_vector_rag import build_vector_index
+from minigraphrag.embeddings import get_embedder
+
+def doc_recall_at_k(index, questions: list[dict], k: int) -&gt; dict[str, float]:
+    by_type = collections.defaultdict(list)
+    for q in questions:
+        hits = index.text_unit_store.search(index.embedder.embed([q["question"]])[0], k=k)
+        got = {index.text_units[uid].doc_id for uid, _, _ in hits}
+        need = set(q["supporting_docs"])
+        by_type[q["type"]].append(len(got &amp; need) / len(need))
+    return {t: round(sum(v) / len(v), 2) for t, v in by_type.items()}
+
+questions = [json.loads(line) for line in open("data/questions.jsonl")]
+index = build_vector_index("data/corpus", get_embedder("hashing"))
+for k in (1, 3, 5, 10):
+    print(k, doc_recall_at_k(index, questions, k))</code></pre>
+
+<p>Results with the hashing embedder, 300-word chunks and 50-word overlap:</p>
+<table>
+  <thead><tr><th><em>k</em></th><th>Single-hop (5)</th><th>Temporal (5)</th><th>Multi-hop (8)</th><th>Global (5)</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>0.40</td><td>0.37</td><td>0.17</td><td>0.09</td></tr>
+    <tr><td>3</td><td>0.80</td><td>0.37</td><td>0.56</td><td>0.19</td></tr>
+    <tr><td>5</td><td>0.80</td><td>0.77</td><td>0.60</td><td>0.37</td></tr>
+    <tr><td>10</td><td>1.00</td><td>0.93</td><td>0.88</td><td>0.66</td></tr>
+  </tbody>
+</table>
+
+<p>Read the table by row, then by column. Single-hop questions reach 0.80 by <em>k</em> = 3. Global questions lag at every <em>k</em>, and multi-hop questions trail single-hop ones at every <em>k</em> (at <em>k</em> = 3, temporal questions do worse still). Multi-hop recall reaches 0.88 only at <em>k</em> = 10, which is 10 of 24 chunks, over 40% of the corpus; global recall never passes 0.66. At that point you are not retrieving so much as stuffing with extra steps, and on a real corpus <em>k</em> = 10 would be a tiny fraction and recall would not climb like this. Recall also measures only whether a supporting document is present, not whether the model can connect the pieces. Chapter 3 looks at why the bottom-right of this table is low and why raising <em>k</em> is not the fix.</p>
+
+<div class="callout tip">
+  <span class="callout-title">Separate retrieval from generation</span>
+  <p>Always log recall-style retrieval metrics next to answer quality. If recall is low, change chunking, embeddings or retrieval. If recall is high but answers are wrong, change the prompt, the ordering or the model. Mixing the two is the most common way RAG tuning goes in circles.</p>
+</div>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 2.1 <span class="level">Warm-up</span></h4>
+  <p>Using the toy (sonar, supply, reef) embedding, compute the cosine similarity between the query “reef sonar” = (1, 0, 1) and each of the three chunks in the worked example: (3, 2, 0), (3, 0, 1) and (1, 0, 4). Which ranks first? Then normalize (3, 0, 1) to unit length and confirm the dot product with the normalized query gives the same number.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>‖q‖ = √2 = 1.414.</p>
+    <ul>
+      <li>Supply deal (3, 2, 0): q · c = 3, ‖c‖ = √13 = 3.606, cos = 3 / (1.414 × 3.606) = 3 / 5.099 = <strong>0.588</strong>.</li>
+      <li>Tern blog (3, 0, 1): q · c = 3 + 1 = 4, ‖c‖ = √10 = 3.162, cos = 4 / (1.414 × 3.162) = 4 / 4.472 = <strong>0.894</strong>.</li>
+      <li>Bleaching note (1, 0, 4): q · c = 1 + 4 = 5, ‖c‖ = √17 = 4.123, cos = 5 / (1.414 × 4.123) = 5 / 5.831 = <strong>0.857</strong>.</li>
+    </ul>
+    <p>The Tern blog ranks first, just ahead of the bleaching note. The ranking flipped completely from the “sonar supplier” query because the direction of the query changed.</p>
+    <p>Normalization: q̂ = (1, 0, 1) / 1.414 = (0.707, 0, 0.707). ĉ = (3, 0, 1) / 3.162 = (0.949, 0, 0.316). q̂ · ĉ = 0.707 × 0.949 + 0.707 × 0.316 = 0.671 + 0.224 = 0.894. Same as before, which is why normalized stores can use a plain dot product.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 2.2 <span class="level">Warm-up</span></h4>
+  <p>Using the chunk-count formula, predict how many text units <code>chunk_fixed</code> produces for (a) the 492-word leadership interview with size 120 and overlap 20, (b) the 395-word Series A press release with the same settings, and (c) a 300-word document with size 300 and overlap 50. Then check (a) and (b) in code.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>Stride = 120 − 20 = 100.</p>
+    <p>(a) ⌈(492 − 20) / 100⌉ = ⌈4.72⌉ = <strong>5</strong>. Windows start at words 0, 100, 200, 300, 400; the last covers words 400–491 and reaches the end.</p>
+    <p>(b) ⌈(395 − 20) / 100⌉ = ⌈3.75⌉ = <strong>4</strong>. Starts at 0, 100, 200, 300; the last covers 300–394.</p>
+    <p>(c) <em>N</em> = <em>S</em>, so the first window covers the whole document and the loop stops: <strong>1</strong> chunk.</p>
+    <pre><code class="language-python">from minigraphrag.chunking import chunk_fixed, load_documents
+docs = load_documents("data/corpus")
+for doc_id in ("12_interview_leadership_change_2026", "02_brightwater_series_a"):
+    units = chunk_fixed(docs[doc_id], size=120, overlap=20, doc_id=doc_id)
+    print(doc_id, len(docs[doc_id].split()), "words", len(units), "units")</code></pre>
+    <p>The formula is also a quick sanity check on a whole corpus: at size 120 and overlap 20 the Kestrel corpus yields 58 units, and at size 60 and overlap 10 it yields 111.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 2.3 <span class="level">Core</span></h4>
+  <p>Extend the smoke test into a small grid: chunk sizes 120 (overlap 20) and 300 (overlap 50), <em>k</em> in {3, 5, 10}. Report supporting-document recall by question type and also the fraction of questions where <em>all</em> supporting documents were retrieved. Which question type benefits least from smaller chunks, and why might that be?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">def full_coverage(index, questions, k):
+    by_type = collections.defaultdict(list)
+    for q in questions:
+        hits = index.text_unit_store.search(index.embedder.embed([q["question"]])[0], k=k)
+        got = {index.text_units[uid].doc_id for uid, _, _ in hits}
+        by_type[q["type"]].append(set(q["supporting_docs"]) &lt;= got)
+    return {t: f"{sum(v)}/{len(v)}" for t, v in by_type.items()}
+
+emb = get_embedder("hashing")
+for size, overlap in ((300, 50), (120, 20)):
+    index = build_vector_index("data/corpus", emb, size, overlap)
+    for k in (3, 5, 10):
+        print(size, k, doc_recall_at_k(index, questions, k), full_coverage(index, questions, k))</code></pre>
+    <table>
+      <thead><tr><th>Size</th><th><em>k</em></th><th>Single-hop</th><th>Temporal</th><th>Multi-hop</th><th>Global</th></tr></thead>
+      <tbody>
+        <tr><td>300</td><td>3</td><td>0.80 (4/5)</td><td>0.37 (1/5)</td><td>0.56 (2/8)</td><td>0.19 (0/5)</td></tr>
+        <tr><td>300</td><td>5</td><td>0.80 (4/5)</td><td>0.77 (3/5)</td><td>0.60 (2/8)</td><td>0.37 (0/5)</td></tr>
+        <tr><td>300</td><td>10</td><td>1.00 (5/5)</td><td>0.93 (4/5)</td><td>0.88 (6/8)</td><td>0.66 (0/5)</td></tr>
+        <tr><td>120</td><td>3</td><td>0.80 (4/5)</td><td>0.57 (2/5)</td><td>0.46 (1/8)</td><td>0.19 (0/5)</td></tr>
+        <tr><td>120</td><td>5</td><td>0.80 (4/5)</td><td>0.67 (2/5)</td><td>0.58 (1/8)</td><td>0.24 (0/5)</td></tr>
+        <tr><td>120</td><td>10</td><td>1.00 (5/5)</td><td>0.87 (4/5)</td><td>0.73 (3/8)</td><td>0.63 (1/5)</td></tr>
+      </tbody>
+    </table>
+    <p>Multi-hop questions lose the most from smaller chunks: full coverage drops from 2/8 to 1/8 at <em>k</em> = 5 and from 6/8 to 3/8 at <em>k</em> = 10. A multi-hop question needs several documents, and with smaller chunks each document is split into more pieces that compete for the same <em>k</em> slots. The chunk that matches the question's words best tends to be one piece of one document, and the pieces that carry the other hops do not share the question's words. Global questions almost never reach full coverage: 0 of 5 at every setting with 300-word chunks, and 1 of 5 with 120-word chunks at <em>k</em> = 10, because their supporting documents span up to eight of the twelve documents.</p>
+    <p>Caveat: 23 questions is a smoke test, not a benchmark. Differences of one question are noise. The direction of the effect is what to take away.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 2.4 <span class="level">Core</span></h4>
+  <p>Show the lexical limit of <code>HashingEmbedder</code>. Compute the cosine between “Who is the CTO?” and “chief technology officer”, and between “Who supplied the sonar?” and “Deepcast is the sonar vendor”. If you can install the <code>st</code> extra, repeat with <code>get_embedder("st:all-MiniLM-L6-v2")</code>. Then run “Who is the chief technology officer of Kestrel Labs?” through the hashing index and explain the top-3.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">import numpy as np
+from minigraphrag.embeddings import get_embedder
+
+pairs = [("Who is the CTO?", "chief technology officer"),
+         ("Who supplied the sonar?", "Deepcast is the sonar vendor")]
+for name in ("hashing", "st:all-MiniLM-L6-v2"):
+    emb = get_embedder(name)
+    for a, b in pairs:
+        va, vb = emb.embed([a, b])
+        print(name, f"{float(va @ vb):.3f}", a, "|", b)</code></pre>
+    <p>Hashing: the first pair scores exactly 0.000 because after stopword removal the tokens are <code>cto</code> versus <code>chief, technology, officer</code>, with no overlap. The second pair shares only <code>sonar</code> and scores about 0.41. A sentence-transformer model gives both pairs clearly positive similarity because it was trained on paraphrases; the exact numbers depend on the model version, so measure rather than assume.</p>
+    <p>On the hashing index, “Who is the chief technology officer of Kestrel Labs?” returns <code>10_brightwater_series_b-001</code> (0.405), <code>05_kestrel_blog_priya_nair-000</code> (0.345) and <code>03_deepcast_supply_agreement-000</code> (0.314). The first two win mostly on repeated “Kestrel Labs”. The third contains “Kestrel Labs chief technology officer Jonas Vehl”, a 2022 statement. The 2026 interview that names Priya Nair as CTO is not in the top 3. A neural embedder fixes the synonym problem but not the freshness problem: both the 2022 and 2026 chunks are about the CTO, and nothing in cosine similarity prefers the newer one. That is a Chapter 3 failure and a <a href="10-claims-temporal.html">Chapter 10</a> fix.</p>
+    <p>A side note on the tokenizer: <code>simple_tokenize</code> turns “Kestrel's” into <code>kestrel</code> and <code>s</code>, and strips the final s from “corpus”. Crude tokenization is fine for a teaching embedder, but it is a real source of mismatches in lexical retrieval such as BM25 (Chapter 21).</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 2.5 <span class="level">Stretch</span></h4>
+  <p>Overlapping chunks from the same document crowd the top-k. Implement maximal marginal relevance (MMR): fetch the top 20 candidates, then repeatedly pick the candidate maximizing λ · sim(q, c) − (1 − λ) · max<sub>s ∈ selected</sub> sim(c, s). Run it for “Who supplied Kestrel's sonar in 2024?” with λ = 0.85 and λ = 0.7 and compare with plain top-5.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.embeddings import cosine_top_k
+
+def mmr(query_vec, matrix, k=5, lam=0.7, fetch=20):
+    candidates = [i for i, _ in cosine_top_k(query_vec, matrix, fetch)]
+    relevance = {i: float(matrix[i] @ query_vec) for i in candidates}
+    chosen = []
+    while candidates and len(chosen) &lt; k:
+        def score(i):
+            redundancy = max((float(matrix[i] @ matrix[j]) for j in chosen), default=0.0)
+            return lam * relevance[i] - (1 - lam) * redundancy
+        best = max(candidates, key=score)
+        chosen.append(best)
+        candidates.remove(best)
+    return chosen
+
+store = index.text_unit_store
+q = index.embedder.embed(["Who supplied Kestrel's sonar in 2024?"])[0]
+for lam in (1.0, 0.85, 0.7):
+    print(lam, [store.ids[i] for i in mmr(q, store.matrix, lam=lam)])</code></pre>
+    <p>λ = 1.0 is plain top-5: memo 08-000, Series B 10-001 and 10-000, supply deal 03-000 and 03-001. With λ = 0.85 the last pick changes: the second supply-deal chunk (03-001), which overlaps 03-000, gives way to the city council minutes (11-001). With λ = 0.7 the list becomes 08-000, 11-001, 10-000, 07-000 (Marlow acquires Deepcast), 03-001: only one chunk per document, and the Marlow article appears.</p>
+    <p>MMR trades a little relevance for coverage. Here it happens to pull in the acquisition article, useful for “why” questions and irrelevant for this “who” question. It is a cheap improvement, but it only reshuffles chunks that already look similar to the query. It cannot find evidence that shares no words or meaning with the question.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">A 700-word document is chunked with size 300 and overlap 50. How many chunks result?</p>
+  <ol>
+    <li>2</li>
+    <li data-correct>3</li>
+    <li>4</li>
+    <li>5</li>
+  </ol>
+  <div class="explain">Stride 250. ⌈(700 − 50) / 250⌉ = ⌈2.6⌉ = 3. Windows start at words 0, 250 and 500; the third reaches the end.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Why does <code>VectorStore</code> compute scores with a plain matrix-vector product?</p>
+  <ol>
+    <li>Dot products are more accurate than cosine similarity</li>
+    <li>The store uses Euclidean distance internally</li>
+    <li data-correct>All vectors are L2-normalized, so the dot product equals cosine similarity</li>
+    <li>numpy cannot compute vector norms efficiently</li>
+  </ol>
+  <div class="explain">With unit vectors the cosine denominator is 1. Normalizing once at insert time makes every query a single matrix multiplication.</div>
+</div>
+
+<div class="quiz">
+  <p class="q"><code>HashingEmbedder</code> gives “CTO” and “chief technology officer” a similarity of 0. Why?</p>
+  <ol>
+    <li>The hash function has too few buckets</li>
+    <li>The vectors were not normalized</li>
+    <li>Stopword removal deleted both phrases</li>
+    <li data-correct>It only captures shared words, and the two phrases share none</li>
+  </ol>
+  <div class="explain">The hashing trick is a bag of words in disguise. Synonyms and paraphrases need a model trained on meaning, such as a sentence-transformer.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">In <code>basic_search</code>, why are rows identified by chunk id such as <code>08_kestrel_board_memo_supply-000</code> rather than by 1, 2, 3?</p>
+  <ol>
+    <li data-correct>A chunk id is stable across runs and rankings, so citations can be checked, logged and evaluated</li>
+    <li>LLMs cannot read numbers</li>
+    <li>Numbered sources exceed the token budget</li>
+    <li>Microsoft GraphRAG requires string ids</li>
+  </ol>
+  <div class="explain">Positions change whenever the ranking changes. Stable ids make a citation mean the same thing in every run.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">What does an HNSW index change compared with brute-force search?</p>
+  <ol>
+    <li>It retrieves evidence that shares no meaning with the query</li>
+    <li>It guarantees the exact top-k with fewer computations</li>
+    <li data-correct>It approximates the exact top-k with far fewer distance computations, at some cost in recall and memory</li>
+    <li>It removes the need for an embedding model</li>
+  </ol>
+  <div class="explain">ANN indexes speed up nearest-neighbor search without changing which neighbors are nearest. If the exact top-k misses the evidence, HNSW will too.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Supporting-document recall at <em>k</em> = 10 looks good for multi-hop questions on Kestrel. What is the main caveat?</p>
+  <ol>
+    <li>Recall cannot be computed without an LLM</li>
+    <li data-correct>Ten of 24 chunks is over 40% of the corpus, so this is closer to stuffing than retrieval, and presence does not mean the model connects the pieces</li>
+    <li>Recall is always 1.0 at <em>k</em> = 10</li>
+    <li>Multi-hop questions have only one supporting document</li>
+  </ol>
+  <div class="explain">On a realistic corpus, <em>k</em> = 10 is a tiny fraction and recall would not climb like this. And recall measures retrieval only, not reasoning across what was retrieved.</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>Which embedding model should I use?</summary>
+  <div><p>For learning and tests, the hashing embedder: it is deterministic and free. For real work, start with a well-known general model from a provider you already use, or a sentence-transformers model if you need to run locally, then measure on your own questions with the smoke test from this chapter. Public leaderboards are a starting point, not a decision. Domain vocabulary, document length and question style matter more than a point or two on a benchmark. Whatever you choose, record the model name with the index (<code>minigraphrag</code> writes it to <code>config.json</code>) so queries use the same one.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Should I embed the question as-is, or rewrite it first?</summary>
+  <div><p>Start as-is. Rewriting helps when questions are short, conversational or phrased very differently from documents. Common techniques are query rewriting with an LLM (Ma et al., 2023) and HyDE, which embeds a hypothetical answer instead of the question (Gao et al., 2022). Both cost an LLM call per query. Neither helps when the evidence shares nothing with the question or its likely answer, which is the multi-hop case in Chapter 3.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Do I need a vector database?</summary>
+  <div><p>Not to start. A numpy matrix handles the Kestrel corpus and far larger ones. Reach for a database when you need persistence with concurrent writers, metadata filtering at scale, access control, or ANN search over millions of vectors. If you already run Postgres, pgvector is a low-friction first step. <a href="13-storage-indexing.html">Chapter 13</a> compares storage options for graphs and embeddings together.</p></div>
+</details>
+
+<details class="qa">
+  <summary>What about keyword search? Is vector search always better?</summary>
+  <div><p>No. Keyword methods such as BM25 are strong on exact names, ids, error codes and rare terms, where embeddings can blur things. Embeddings are strong on paraphrase. Most production systems run both and fuse the rankings. You will build BM25 and reciprocal rank fusion in <a href="21-hybrid-design-patterns.html">Chapter 21</a>.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How big should <em>k</em> be?</summary>
+  <div><p>Big enough that recall on your smoke test flattens, small enough that the context stays focused and cheap. For chunks of a few hundred tokens, 3 to 10 is a common range. If you find yourself needing a very large <em>k</em> for a class of questions, that is a signal that similarity search is the wrong retrieval method for those questions, not that <em>k</em> is too small.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a vector RAG baseline with an evaluation harness</h3>
+  <p>Build the baseline that every GraphRAG method in this course must beat, and make its behavior measurable.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>A <code>vector_rag.py</code> command that indexes a folder with a chosen chunk size, overlap and embedder, saves the <code>VectorStore</code> to disk and reloads it for queries</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A query command that prints the retrieved chunk ids with scores, the context token count and the cited answer from <code>basic_search</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The smoke test from this chapter, run for at least two chunk sizes and two embedders (hashing plus one neural model if available), saved as a table</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>The citation checker from Chapter 1 applied to every answer on <code>questions.jsonl</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A one-page note choosing default settings for Kestrel and listing the three questions your baseline handles worst</span></li>
+  </ul>
+  <p><strong>Done when</strong> one command rebuilds the index and prints recall by question type, and you can name the settings you will use as the baseline for Chapter 3.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Vector RAG is two pipelines sharing an embedder and a store: chunk and embed offline, embed and search online.</li>
+    <li>Chunk size decides what a single retrieved piece can contain; overlap protects facts that straddle boundaries.</li>
+    <li>Cosine similarity compares directions. Normalize once and search with one matrix product and a partial sort.</li>
+    <li>Ground the prompt with stable ids, best evidence first and a token budget, and record which sources reached the model.</li>
+    <li>ANN indexes such as HNSW approximate the exact top-k with less work; they cannot find evidence that exact search misses.</li>
+    <li>Measure retrieval separately from generation. On Kestrel, single-hop questions reach 0.80 recall at <em>k</em> = 3; global questions stay below 0.40 until <em>k</em> = 10.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Lewis et al. <a href="https://arxiv.org/abs/2005.11401">Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks</a>. <span class="venue">NeurIPS 2020; arXiv 2005.11401</span></li>
+  <li>Karpukhin et al. <a href="https://arxiv.org/abs/2004.04906">Dense Passage Retrieval for Open-Domain Question Answering</a>. <span class="venue">EMNLP 2020; arXiv 2004.04906</span></li>
+  <li>Reimers and Gurevych. <a href="https://arxiv.org/abs/1908.10084">Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks</a>. <span class="venue">EMNLP 2019; arXiv 1908.10084</span></li>
+  <li>Malkov and Yashunin. <a href="https://arxiv.org/abs/1603.09320">Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs</a>. <span class="venue">IEEE TPAMI; arXiv 1603.09320</span></li>
+  <li>Ma et al. <a href="https://arxiv.org/abs/2305.14283">Query Rewriting for Retrieval-Augmented Large Language Models</a>. <span class="venue">EMNLP 2023; arXiv 2305.14283</span></li>
+  <li>Gao et al. <a href="https://arxiv.org/abs/2212.10496">Precise Zero-Shot Dense Retrieval without Relevance Labels</a> (HyDE). <span class="venue">ACL 2023; arXiv 2212.10496</span></li>
+  <li>Gao et al. <a href="https://arxiv.org/abs/2312.10997">Retrieval-Augmented Generation for Large Language Models: A Survey</a>. <span class="venue">arXiv 2312.10997, 2023</span></li>
+  <li>Microsoft. <a href="https://github.com/microsoft/graphrag">GraphRAG repository</a>: basic search and data-table prompt conventions. <span class="venue">GitHub</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+</body>
+</html>

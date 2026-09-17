@@ -1,0 +1,1138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Incremental updates and temporal graphs | Graph RAG from Scratch</title>
+<meta name="description" content="Keep a GraphRAG index fresh without full rebuilds, and model changing facts with bi-temporal edges, invalidation and as-of queries.">
+<meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#100f0d" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><line x1='3.5' y1='4' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='3.5' y1='4' x2='6' y2='12.5' stroke='%23b4530a' stroke-width='1.4'/><line x1='6' y1='12.5' x2='12.5' y2='3.5' stroke='%23b4530a' stroke-width='1.4'/><circle cx='3.5' cy='4' r='2.4' fill='%23b4530a'/><circle cx='12.5' cy='3.5' r='2' fill='%23b4530a'/><circle cx='6' cy='12.5' r='2.4' fill='%23b4530a'/></svg>">
+<link rel="stylesheet" href="../assets/css/site.css?v=57f16d52">
+<script>try{var t=localStorage.getItem("grfs-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body data-slug="27-incremental-temporal" data-root="..">
+<main class="chapter" id="main">
+
+<header class="chapter-head">
+  <h1>Incremental updates and temporal graphs</h1>
+  <p class="lede">A GraphRAG index goes stale the day after you build it, and rebuilding it from scratch every time a document changes costs as much as the first build. In this chapter you make updates proportional to what changed, and you give edges a history, so the graph can say both who the CTO is now and who it was in August 2024.</p>
+  <div class="objectives">
+    <h2>You will be able to</h2>
+    <ul>
+      <li>Estimate what a full rebuild costs compared with an incremental update, and find the terms that do not shrink</li>
+      <li>Detect changed documents and text units with content hashes, and retract or upsert graph elements by their <code>source_ids</code></li>
+      <li>Decide which descriptions, communities and reports to regenerate after an update, and when to recluster from scratch</li>
+      <li>Model facts with valid time and transaction time, invalidate edges on contradiction, and answer as-of queries on both axes</li>
+      <li>Explain how Graphiti and Zep, LightRAG and a Postgres-native engine handle updates and time, and map them onto your own code</li>
+    </ul>
+  </div>
+</header>
+
+<h2>Why full rebuilds hurt</h2>
+<p>Everything you built in Part 2 assumed a fixed corpus: chunk it, extract from every chunk, resolve, summarize, cluster, write reports. Real corpora are not fixed. The Kestrel Labs assistant ingests a new podcast transcript, a board memo gets a correction, a press release is withdrawn. If each change triggers a full rebuild, three things go wrong.</p>
+<ul>
+  <li><strong>Cost scales with the corpus, not the change.</strong> Extraction is the dominant indexing cost (<a href="26-cost-scaling.html">Chapter 26</a>), and a rebuild pays it for every text unit, including the thousands that did not change.</li>
+  <li><strong>Output churns.</strong> LLM calls are not perfectly reproducible even at temperature 0, community detection can shuffle ids, and report text is rewritten. Users see answers change for no reason, and any cached answers or saved citations point at ids that no longer exist.</li>
+  <li><strong>History is lost.</strong> A rebuild produces a snapshot of the corpus as it is now. If the corpus says Priya Nair became CTO in March 2026, a naive rebuild either keeps both CTO edges with no way to tell which is current, or you delete the old one and can no longer answer “Who was CTO when the bleaching was detected?”</li>
+</ul>
+
+<h3>A cost model for updates</h3>
+<p>Let <em>U</em> be the number of text units, <em>g</em> the number of gleaning rounds, <em>S</em> the number of nodes and edges that need an LLM summary (those with more than one description), and <em>R</em> the number of communities that get a report. With <code>minigraphrag</code>'s gleaning loop, a unit costs <em>e(g)</em> extraction calls: 1 call when <em>g</em> = 0, and 2<em>g</em> calls otherwise (one extraction, <em>g</em> continue prompts, and <em>g</em> − 1 loop checks, because the last round skips the check). Then:</p>
+<p style="text-align:center"><em>C<sub>full</sub> = U · e(g) + S + R &nbsp;&nbsp;&nbsp;&nbsp; C<sub>incremental</sub> = ΔU · e(g) + S<sub>dirty</sub> + R<sub>changed</sub></em></p>
+<p>ΔU is the number of new or changed text units, S<sub>dirty</sub> the summaries touched by them, and R<sub>changed</sub> the reports whose communities changed. On the Kestrel corpus, the reference chunker (300 words, 50 overlap) cuts each of the 12 documents into 2 units, 24 in all. Suppose the index was built from documents 01 to 11 (22 units) and the March 2026 interview, document 12, arrives. With <em>g</em> = 1:</p>
+<table>
+  <thead><tr><th>Term</th><th>Full rebuild</th><th>Incremental</th></tr></thead>
+  <tbody>
+    <tr><td>Extraction calls</td><td>24 × 2 = 48</td><td>2 × 2 = 4</td></tr>
+    <tr><td>Description summaries</td><td>every multi-description node and edge</td><td>only nodes and edges that the 2 new units mention</td></tr>
+    <tr><td>Community reports</td><td>all communities</td><td>communities containing a touched node, plus their ancestors</td></tr>
+  </tbody>
+</table>
+<p>Extraction shrinks by a factor of 12 here, and by far more at scale: a 100,000-unit corpus with 400 changed units a day does 250 times less extraction work. The other two terms are the trap. The interview mentions almost every main entity (Okafor, Vehl, Nair, Deepcast, Marlow Dynamics, Tern, Sentinel, Halden Reef, Tidewater, Brightwater, the Ocean Health Act), so it dirties most of the Kestrel graph. That is not a quirk of a tiny corpus. Hub entities such as the company itself appear in most new documents, so every update touches them, their descriptions and the reports of the communities they sit in. Incremental indexing makes extraction proportional to the change; making summaries and reports proportional too takes the extra policies in the rest of this chapter.</p>
+
+<div class="callout note">
+  <span class="callout-title">Correctness target: an update equals a rebuild</span>
+  <p>The simplest definition of a correct incremental indexer is that applying an update to the index built from corpus A gives the same graph as a full build of corpus A′, up to LLM nondeterminism in summaries and reports. Nodes, edges, <code>source_ids</code> and weights are deterministic given the cached extractions, so you can test them for exact equality. You will write that test in the project.</p>
+</div>
+
+<h2>Detecting what changed</h2>
+<p>An update starts with a diff. You need to know which documents were added, changed or removed, and within a changed document, which text units actually differ.</p>
+
+<h3>Document hashes and a manifest</h3>
+<p>Store a manifest from the last successful run: <code>{doc_id: sha256(text)}</code>. On the next run, hash the documents on disk and compare. Hash the normalized text you actually index, not file metadata; a modified timestamp changes when someone touches the file without editing it, and a hash does not.</p>
+
+<h3>Content-addressed text units</h3>
+<p>Document-level diffs are too coarse: fixing a typo in the last paragraph of a long report should not re-extract its first forty chunks. So diff at the unit level too. That needs unit ids that stay the same when the text stays the same. The reference chunker names units by position, <code>{doc_id}-{i:03d}</code>, which is fine for full builds. For incremental builds, derive the id from the text instead. nano-graphrag does the same thing: it keys chunks by an MD5 hash of their content, so re-inserting identical text creates no duplicates.</p>
+
+<pre data-file="minigraphrag/incremental.py"><code class="language-python"># Teaching module for this chapter: not part of the core indexer.
+import hashlib
+from dataclasses import replace
+
+from .chunking import TextUnit, chunk_documents
+
+
+def content_hash(text: str) -&gt; str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def diff_documents(manifest: dict[str, str], docs: dict[str, str]):
+    """Compare {doc_id: hash} from the last run with the documents on disk now."""
+    current = {doc_id: content_hash(text) for doc_id, text in docs.items()}
+    added = sorted(d for d in current if d not in manifest)
+    removed = sorted(d for d in manifest if d not in current)
+    changed = sorted(d for d in current if d in manifest and manifest[d] != current[d])
+    return added, changed, removed, current
+
+
+def content_addressed(units: list[TextUnit]) -&gt; list[TextUnit]:
+    """Give each unit an id derived from its text, so unchanged text keeps its id."""
+    return [replace(u, id=f"{u.doc_id}-{content_hash(u.text)[:10]}") for u in units]
+
+
+def plan_unit_changes(old_units: dict[str, TextUnit], docs: dict[str, str],
+                      touched_docs: set[str], size: int = 300, overlap: int = 50):
+    """For added, changed and removed documents: which unit ids disappear, which units need extraction."""
+    old_ids = {uid for uid, u in old_units.items() if u.doc_id in touched_docs}
+    present = {d: docs[d] for d in touched_docs if d in docs}
+    fresh = content_addressed(chunk_documents(present, size, overlap))
+    new_ids = {u.id for u in fresh}
+    removed_ids = old_ids - new_ids                       # retract these
+    to_extract = [u for u in fresh if u.id not in old_ids]  # extract only these
+    return removed_ids, to_extract, fresh</code></pre>
+
+<div class="callout warn">
+  <span class="callout-title">Fixed windows shift</span>
+  <p>With fixed-size windows, inserting one sentence near the start of a document moves every later window boundary, so every later unit gets new text and a new hash. The diff is still correct; it just stops being small. Structure-aware chunking (<a href="07-chunking-text-units.html">Chapter 7</a>) that splits on headings or paragraphs contains the damage to the section that was edited. If your documents are edited often, this is a strong argument for it.</p>
+</div>
+
+<h3>Cache extractions per unit</h3>
+<p>The last ingredient is to keep the raw extraction output for every unit, <code>{unit_id: ExtractionResult}</code>, next to the graph. You already have it in memory during a build; persist it. Two things follow. Re-indexing an unchanged unit costs nothing even when you rebuild from scratch (a <code>CachedLLM</code> gives you the same effect keyed by prompt hash). The larger consequence is that the graph becomes a function of the cache: every node and edge attribute can be recomputed from the extraction records that reference it. LightRAG's README describes its document deletion in the same spirit: when a document is deleted, affected entities are rebuilt from cached extraction data rather than by calling the LLM again.</p>
+
+<h2>Upserts and deletes by source ids</h2>
+<p>In <a href="09-entity-resolution.html">Chapter 9</a>, <code>build_graph</code> merged extractions into nodes and edges that each carry a <code>source_ids</code> list: the ids of the text units that mentioned them. Read that list as a reference count. An edge mentioned by three units has three references. Retracting a unit removes one reference from everything it mentioned. An element whose count reaches zero is no longer supported by any text, and it goes.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 310" role="img" aria-labelledby="refcount-title">
+      <title id="refcount-title">Reference counting on source_ids when document 03 is retracted</title>
+      <text class="d-text bold" x="10" y="24">Edge</text>
+      <text class="d-text bold" x="210" y="24">Before: source_ids</text>
+      <text class="d-text bold" x="440" y="24">After retracting doc 03</text>
+      <line class="d-line faint" x1="10" y1="34" x2="670" y2="34"/>
+
+      <text class="d-text bold" x="10" y="62">DEEPCAST</text>
+      <text class="d-text" x="10" y="80">– KESTREL LABS</text>
+      <rect class="d-box bad" x="210" y="50" width="58" height="24" rx="12"/><text class="d-text mono" x="222" y="66">03-a</text>
+      <rect class="d-box bad" x="274" y="50" width="58" height="24" rx="12"/><text class="d-text mono" x="286" y="66">03-b</text>
+      <rect class="d-box node" x="338" y="50" width="58" height="24" rx="12"/><text class="d-text mono" x="350" y="66">12-a</text>
+      <line class="d-line hot" x1="404" y1="62" x2="430" y2="62" marker-end="url(#rc-arrow)"/>
+      <rect class="d-box node" x="440" y="50" width="58" height="24" rx="12"/><text class="d-text mono" x="452" y="66">12-a</text>
+      <text class="d-text small" x="440" y="94">refcount 3 → 1: keep, recompute weight</text>
+      <text class="d-text small" x="440" y="108">and description from the remaining unit</text>
+
+      <line class="d-line faint" x1="10" y1="122" x2="670" y2="122"/>
+      <text class="d-text bold" x="10" y="150">DEEPCAST</text>
+      <text class="d-text" x="10" y="168">– PORT AVALON</text>
+      <rect class="d-box bad" x="210" y="138" width="58" height="24" rx="12"/><text class="d-text mono" x="222" y="154">03-a</text>
+      <line class="d-line hot" x1="404" y1="150" x2="430" y2="150" marker-end="url(#rc-arrow)"/>
+      <rect class="d-box ghost" x="440" y="138" width="58" height="24" rx="12"/>
+      <text class="d-text small" x="440" y="182">refcount 1 → 0: delete the edge</text>
+
+      <line class="d-line faint" x1="10" y1="196" x2="670" y2="196"/>
+      <text class="d-text bold" x="10" y="224">DEEPCAST</text>
+      <text class="d-text" x="10" y="242">– MARLOW DYNAMICS</text>
+      <rect class="d-box node" x="210" y="212" width="58" height="24" rx="12"/><text class="d-text mono" x="222" y="228">07-a</text>
+      <rect class="d-box node" x="274" y="212" width="58" height="24" rx="12"/><text class="d-text mono" x="286" y="228">12-a</text>
+      <rect class="d-box node" x="338" y="212" width="58" height="24" rx="12"/><text class="d-text mono" x="350" y="228">12-b</text>
+      <line class="d-line faint" x1="404" y1="224" x2="430" y2="224"/>
+      <rect class="d-box node" x="440" y="212" width="58" height="24" rx="12"/><text class="d-text mono" x="452" y="228">07-a</text>
+      <rect class="d-box node" x="504" y="212" width="58" height="24" rx="12"/><text class="d-text mono" x="516" y="228">12-a</text>
+      <rect class="d-box node" x="568" y="212" width="58" height="24" rx="12"/><text class="d-text mono" x="580" y="228">12-b</text>
+      <text class="d-text small" x="440" y="256">not mentioned by doc 03: no work at all</text>
+
+      <rect class="d-box edge" x="10" y="270" width="660" height="32" rx="6"/>
+      <text class="d-text" x="22" y="291">Node DEEPCAST was touched by two edges, so it is dirty: re-summarize, re-embed, flag its communities.</text>
+      <defs><marker id="rc-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="d-fill-ink" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+    </svg>
+  </div>
+  <figcaption>Retracting the Deepcast supply article (document 03, units 03-a and 03-b) with the reference extractions. Only elements that doc 03 mentioned are touched. The weight of a kept edge is recomputed as the sum of strengths from its remaining sources, not decremented by a guess.</figcaption>
+</figure>
+
+<h3>Recompute touched elements, don't patch them</h3>
+<p>It is tempting to “decrement” an edge: subtract the removed unit's strength from <code>weight</code> and delete its sentence from <code>descriptions</code>. That works until it doesn't. <code>build_graph</code> deduplicates descriptions, so two units that produced the same description share one entry, and removing one unit must not remove the text. Name resolution can change between runs, so the record you are subtracting may have mapped to a different node last time. The safer approach treats each touched element like a materialized view: collect the extraction records that still reference it, and recompute every attribute from scratch. Only touched elements are recomputed, so this stays cheap, and no LLM is involved.</p>
+
+<pre data-file="minigraphrag/incremental.py"><code class="language-python">import networkx as nx
+
+from .extraction import ExtractionResult
+from .graph_build import add_rank_attributes
+
+
+def upsert_units(G: nx.Graph, extractions: dict[str, ExtractionResult], removed_ids: set[str],
+                 new_results: list[ExtractionResult], name_map: dict[str, str] | None = None):
+    """Retract removed text units and add new ones, touching only affected nodes and edges.
+
+    `extractions` is the per-unit cache {unit_id: ExtractionResult}; it is updated in place.
+    Returns (dirty_nodes, dirty_edges, deleted_nodes, deleted_edges).
+    """
+    canon = lambda n: (name_map or {}).get(n, n)  # noqa: E731
+    touched_nodes: set[str] = set()
+    touched_edges: set[frozenset] = set()
+
+    def mark(ex: ExtractionResult) -&gt; None:
+        touched_nodes.update(canon(e.name) for e in ex.entities)
+        for r in ex.relationships:
+            u, v = canon(r.source), canon(r.target)
+            if u != v:
+                touched_edges.add(frozenset((u, v)))
+                touched_nodes.update((u, v))
+
+    for uid in removed_ids:                 # 1. retract: forget the unit's records
+        old = extractions.pop(uid, None)
+        if old is not None:
+            mark(old)
+    new_ids = set()
+    for ex in new_results:                  # 2. upsert: remember the new records
+        extractions[ex.unit_id] = ex
+        new_ids.add(ex.unit_id)
+        mark(ex)
+
+    def sources(old_ids: list[str]) -&gt; list[ExtractionResult]:
+        # Where can records for this element live? Its surviving sources plus the new units.
+        ids = (set(old_ids) - removed_ids) | new_ids
+        return [extractions[i] for i in sorted(ids) if i in extractions]
+
+    deleted_nodes, deleted_edges = set(), set()
+    for key in touched_edges:               # 3. recompute each touched edge
+        u, v = sorted(key)
+        old_ids = G.edges[u, v]["source_ids"] if G.has_edge(u, v) else []
+        descs, ids, weight = [], [], 0.0
+        for ex in sources(old_ids):
+            for r in ex.relationships:
+                if {canon(r.source), canon(r.target)} == {u, v}:
+                    if r.description and r.description not in descs:
+                        descs.append(r.description)
+                    if r.source_id not in ids:
+                        ids.append(r.source_id)
+                    weight += r.strength
+        if not ids:                          # reference count reached zero
+            if G.has_edge(u, v):
+                G.remove_edge(u, v)
+                deleted_edges.add(key)
+            continue
+        for n in (u, v):
+            if n not in G:
+                G.add_node(n, descriptions=[], source_ids=[], aliases=[], type="")
+        if not G.has_edge(u, v):
+            G.add_edge(u, v)
+        G.edges[u, v].update(descriptions=descs, source_ids=ids, weight=weight,
+                             description=" ".join(descs))
+
+    for n in touched_nodes:                 # 4. recompute each touched node
+        old_ids = G.nodes[n]["source_ids"] if n in G else []
+        descs, ids, aliases, votes = [], [], [], {}
+        for ex in sources(old_ids):
+            for e in ex.entities:
+                if canon(e.name) != n:
+                    continue
+                if e.description and e.description not in descs:
+                    descs.append(e.description)
+                if e.source_id not in ids:
+                    ids.append(e.source_id)
+                if e.name != n and e.name not in aliases:
+                    aliases.append(e.name)
+                votes[e.type] = votes.get(e.type, 0) + 1
+        if not ids and (n not in G or G.degree(n) == 0):
+            if n in G:                       # no mentions and no edges left
+                G.remove_node(n)
+                deleted_nodes.add(n)
+            continue
+        if n not in G:
+            G.add_node(n)
+        G.nodes[n].update(descriptions=descs, source_ids=ids, aliases=aliases,
+                          type=max(votes, key=votes.get) if votes else G.nodes[n].get("type", ""),
+                          description=" ".join(descs), frequency=len(ids))
+
+    add_rank_attributes(G)                  # degrees changed; cheap to recompute for all
+    dirty_nodes = {n for n in touched_nodes if n in G}
+    dirty_edges = {k for k in touched_edges if G.has_edge(*sorted(k))}
+    return dirty_nodes, dirty_edges, deleted_nodes, deleted_edges</code></pre>
+
+<p>Run against the Kestrel corpus with <code>MockLLM</code>, the equivalence check holds: build from documents 01 to 11, apply document 12 with <code>upsert_units</code>, and the node set, edge set, <code>source_ids</code> and weights match a full build of all 12 documents exactly. Retracting document 03 afterwards deletes one edge whose only support was that article and leaves the rest of Deepcast's neighborhood intact, as in the diagram.</p>
+
+<h3>Name resolution during an update</h3>
+<p>New mentions must resolve against names already in the graph, or “Nair” from the interview becomes a new node next to PRIYA NAIR. The simplest correct approach is to run <code>resolve_entities</code> over the cached raw entities of all units, old and new. It is pure string and embedding work with no LLM calls, so it is cheap. Watch for one case: if the new name map renames an existing canonical node (the update revealed that TWI and TIDEWATER INSTITUTE are the same), that is a merge of two existing nodes. Every element referencing either name is touched. Treat merges as a signal to schedule a larger rebuild of the affected neighborhood, or a full rebuild if they are frequent.</p>
+
+<h3>Re-summarize only dirty elements</h3>
+<p>Dirty nodes and edges need a new description summary, and only the ones with more than one description need an LLM call. The function reuses the real prompt from <code>prompts.py</code>.</p>
+
+<pre data-file="minigraphrag/incremental.py"><code class="language-python">import json
+
+from . import prompts as P
+
+
+def summarize_dirty(llm, G, dirty_nodes, dirty_edges, max_tokens: int = 150) -&gt; int:
+    """Like graph_build.summarize_descriptions, but only for touched elements. Returns LLM calls made."""
+    calls = 0
+
+    def summarise(name: str, descriptions: list[str]) -&gt; str:
+        nonlocal calls
+        if len(descriptions) &lt;= 1:
+            return " ".join(descriptions)
+        calls += 1
+        return llm.complete(P.SUMMARIZE_DESCRIPTIONS_PROMPT.format(
+            entity_name=name, description_list=json.dumps(sorted(descriptions)),
+            max_tokens=max_tokens)).strip()
+
+    for n in dirty_nodes:
+        G.nodes[n]["description"] = summarise(n, G.nodes[n]["descriptions"])
+    for key in dirty_edges:
+        u, v = sorted(key)
+        G.edges[u, v]["description"] = summarise(json.dumps([u, v]), G.edges[u, v]["descriptions"])
+    return calls</code></pre>
+
+<p>For hub entities, even this is wasteful: KESTREL LABS may have hundreds of descriptions, and one new sentence triggers a summary of all of them. Two mitigations work well. Summarize incrementally: pass the previous summary plus only the new descriptions, and do a full re-summary on a schedule. Or skip re-summarizing when the new descriptions add little, for example when their embedding is very close to the existing summary.</p>
+
+<div class="callout warn">
+  <span class="callout-title">Human-readable ids move</span>
+  <p><code>add_rank_attributes</code> assigns <code>human_id</code> by sorted position, so adding PORT AVALON CITY COUNCIL renumbers every entity after it. Search contexts cite those short ids (<code>[Data: Entities (7)]</code>). Within one query that is fine. If you store answers with citations, store the stable names or content-addressed ids instead, or citations silently point at the wrong entity after an update.</p>
+</div>
+
+<h2>Communities and reports under change</h2>
+<p>Descriptions are local: a new mention of Deepcast changes Deepcast. Communities are global: one new edge can move a node, and on the wrong day it can move a whole cluster. You have three strategies.</p>
+
+<h3>Strategy 1: recluster, then match and reuse reports</h3>
+<p>Leiden and Louvain make no LLM calls, so rerunning them over the whole graph is cheap compared with extraction; the expensive part is the reports. So recluster with a fixed seed, then match each new community to the most similar old community at the same level using the Jaccard similarity of their member sets:</p>
+<p style="text-align:center"><em>J(A, B) = |A ∩ B| / |A ∪ B|</em></p>
+<p>Reuse the old report only if the match is strong (say J ≥ 0.8), no member of either community is dirty or deleted, and every child community also reused its report. The last rule matters because higher-level reports in <a href="12-community-reports.html">Chapter 12</a> are written from their children's reports; if a child changed, its parent's summary is stale.</p>
+
+<pre data-file="minigraphrag/incremental.py"><code class="language-python">from .communities import Community
+
+
+def jaccard(a, b) -&gt; float:
+    a, b = set(a), set(b)
+    return len(a &amp; b) / len(a | b) if a | b else 1.0
+
+
+def reports_to_regenerate(old: list[Community], new: list[Community], changed_nodes: set[str],
+                          min_overlap: float = 0.8) -&gt; dict[int, int | None]:
+    """Map each new community id to an old community id whose report can be reused, or None."""
+    decision: dict[int, int | None] = {}
+    for c in sorted(new, key=lambda c: -c.level):          # deepest level first
+        same_level = [o for o in old if o.level == c.level]
+        best = max(same_level, key=lambda o: jaccard(o.nodes, c.nodes), default=None)
+        reusable = (best is not None
+                    and jaccard(best.nodes, c.nodes) &gt;= min_overlap
+                    and not ((set(best.nodes) | set(c.nodes)) &amp; changed_nodes)
+                    and all(decision.get(ch) is not None for ch in c.children))
+        decision[c.id] = best.id if reusable else None
+    return decision</code></pre>
+
+<p>A worked example with the expected Kestrel communities. Before the interview is ingested, suppose the clusters are the five from the running example. After it, the partition is recomputed:</p>
+<table>
+  <thead><tr><th>New community</th><th>Best old match</th><th>J</th><th>Dirty or deleted members</th><th>Decision</th></tr></thead>
+  <tbody>
+    <tr><td>Kestrel Labs, Okafor, Vehl, Nair, Tern</td><td>same five</td><td>1.0</td><td>all five mentioned in the interview</td><td>Regenerate</td></tr>
+    <tr><td>Brightwater Capital, Lena Park</td><td>same two</td><td>1.0</td><td>Lena Park and Brightwater are mentioned</td><td>Regenerate</td></tr>
+    <tr><td>Ocean Health Act, City Council, Port Avalon</td><td>same three</td><td>1.0</td><td>Ocean Health Act and the council contract are mentioned</td><td>Regenerate</td></tr>
+    <tr><td>Marlow Dynamics, Deepcast</td><td>same two</td><td>1.0</td><td>both mentioned</td><td>Regenerate</td></tr>
+    <tr><td>Tidewater, Ruiz, Halden Reef, bleaching event, Sentinel</td><td>same five</td><td>1.0</td><td>Tidewater, Ruiz, Halden Reef and Sentinel mentioned</td><td>Regenerate</td></tr>
+  </tbody>
+</table>
+<p>Every report regenerates, even though the partition did not move at all. On a corpus of 12 documents where the newest one is a summary interview with the leadership team, that is the right answer: the reports really are stale, because Vehl is no longer CTO. On a large corpus the same policy regenerates only the small fraction of communities a batch of documents touches. The <em>changed</em> test is deliberately conservative. A looser policy counts a community as changed only when the share of dirty members, weighted by degree, passes a threshold, and accepts slightly stale reports in exchange for fewer calls.</p>
+
+<h3>Strategy 2: local assignment, periodic recluster</h3>
+<p>Instead of reclustering, place each new node into the neighboring community with the largest modularity gain, exactly the local move from Louvain (<a href="11-community-detection.html">Chapter 11</a>). For node <em>i</em> with total edge weight <em>k<sub>i</sub></em>, edge weight <em>k<sub>i,C</sub></em> into community <em>C</em>, community degree Σ<sub>C</sub> and total graph weight <em>m</em>:</p>
+<p style="text-align:center"><em>ΔQ(i → C) = k<sub>i,C</sub> / m − γ · Σ<sub>C</sub> · k<sub>i</sub> / (2m²)</em></p>
+<p>With hypothetical numbers <em>m</em> = 100, <em>k<sub>i</sub></em> = 6, five units of weight into a community with Σ = 60 and one unit into a community with Σ = 20: ΔQ = 0.05 − 0.018 = 0.032 for the first and 0.01 − 0.006 = 0.004 for the second, so the node joins the first. Existing nodes never move, so community ids and reports are stable. The partition slowly drifts from what a fresh run would find. Track the modularity of the maintained partition and recluster from scratch when it falls noticeably below a fresh run's, or after a fixed fraction of the graph has changed.</p>
+
+<h3>Strategy 3: no communities, union updates</h3>
+<p>LightRAG avoids the problem by not having community reports. The paper describes its incremental update as processing new documents with the same graph-based indexing steps and then taking the union of the new node and edge sets with the existing graph. There is nothing global to recompute, which is why updates are cheap. The trade-off is the one from <a href="16-lightrag.html">Chapter 16</a>: without community summaries, whole-corpus sensemaking questions such as “What are the main themes in this corpus?” have less to work with.</p>
+
+<table>
+  <thead><tr><th>Strategy</th><th>LLM cost per update</th><th>Stability of ids and reports</th><th>Quality risk</th></tr></thead>
+  <tbody>
+    <tr><td>Full rebuild</td><td>Whole corpus</td><td>Low: everything can change</td><td>None from staleness</td></tr>
+    <tr><td>Recluster, match, reuse reports</td><td>Changed extractions + dirty summaries + changed reports</td><td>Medium: depends on match threshold</td><td>Loose thresholds keep stale reports</td></tr>
+    <tr><td>Local assignment, periodic recluster</td><td>Lowest with communities</td><td>High between reclusters</td><td>Partition drifts from optimum</td></tr>
+    <tr><td>Union updates, no communities</td><td>Changed extractions + dirty summaries</td><td>High</td><td>Weaker global questions</td></tr>
+  </tbody>
+</table>
+
+<p>Microsoft GraphRAG ships a <code>graphrag update</code> command (and <code>standard-update</code> / <code>fast-update</code> indexing methods) for adding documents to an existing index; see its CLI documentation for how it merges outputs. <a href="28-frameworks-in-practice.html">Chapter 28</a> covers the framework.</p>
+
+<h3>The whole pipeline</h3>
+<div class="viz" data-viz="flow">
+<script type="application/json">
+{
+  "title": "An incremental update, end to end",
+  "perRow": 4,
+  "stages": [
+    {"label": "Diff documents", "detail": "Hash every document and compare with the manifest from the last run. Document 12, the March 2026 interview, is <strong>added</strong>; nothing is changed or removed."},
+    {"label": "Diff text units", "detail": "Chunk only touched documents with content-addressed ids. Old units of changed documents that no longer exist go into <code>removed_ids</code>; units with new hashes go into <code>to_extract</code>."},
+    {"label": "Extract new units", "detail": "Run extraction with gleaning on the 2 new units only: 4 LLM calls instead of 48. Store each <code>ExtractionResult</code> in the per-unit cache."},
+    {"label": "Resolve names", "detail": "Re-run <code>resolve_entities</code> over cached raw entities so “Nair” maps to PRIYA NAIR. A rename of an existing node is a merge: widen the update."},
+    {"label": "Upsert and retract", "detail": "<code>upsert_units</code> recomputes every touched node and edge from its remaining sources. Reference count zero means delete. Output: dirty and deleted sets."},
+    {"label": "Re-summarize dirty", "detail": "Summaries only for dirty elements with more than one description. Hubs such as KESTREL LABS: incremental summary or scheduled refresh."},
+    {"label": "Communities and reports", "detail": "Recluster with a fixed seed, match by Jaccard, regenerate reports for changed communities and their ancestors. Or assign new nodes locally."},
+    {"label": "Re-embed and swap", "detail": "Re-embed dirty entities, relationships, new units and new reports. Write a new index version and switch readers to it atomically; keep the old one for rollback."}
+  ]
+}
+</script>
+</div>
+
+<h2>Time in a graph: valid time and transaction time</h2>
+<p>Incremental indexing keeps the graph in sync with the corpus. It does not, by itself, handle facts that change. Apply document 12 and the graph contains a JONAS VEHL – KESTREL LABS edge whose descriptions call him co-founder (the 2021 Herald article) and “chief technology officer” (the 2022 supply story), and a PRIYA NAIR – KESTREL LABS edge described as “the company's new chief technology officer”. With <code>MockLLM</code> the Vehl edge has eight source units and the Nair edge three; both are well supported. Local search will happily put both into the context, and the model has to guess which one is current from description wording. For canonical question 6, “Who is the CTO of Kestrel Labs?”, that is a coin flip you should not accept. For question 15, “Who was the CTO when the bleaching event was detected?”, deleting the old edge would make the right answer impossible.</p>
+<p><a href="10-claims-temporal.html">Chapter 10</a> attached start and end dates to claims. Here you make time a first-class property of edges, and you separate two different clocks.</p>
+
+<h3>Two timelines</h3>
+<ul>
+  <li><strong>Valid time</strong> is when a fact was true in the world. Jonas Vehl held CTO_OF Kestrel Labs from 2021 until March 2026. It comes from the text.</li>
+  <li><strong>Transaction time</strong> (called <em>record time</em> in <code>minigraphrag</code>) is when your system learned something. The store learned about Vehl's role when it ingested the Herald article and learned that his term had ended when it ingested the interview. It comes from your ingestion clock.</li>
+</ul>
+<p>A store that tracks both is <em>bi-temporal</em>. Each fact edge carries four timestamps: <code>valid_from</code> and <code>valid_to</code> for valid time, <code>recorded_at</code> for when the fact was learned, and <code>invalidated_at</code> for when a later fact closed its valid interval. The Zep paper uses exactly this split: a timeline <em>T</em> for the chronological order of events, with <code>t_valid</code> and <code>t_invalid</code> on each edge, and a timeline <em>T′</em> for the order of ingestion, with <code>t′_created</code> and <code>t′_expired</code>.</p>
+<p>Why keep transaction time at all, if valid time already says when things were true? Because your knowledge was incomplete in the past, and you will need to explain past behavior. On 1 March 2026 the assistant told a user that Vehl was CTO. That was consistent with everything it had ingested. A month later the store knows better. Transaction time lets you reproduce the old answer exactly (for debugging, audits and evaluation of past runs) without pretending the new knowledge doesn't exist.</p>
+
+<h3>The Kestrel history as edges</h3>
+<p><code>minigraphrag.temporal.kestrel_timeline()</code> records the dated facts of the running example in publication order, using each document's date as <code>recorded_at</code>. Three of its edges carry the story of this chapter. Dates are <code>datetime.date</code> values, intervals are half-open (start inclusive, end exclusive), and an empty end means “as far as we know, still true”.</p>
+<table>
+  <thead><tr><th>Edge</th><th>Fact</th><th>valid_from</th><th>valid_to</th><th>recorded_at</th><th>invalidated_at</th><th>prior_valid_to</th></tr></thead>
+  <tbody>
+    <tr><td>A</td><td>Jonas Vehl CTO_OF Kestrel Labs</td><td>2021-01-01</td><td>2026-03-01</td><td>2021-10-04 (doc 01)</td><td>2026-03-26 (doc 12)</td><td>open</td></tr>
+    <tr><td>B</td><td>Priya Nair CTO_OF Kestrel Labs</td><td>2026-03-01</td><td>open</td><td>2026-03-26 (doc 12)</td><td>none</td><td>none</td></tr>
+    <tr><td>C</td><td>Deepcast SUPPLIED Kestrel Labs</td><td>2022-08-01</td><td>2025-06-30</td><td>2022-08-09 (doc 03)</td><td>2025-05-14 (doc 08)</td><td>open</td></tr>
+  </tbody>
+</table>
+<p>Edge A is one edge, not two. When Nair's fact arrived, <code>add_fact</code> closed A's <code>valid_to</code> at her <code>valid_from</code>, stamped <code>invalidated_at</code> with the interview date, and saved what the store believed before in <code>prior_valid_to</code> (an open end). That saved value is what makes transaction-time queries possible: asked “as known on 2026-03-20”, the store ignores the invalidation that had not happened yet and uses the prior end.</p>
+<p>Three details matter. The Herald only says Kestrel was founded “this year”, so <code>parse_date("2021")</code> gives 2021-01-01, a coarse lower bound; store the granularity if you can. Edge C was invalidated in May 2025 with a valid end at the end of June: the board memo announced a <em>future</em> end date. And because intervals are half-open, <code>valid_to</code> 2025-06-30 excludes the last day of June; 2025-07-01 would match “at the end of June” more precisely. Off-by-one dates like this are the most common temporal bug in practice.</p>
+
+<p>In the plane of valid time against transaction time, an invalidated edge is two rectangles: before <code>invalidated_at</code> its valid interval runs to <code>prior_valid_to</code>, and after it, to <code>valid_to</code>. An as-of query is a point: “what was true at valid time <em>v</em>, according to what the store knew at transaction time <em>t</em>?” The answer is every rectangle containing the point.</p>
+
+<div class="viz" data-viz="ch27-bitemporal">
+<script type="application/json">
+{
+  "title": "Bi-temporal facts as rectangles",
+  "subtitle": "Move both sliders; the facts whose rectangle contains the point are the answer",
+  "height": 430,
+  "startYear": 2021,
+  "validMax": 72,
+  "txMax": 72,
+  "txBreak": 48,
+  "txBreakShare": 0.35,
+  "now": 68.5,
+  "nowLabel": "2026-09-16",
+  "relations": {"CTO_OF": 1, "SUPPLIED": 2},
+  "rows": [
+    {"id": "A", "rel": "CTO_OF", "short": "A: Vehl, before invalidation", "fact": "Jonas Vehl CTO_OF Kestrel Labs", "vFrom": 0, "vTo": null, "tFrom": 9.1, "tTo": 62.83, "dates": "valid from 2021-01-01, end open (prior_valid_to); recorded 2021-10-04"},
+    {"id": "A", "rel": "CTO_OF", "short": "A: Vehl, closed", "fact": "Jonas Vehl CTO_OF Kestrel Labs", "vFrom": 0, "vTo": 62, "tFrom": 62.83, "tTo": null, "dates": "valid 2021-01-01 to 2026-03-01; invalidated 2026-03-26"},
+    {"id": "B", "rel": "CTO_OF", "short": "B: Nair", "fact": "Priya Nair CTO_OF Kestrel Labs", "vFrom": 62, "vTo": null, "tFrom": 62.83, "tTo": null, "dates": "valid from 2026-03-01, end open; recorded 2026-03-26"},
+    {"id": "C", "rel": "SUPPLIED", "short": "C: Deepcast, before invalidation", "fact": "Deepcast SUPPLIED Kestrel Labs", "vFrom": 19, "vTo": null, "tFrom": 19.26, "tTo": 52.43, "dates": "valid from 2022-08-01, end open (prior_valid_to); recorded 2022-08-09"},
+    {"id": "C", "rel": "SUPPLIED", "short": "C: closed", "fact": "Deepcast SUPPLIED Kestrel Labs", "vFrom": 19, "vTo": 53.97, "tFrom": 52.43, "tTo": null, "dates": "valid 2022-08-01 to 2025-06-30; invalidated 2025-05-14"}
+  ],
+  "presets": [
+    {"label": "Q6 today", "rel": "CTO_OF", "v": 68, "t": 68, "note": "Canonical question 6 asked today: edge B. <code>holders(G, \"CTO_OF\", \"Kestrel Labs\", \"2026-09-16\")</code> returns <code>['Priya Nair']</code>."},
+    {"label": "Q6 in Feb 2026", "rel": "CTO_OF", "v": 61, "t": 61, "note": "Asked in February 2026, the store answers Vehl from edge A, which was correct at the time."},
+    {"label": "Stale belief", "rel": "CTO_OF", "v": 64, "t": 62, "note": "On 2026-03-01 the store had not ingested the interview. Asked about May 2026, it believed Vehl's term was open-ended (edge A with its prior end). Transaction time lets you reproduce and explain that wrong answer."},
+    {"label": "Q15", "rel": "CTO_OF", "v": 43, "t": 68, "note": "Question 15: who was CTO when the bleaching was detected in August 2024? Edge A, closed but not deleted, still answers Vehl."},
+    {"label": "Q7", "rel": "SUPPLIED", "v": 42, "t": 68, "note": "Question 7: who supplied Kestrel's sonar in 2024? Edge C: Deepcast."},
+    {"label": "Supply outlook, Mar 2025", "rel": "SUPPLIED", "v": 56, "t": 50, "note": "In March 2025, before the board memo, the store believed Deepcast would still supply Kestrel in September 2025. Move the transaction slider past May 2025 and the answer becomes empty."}
+  ]
+}
+</script>
+</div>
+
+<h2>Invalidation, as-of queries and event sourcing</h2>
+
+<h3>When does a new fact contradict an old one?</h3>
+<p>Invalidation needs a rule for what counts as a contradiction. Most relations are not exclusive: Brightwater Capital INVESTED_IN Kestrel Labs twice, and Kestrel RUNS both Sentinel and Tern. A new edge of those types never closes an old one. Some relations are <em>functional</em> in one direction: a company has one CTO and one CEO at a time. For those, a new holder overlapping an existing holder's valid interval is a contradiction. There are three ways to detect it, from cheapest to most general.</p>
+<ol>
+  <li><strong>Schema rules.</strong> Declare CTO_OF and CEO_OF exclusive in their target, as <code>EXCLUSIVE_RELATIONS</code> does in <code>minigraphrag/temporal.py</code>. Detection is a lookup. This requires typed relations, which is one more reason to extract a relation label alongside the description (<a href="08-entity-relation-extraction.html">Chapter 8</a>).</li>
+  <li><strong>Explicit end statements.</strong> “Deepcast will stop accepting new orders from outside customers at the end of June” ends SUPPLIED without any new supplier. Claim extraction with <code>end_date</code> (Chapter 10) produces this directly.</li>
+  <li><strong>LLM comparison.</strong> For free-text relations, retrieve existing edges between the same or semantically similar entities and ask the model whether the new edge contradicts any of them. This is how Zep describes Graphiti's approach: an LLM compares new edges against semantically related existing edges, and when it finds temporally overlapping contradictions it sets the old edge's <code>t_invalid</code> to the new edge's <code>t_valid</code>.</li>
+</ol>
+
+<pre data-file="minigraphrag/prompts.py"><code class="language-python"># Illustrative prompt for option 3; minigraphrag's temporal module uses schema rules.
+EDGE_CONTRADICTION_PROMPT = """---Role---
+You maintain a knowledge graph whose facts change over time.
+
+---New fact---
+{new_fact} (valid from {new_valid_from})
+
+---Existing facts about the same entities---
+{existing_facts}
+
+---Goal---
+List the ids of existing facts that can no longer be true from {new_valid_from} onward
+because of the new fact. A fact that can be true at the same time as the new fact
+is NOT contradicted. Return JSON: {{"contradicted": [&lt;id&gt;, ...], "reason": "&lt;one sentence&gt;"}}
+"""</code></pre>
+
+<h3>Implementing add_fact, as_of and holders</h3>
+<p><code>minigraphrag/temporal.py</code> stores facts as edges in a <code>networkx.MultiDiGraph</code>, because the same pair of entities can hold many facts over time. New facts never delete old ones. For exclusive relations, a new holder closes the valid interval of the current holder and remembers the previous end. Here is the module, lightly trimmed.</p>
+
+<pre data-file="minigraphrag/temporal.py"><code class="language-python">from datetime import date
+
+import networkx as nx
+
+# Relations where a target can have only one source at a time (one CTO per company).
+EXCLUSIVE_RELATIONS: set[str] = {"CTO_OF", "CEO_OF"}
+
+
+def parse_date(value: str | date | None) -&gt; date | None:
+    """Accept date objects or ISO-ish strings: '2026', '2026-03', '2026-03-26'."""
+    if value is None or isinstance(value, date):
+        return value
+    parts = [int(p) for p in str(value).split("-")]
+    return date(parts[0], parts[1] if len(parts) &gt; 1 else 1, parts[2] if len(parts) &gt; 2 else 1)
+
+
+def new_temporal_graph() -&gt; nx.MultiDiGraph:
+    """Directed multigraph: the same pair can hold many facts over time."""
+    return nx.MultiDiGraph()
+
+
+def add_fact(G, source, relation, target, valid_from, valid_to=None, recorded_at=None,
+             description="", exclusive=None) -&gt; int:
+    """Add a fact edge, invalidating contradicting facts. Returns the new edge key."""
+    vf, vt = parse_date(valid_from), parse_date(valid_to)
+    rec = parse_date(recorded_at) or vf
+    exclusive = relation in EXCLUSIVE_RELATIONS if exclusive is None else exclusive
+
+    if exclusive and target in G:
+        for old_source, _, key, d in list(G.in_edges(target, keys=True, data=True)):
+            if d["relation"] != relation or old_source == source or d["invalidated_at"] is not None:
+                continue
+            if d["valid_to"] is None or d["valid_to"] &gt; vf:
+                # Close the old interval where the new one begins; remember what we believed before.
+                d["prior_valid_to"] = d["valid_to"]
+                d["valid_to"] = vf
+                d["invalidated_at"] = rec
+
+    return G.add_edge(source, target, relation=relation, description=description,
+                      valid_from=vf, valid_to=vt, recorded_at=rec,
+                      invalidated_at=None, prior_valid_to=None)
+
+
+def is_valid(d: dict, at: date, known_at: date | None = None) -&gt; bool:
+    """Was this fact true at `at`, according to what was recorded by `known_at` (default: now)?"""
+    valid_to = d["valid_to"]
+    if known_at is not None:
+        if d["recorded_at"] &gt; known_at:
+            return False                      # we hadn't learned this fact yet
+        if d["invalidated_at"] is not None and d["invalidated_at"] &gt; known_at:
+            valid_to = d["prior_valid_to"]    # the invalidation hadn't happened yet
+    return d["valid_from"] &lt;= at and (valid_to is None or at &lt; valid_to)
+
+
+def as_of(G, at, known_at=None) -&gt; nx.MultiDiGraph:
+    """Snapshot of the facts valid at `at` (optionally as believed at `known_at`)."""
+    at_d, known_d = parse_date(at), parse_date(known_at)
+    snap = nx.MultiDiGraph()
+    snap.add_nodes_from(G.nodes(data=True))
+    for u, v, k, d in G.edges(keys=True, data=True):
+        if is_valid(d, at_d, known_d):
+            snap.add_edge(u, v, key=k, **d)
+    return snap
+
+
+def holders(G, relation, target, at, known_at=None) -&gt; list[str]:
+    """Sources holding `relation` to `target` at a date, e.g. holders(G, 'CTO_OF', 'Kestrel Labs', '2024-08')."""
+    snap = as_of(G, at, known_at)
+    if target not in snap:
+        return []
+    return sorted({u for u, _, d in snap.in_edges(target, data=True) if d["relation"] == relation})</code></pre>
+
+<p>Three design choices deserve a comment. Storing one <code>prior_valid_to</code> instead of versioned rows keeps the graph small and queries simple, at the price of remembering only one previous belief per edge; the SQL design later in this chapter versions rows instead and keeps unlimited history. <code>as_of</code> returns a snapshot graph, so every retrieval method from Part 3 can run on it unchanged. And <code>add_fact</code> assumes facts arrive in the order they became true: it closes any open holder whose interval reaches the new fact's <code>valid_from</code>, without asking which of the two started first. <code>kestrel_timeline</code> ingests in publication order, so that assumption holds here; Exercise 27.5 shows what happens when it does not, and how to fix it. Replaying the running example:</p>
+
+<pre data-file="examples/temporal_kestrel.py"><code class="language-python">from minigraphrag.temporal import holders, kestrel_timeline
+
+G = kestrel_timeline()   # dated Kestrel facts, recorded in publication order
+
+print(holders(G, "CTO_OF", "Kestrel Labs", "2026-09-16"))                        # ['Priya Nair']  question 6
+print(holders(G, "CTO_OF", "Kestrel Labs", "2024-08"))                           # ['Jonas Vehl']  question 15
+print(holders(G, "CTO_OF", "Kestrel Labs", "2026-06", known_at="2026-02"))       # ['Jonas Vehl']  what we believed in February
+print(holders(G, "SUPPLIED", "Kestrel Labs", "2024-06"))                         # ['Deepcast']    question 7
+print(holders(G, "SUPPLIED", "Kestrel Labs", "2025-09", known_at="2025-03"))     # ['Deepcast']    before the board memo
+print(holders(G, "SUPPLIED", "Kestrel Labs", "2025-09"))                         # []</code></pre>
+
+<p>Explicit end statements do not need a contradicting fact. <code>kestrel_timeline</code> closes the Deepcast edge directly when the board memo is recorded, setting the same three fields <code>add_fact</code> sets:</p>
+
+<pre data-file="minigraphrag/temporal.py"><code class="language-python">    # The supply ended when the board memo recorded it: close that edge explicitly.
+    for u, v, d in G.edges(data=True):
+        if d["relation"] == "SUPPLIED":
+            d["prior_valid_to"], d["valid_to"], d["invalidated_at"] = None, date(2025, 6, 30), date(2025, 5, 14)</code></pre>
+
+<div class="callout tip">
+  <span class="callout-title">Resolve relative dates at ingestion</span>
+  <p>The interview says “as of March 2026” but also “big news this month” and “bought Deepcast last year”. Pass the document's own date (its publication or recording date) into the extraction prompt so the model can turn relative expressions into absolute ones. Graphiti's <code>add_episode</code> takes a <code>reference_time</code> for the same reason. Without it, “last year” resolves relative to whenever the extractor happens to run.</p>
+</div>
+
+<h3>Using time at query time</h3>
+<p>Temporal edges plug into the retrieval methods you already have. Before building a local search context (<a href="14-local-search.html">Chapter 14</a>), take the snapshot <code>as_of(G, question_time)</code> and retrieve over it, where the question time defaults to today and is overridden when the question names a date (“in 2024”, “when the bleaching event was detected”). For questions about change (“How has Kestrel Labs' leadership evolved?”) do the opposite: include the whole history, ordered by <code>valid_from</code>, with the intervals printed. In both cases, put the dates and today's date into the context. The post-graph-rag paper reports that grounding the prompt in temporal information at synthesis time measurably helps temporal reasoning, which matches what you would expect: a model cannot reason about an interval it cannot see.</p>
+
+<pre data-file="examples/temporal_context.txt"><code>Today is 2026-09-16.
+-----Relationships (with valid time)-----
+id|source|relation|target|valid_from|valid_to
+0|Jonas Vehl|CTO_OF|Kestrel Labs|2021-01-01|2026-03-01
+1|Priya Nair|CTO_OF|Kestrel Labs|2026-03-01|present
+2|Deepcast|SUPPLIED|Kestrel Labs|2022-08-01|2025-06-30</code></pre>
+
+<h3>Event sourcing</h3>
+<p>You can go one step further and store the log rather than the current edges: every ingestion appends events such as <code>assert(fact, at)</code>, <code>close(fact, valid_to, at)</code> and <code>retract(source_id, at)</code>. The fact graph is a fold over the log. This is <em>event sourcing</em>, and it pairs naturally with both halves of this chapter. The state as known at transaction time <em>t</em> is the fold over events with <code>at ≤ t</code>. A bug in contradiction detection can be fixed and the log replayed to rebuild a corrected graph. It also removes the one-level limit of <code>prior_valid_to</code>: every past belief is in the log. And the text-unit retractions from the incremental indexer become events in the same log, so “why did this edge disappear?” has an answer with a timestamp and a source.</p>
+<p>Two kinds of “removal” are easy to confuse. Retracting a document means the store no longer has evidence for the facts it asserted: record the retraction in transaction time. A fact ending in the world, like Vehl's CTO term, is a change of valid time, and the closed edge is still believed. Mixing the two is the most common temporal modeling bug.</p>
+
+<h2>Graphiti, Zep and a Postgres-native design</h2>
+
+<h3>Zep and Graphiti</h3>
+<p>Zep is a memory service for agents, and Graphiti is the open-source temporal knowledge graph engine at its core. The Zep paper organizes the graph in three tiers, each built from the one below.</p>
+
+<figure>
+  <div class="diagram">
+    <svg viewBox="0 0 680 340" role="img" aria-labelledby="zep-title">
+      <title id="zep-title">Zep's three graph tiers applied to the Kestrel leadership change</title>
+      <defs><marker id="zep-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="d-fill-ink" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+      <rect class="d-box comm" x="10" y="10" width="660" height="66" rx="8"/>
+      <text class="d-text bold" x="24" y="32">Community subgraph</text>
+      <text class="d-text small" x="24" y="50">Clusters of strongly connected entities, each with a summary</text>
+      <rect class="d-box" x="420" y="22" width="236" height="42" rx="6"/>
+      <text class="d-text" x="432" y="40">Kestrel leadership</text>
+      <text class="d-text small" x="432" y="56">Okafor, Vehl, Nair, Kestrel Labs</text>
+
+      <rect class="d-box node" x="10" y="92" width="660" height="146" rx="8"/>
+      <text class="d-text bold" x="24" y="114">Semantic entity subgraph</text>
+      <text class="d-text small" x="24" y="132">Entities resolved against existing nodes;</text>
+      <text class="d-text small" x="24" y="146">edges are facts with t_valid and t_invalid</text>
+      <circle class="d-node" cx="300" cy="200" r="10"/>
+      <text class="d-text" x="264" y="228">JONAS VEHL</text>
+      <circle class="d-node hot" cx="470" cy="150" r="10"/>
+      <text class="d-text" x="486" y="146">KESTREL LABS</text>
+      <circle class="d-node" cx="600" cy="200" r="10"/>
+      <text class="d-text" x="562" y="228">PRIYA NAIR</text>
+      <line class="d-line dash" x1="309" y1="195" x2="461" y2="155"/>
+      <line class="d-line hot" x1="591" y1="195" x2="479" y2="155"/>
+      <text class="d-text small" x="272" y="162">CTO_OF 2021 → 2026-03</text>
+      <text class="d-text small" x="272" y="176">(t_invalid set)</text>
+      <text class="d-text small" x="540" y="178">CTO_OF 2026-03 →</text>
+
+      <rect class="d-box edge" x="10" y="254" width="660" height="76" rx="8"/>
+      <text class="d-text bold" x="24" y="276">Episode subgraph</text>
+      <text class="d-text small" x="24" y="294">Raw inputs: messages, text or JSON,</text>
+      <text class="d-text small" x="24" y="308">each with a reference time</text>
+      <rect class="d-box" x="260" y="270" width="170" height="44" rx="6"/>
+      <text class="d-text small" x="270" y="288">Herald article</text>
+      <text class="d-text mono" x="270" y="304">2021-10-04</text>
+      <rect class="d-box" x="480" y="270" width="176" height="44" rx="6"/>
+      <text class="d-text small" x="490" y="288">Leadership interview</text>
+      <text class="d-text mono" x="490" y="304">2026-03-26</text>
+      <line class="d-line faint" x1="330" y1="270" x2="302" y2="240" marker-end="url(#zep-arrow)"/>
+      <line class="d-line faint" x1="570" y1="270" x2="598" y2="240" marker-end="url(#zep-arrow)"/>
+      <line class="d-line faint" x1="470" y1="92" x2="520" y2="66" marker-end="url(#zep-arrow)"/>
+    </svg>
+  </div>
+  <figcaption>The episode tier keeps the raw inputs, so every fact can be traced to what was said and when. When the interview episode produces PRIYA NAIR CTO_OF KESTREL LABS, the contradiction check invalidates Vehl's edge rather than deleting it. Communities summarize the entity tier.</figcaption>
+</figure>
+
+<ul>
+  <li><strong>Episode subgraph.</strong> Episodes hold raw input data: messages, text or JSON. They are the provenance layer, playing the role that text units play in GraphRAG.</li>
+  <li><strong>Semantic entity subgraph.</strong> Entities extracted from episodes and resolved against existing graph entities. The paper describes resolution as a combination of embedding similarity search, a full-text search over existing names and summaries for extra candidates, and an LLM deduplication prompt. Edges between entities are facts carrying the four bi-temporal timestamps.</li>
+  <li><strong>Community subgraph.</strong> Clusters of strongly connected entities with high-level summaries, the same idea as GraphRAG community reports.</li>
+</ul>
+<p>Retrieval is hybrid. The paper lists three search functions (cosine similarity, Okapi BM25 full-text search and breadth-first search over the graph) and rerankers that include reciprocal rank fusion and maximal marginal relevance (<a href="21-hybrid-design-patterns.html">Chapter 21</a>), an episode-mentions reranker, a node-distance reranker and cross-encoders. The paper reports that Zep edges out MemGPT on the Deep Memory Retrieval benchmark (94.8% against 93.4%) and, on LongMemEval, improves accuracy by up to 18.5% while cutting response latency by 90% against baseline implementations. Those are the authors' own measurements; the design is what transfers.</p>
+
+<p>Here is the Kestrel leadership change through Graphiti's Python API. Graphiti needs a graph database (Neo4j or FalkorDB, among others) and an LLM API key.</p>
+
+<pre data-file="examples/graphiti_kestrel.py"><code class="language-python">import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
+
+from graphiti_core import Graphiti
+from graphiti_core.nodes import EpisodeType
+
+CORPUS = Path("data/corpus")
+EPISODES = [  # (file, reference time = when the text was published or recorded)
+    ("01_herald_kestrel_founding.md", datetime(2021, 10, 4, tzinfo=timezone.utc)),
+    ("12_interview_leadership_change_2026.md", datetime(2026, 3, 26, tzinfo=timezone.utc)),
+]
+
+
+async def main():
+    graphiti = Graphiti("bolt://localhost:7687", "neo4j", "password")
+    try:
+        await graphiti.build_indices_and_constraints()
+        for name, when in EPISODES:           # ingest in publication order
+            await graphiti.add_episode(
+                name=name,
+                episode_body=(CORPUS / name).read_text(),
+                source=EpisodeType.text,
+                source_description="Kestrel Labs corpus document",
+                reference_time=when,
+            )
+        for edge in await graphiti.search("Who is the CTO of Kestrel Labs?"):
+            print(edge.fact, "| valid:", edge.valid_at, "| invalid:", edge.invalid_at)
+    finally:
+        await graphiti.close()
+
+
+asyncio.run(main())</code></pre>
+
+<p>After the second episode you should see a fact about Vehl as CTO with an <code>invalid_at</code> around March 2026 and a fact about Nair with no <code>invalid_at</code>. Exact fact wording depends on the LLM. Compare the concepts with what you built: episodes are text units, <code>reference_time</code> is the document date you pass to extraction, <code>valid_at</code>/<code>invalid_at</code> are <code>valid_from</code>/<code>valid_to</code>, and Graphiti's <code>created_at</code>/<code>expired_at</code> on each edge play the role of <code>recorded_at</code>/<code>invalidated_at</code>.</p>
+
+<div class="callout paper">
+  <span class="callout-title">Rasmussen et al., Zep: A Temporal Knowledge Graph Architecture for Agent Memory (2025)</span>
+  <p>Zep's design choice worth copying is that invalidation never deletes. Old edges get an invalid time, so the graph can answer both “what is true now” and “what was true then”, and every fact still points back to the episode that asserted it. The choice to run an LLM contradiction check on new edges buys generality over free-text relations at the price of extra LLM work on every ingested episode.</p>
+</div>
+
+<h3>A Postgres-native bi-temporal design</h3>
+<p>You don't need a graph database to do this. The post-graph-rag paper describes an open-source engine that keeps chunks with embeddings, a canonical entity graph and community summaries in a single PostgreSQL database. It validates extraction output at write time, rejecting vague predicates and unresolved entities, and adds a bi-temporal layer that records both when a relation held and when the system learned it, which lets it supersede incompatible earlier assertions. Its evaluation also highlights putting temporal grounding into the synthesis prompt.</p>
+<p>Postgres has the pieces built in. Range types represent intervals, and an exclusion constraint can enforce the functional rule for CTO_OF inside the database. The schema below is an illustration of the technique, not post-graph-rag's actual schema.</p>
+
+<pre data-file="sql/bitemporal_edges.sql"><code class="language-sql">CREATE EXTENSION IF NOT EXISTS btree_gist;
+
+CREATE TABLE fact (
+  id          bigserial PRIMARY KEY,
+  subject     text      NOT NULL,
+  relation    text      NOT NULL,
+  object      text      NOT NULL,
+  valid       daterange NOT NULL,                        -- valid time, [from, to)
+  tx          tstzrange NOT NULL DEFAULT tstzrange(now(), NULL),  -- transaction time
+  source_id   text      NOT NULL,
+  -- Among rows we currently believe, a company cannot have two CTOs at overlapping times.
+  EXCLUDE USING gist (object WITH =, relation WITH =, valid WITH &amp;&amp;)
+    WHERE (relation = 'CTO_OF' AND upper_inf(tx))
+);
+
+-- Question 15 as the store knows it today: who was CTO on 15 August 2024?
+SELECT subject FROM fact
+WHERE relation = 'CTO_OF' AND object = 'KESTREL LABS'
+  AND valid @&gt; DATE '2024-08-15'
+  AND tx    @&gt; now();
+
+-- What did we believe on 1 March 2026 about who would be CTO in May 2026?
+SELECT subject FROM fact
+WHERE relation = 'CTO_OF' AND object = 'KESTREL LABS'
+  AND valid @&gt; DATE '2026-05-01'
+  AND tx    @&gt; TIMESTAMPTZ '2026-03-01';</code></pre>
+
+<p>The exclusion constraint turns a forgotten invalidation into an insert error instead of a silently inconsistent graph. Unlike <code>minigraphrag</code>'s single edge with <code>prior_valid_to</code>, this design versions rows: invalidating Vehl's term closes the <code>tx</code> range of his current row and inserts a corrected row with a closed <code>valid</code> range. The price is ordering: that close and insert must happen in the same database transaction as Nair's insert, before it.</p>
+
+<h3>Trade-offs</h3>
+<table>
+  <thead><tr><th>Approach</th><th>Answers “now”</th><th>Answers “then”</th><th>Explains past answers</th><th>Cost</th></tr></thead>
+  <tbody>
+    <tr><td>Overwrite edges on change</td><td>Yes</td><td>No</td><td>No</td><td>Lowest</td></tr>
+    <tr><td>Valid time only (Chapter 10 claims)</td><td>Yes</td><td>Yes</td><td>No: corrections overwrite history</td><td>Low</td></tr>
+    <tr><td>Bi-temporal edges or rows</td><td>Yes</td><td>Yes</td><td>Yes</td><td>More rows, two-axis filters in every query</td></tr>
+    <tr><td>Event-sourced log + folded table</td><td>Yes</td><td>Yes</td><td>Yes, and replayable after bug fixes</td><td>Log storage, replay tooling</td></tr>
+  </tbody>
+</table>
+
+<h2>Exercises</h2>
+
+<section class="exercise" data-level="warmup">
+  <h4>Exercise 27.1 <span class="level">Warm-up</span></h4>
+  <p>A small graph has these elements (unit ids abbreviated, strengths in parentheses):</p>
+  <ul>
+    <li>Edge MARLOW DYNAMICS – DEEPCAST: 07-a (9), 08-a (7), 12-a (6)</li>
+    <li>Edge PRIYA NAIR – MARLOW DYNAMICS: 05-a (8), 12-a (5)</li>
+    <li>Edge MARLOW DYNAMICS – KESTREL LABS: 12-b (6)</li>
+    <li>Node MARLOW DYNAMICS mentioned by 05-a, 07-a, 08-a, 12-a, 12-b</li>
+  </ul>
+  <p>Document 12 is retracted (units 12-a and 12-b). By hand, give each element's new <code>source_ids</code>, weight and fate, and list the dirty and deleted sets.</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ul>
+      <li>MARLOW DYNAMICS – DEEPCAST: sources 07-a, 08-a; weight 9 + 7 = 16 (was 22); kept, dirty.</li>
+      <li>PRIYA NAIR – MARLOW DYNAMICS: sources 05-a; weight 8 (was 13); kept, dirty.</li>
+      <li>MARLOW DYNAMICS – KESTREL LABS: no sources left; reference count 0; deleted.</li>
+      <li>MARLOW DYNAMICS: sources 05-a, 07-a, 08-a; frequency 3; kept, dirty. DEEPCAST, PRIYA NAIR and KESTREL LABS are touched as endpoints, so they are dirty too (their degree changed and, if 12-a or 12-b described them, so did their descriptions).</li>
+    </ul>
+    <p>Dirty edges: {MARLOW–DEEPCAST, NAIR–MARLOW}. Deleted edges: {MARLOW–KESTREL LABS}. Dirty nodes: {MARLOW DYNAMICS, DEEPCAST, PRIYA NAIR, KESTREL LABS}. Deleted nodes: none, because every endpoint still has mentions. Weights are recomputed from the surviving records (9 + 7), not decremented (22 − 6), which gives the same number here but stays correct when records were deduplicated or name mapping changed.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 27.2 <span class="level">Core</span></h4>
+  <p>Using edges A, B and C from the table and the semantics of <code>is_valid</code>, work out by hand what <code>holders(G, relation, target, at, known_at)</code> returns for each call, and which branch of <code>is_valid</code> decides it.</p>
+  <ol>
+    <li><code>holders(G, "CTO_OF", "Kestrel Labs", "2026-04-15", known_at="2026-03-20")</code></li>
+    <li><code>holders(G, "CTO_OF", "Kestrel Labs", "2026-04-15", known_at="2026-04-01")</code></li>
+    <li><code>holders(G, "CTO_OF", "Kestrel Labs", "2021-06-01", known_at="2021-06-01")</code></li>
+    <li><code>holders(G, "SUPPLIED", "Kestrel Labs", "2025-08-01", known_at="2025-05-14")</code></li>
+    <li><code>holders(G, "SUPPLIED", "Kestrel Labs", "2025-06-30")</code></li>
+  </ol>
+  <details class="hint"><summary>Hint</summary><p>Check <code>recorded_at &gt; known_at</code> first, then whether the invalidation had happened by <code>known_at</code> (if not, use <code>prior_valid_to</code>), then the half-open valid interval.</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <ol>
+      <li><strong>['Jonas Vehl']</strong>. Edge A was recorded 2021-10-04 ≤ 2026-03-20, and its invalidation (2026-03-26) is after known_at, so <code>valid_to</code> falls back to <code>prior_valid_to</code> = open. 2021-01-01 ≤ 2026-04-15, valid. Edge B was recorded 2026-03-26 &gt; 2026-03-20: not yet learned.</li>
+      <li><strong>['Priya Nair']</strong>. By 2026-04-01 the invalidation has happened, so A uses <code>valid_to</code> = 2026-03-01 and 2026-04-15 is outside. B is recorded and valid from 2026-03-01.</li>
+      <li><strong>[]</strong>. A's valid interval covers 2021-06-01, but A was recorded on 2021-10-04, after known_at. The store had not heard of Kestrel Labs yet. With valid time alone, a replay of June 2021 would wrongly answer Vehl.</li>
+      <li><strong>[]</strong>. C's invalidation date 2025-05-14 is not after known_at (they are equal), so the closed <code>valid_to</code> 2025-06-30 applies and 2025-08-01 is outside it. From the day the memo was recorded, the store knows Deepcast will not be supplying in August.</li>
+      <li><strong>[]</strong>, which is arguably wrong. <code>valid_to</code> is exclusive, so 2025-06-30 is outside the interval even though the memo says supply stops “at the end of June”. <code>holders(..., "2025-06-29")</code> returns <code>['Deepcast']</code>. The fix is in the data, not the code: an end “at the end of June” should be recorded as <code>valid_to=date(2025, 7, 1)</code>.</li>
+    </ol>
+    <p>You can confirm all five with <code>kestrel_timeline()</code>; they are the values the reference implementation returns.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 27.3 <span class="level">Core</span></h4>
+  <p>Write a pytest test that proves incremental indexing is equivalent to a full build on the Kestrel corpus: build from documents 01–11, apply document 12 with <code>plan_unit_changes</code> and <code>upsert_units</code>, and compare with a full build of all 12 documents. Use <code>MockLLM</code> and skip description summaries. What must be identical, and what can legitimately differ?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <pre><code class="language-python">from minigraphrag.chunking import load_documents, chunk_documents
+from minigraphrag.extraction import extract_from_unit
+from minigraphrag.graph_build import build_graph
+from minigraphrag.llm import MockLLM
+from minigraphrag.resolution import resolve_entities
+from minigraphrag.incremental import (content_addressed, content_hash, diff_documents,
+                                      plan_unit_changes, upsert_units)
+
+def extract_all(llm, units):
+    return {u.id: extract_from_unit(llm, u, None, 1) for u in units}
+
+def name_map_for(extractions):
+    return resolve_entities([e for ex in extractions.values() for e in ex.entities])
+
+def test_incremental_equals_full_build():
+    llm = MockLLM()
+    docs = load_documents("data/corpus")
+    old_docs = {d: t for d, t in docs.items() if not d.startswith("12_")}
+
+    # Old index
+    old_units = content_addressed(chunk_documents(old_docs, 300, 50))
+    cache = extract_all(llm, old_units)
+    G = build_graph(list(cache.values()), llm=None, name_map=name_map_for(cache))
+
+    # Incremental update
+    manifest = {d: content_hash(t) for d, t in old_docs.items()}
+    added, changed, removed, _ = diff_documents(manifest, docs)
+    assert added == ["12_interview_leadership_change_2026"] and not changed and not removed
+    removed_ids, to_extract, _ = plan_unit_changes({u.id: u for u in old_units}, docs,
+                                                   set(added + changed + removed))
+    calls_before = llm.calls
+    new_results = [extract_from_unit(llm, u, None, 1) for u in to_extract]
+    assert llm.calls - calls_before == 2 * len(to_extract)      # e(1) = 2 calls per unit
+    new_cache = {**cache, **{ex.unit_id: ex for ex in new_results}}
+    upsert_units(G, cache, removed_ids, new_results, name_map_for(new_cache))
+
+    # Full build of everything
+    full_cache = extract_all(MockLLM(), content_addressed(chunk_documents(docs, 300, 50)))
+    F = build_graph(list(full_cache.values()), llm=None, name_map=name_map_for(full_cache))
+
+    assert set(G.nodes) == set(F.nodes)
+    assert {frozenset(e) for e in G.edges} == {frozenset(e) for e in F.edges}
+    for u, v in F.edges:
+        assert sorted(G.edges[u, v]["source_ids"]) == sorted(F.edges[u, v]["source_ids"])
+        assert G.edges[u, v]["weight"] == F.edges[u, v]["weight"]
+    for n in F.nodes:
+        assert sorted(G.nodes[n]["source_ids"]) == sorted(F.nodes[n]["source_ids"])
+        assert G.nodes[n]["type"] == F.nodes[n]["type"]</code></pre>
+    <p>Identical: node and edge sets, <code>source_ids</code>, weights, types and the per-unit extraction records (MockLLM is deterministic). Allowed to differ: the <em>order</em> of <code>descriptions</code> and <code>source_ids</code> lists (hence the sorts), and with a real LLM, the text of summaries and reports. The test also pins the extraction call count to 2 × ΔU, which catches a regression where the updater silently re-extracts old units. If you enable summaries, compare the <em>sets of descriptions</em> rather than the summary text.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="core">
+  <h4>Exercise 27.4 <span class="level">Core</span></h4>
+  <p>You maintain a corpus of 40,000 text units. Each day 1% of units change. Extraction uses <em>g</em> = 1. Summaries: a full build makes 9,000 summary calls; each changed unit dirties on average 6 elements that need a summary, and dirty sets of different units overlap by 50%. Reports: 1,200 communities; an update regenerates 15% of them. (a) Compute daily LLM calls for a nightly full rebuild and for an incremental update. (b) Which term dominates the incremental cost, and what would you do about it?</p>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) Full rebuild: extraction 40,000 × 2 = 80,000; summaries 9,000; reports 1,200. Total 90,200 calls per day.</p>
+    <p>Incremental: ΔU = 400 units. Extraction 400 × 2 = 800. Summaries: 400 × 6 = 2,400 raw, halved by overlap = 1,200. Reports: 0.15 × 1,200 = 180. Total 2,180 calls, about 41 times fewer.</p>
+    <p>(b) Summaries now dominate (1,200 of 2,180, 55%), not extraction. That is the hub effect: many changed units mention the same popular entities, and each summary for a hub re-reads its whole description list, so the token cost is even more skewed than the call count. Fixes, in order of effort: batch updates (once a day already helps because overlaps collapse); summarize hubs incrementally from their previous summary plus new descriptions; skip re-summarizing when new descriptions are near-duplicates of the existing summary; refresh hub summaries fully on a slower schedule. For reports, raise the regeneration threshold so a community with one dirty low-degree member keeps its report until the next weekly refresh.</p>
+  </details>
+</section>
+
+<section class="exercise" data-level="stretch">
+  <h4>Exercise 27.5 <span class="level">Stretch</span></h4>
+  <p>Ingestion is not always in publication order. (a) On a fresh <code>new_temporal_graph()</code>, call <code>add_fact</code> for Priya Nair's CTO fact first (valid from 2026-03, recorded 2026-03-26) and Jonas Vehl's second (valid from 2021, recorded 2026-04-02). Trace what the reference <code>add_fact</code> does and what <code>holders(G, "CTO_OF", "Kestrel Labs", "2026-09-16")</code> returns. (b) Fix it, and state one limitation of the <code>prior_valid_to</code> design that your fix does not address.</p>
+  <details class="hint"><summary>Hint</summary><p>Look at the condition that decides whether an existing holder gets closed. Does it compare the two <code>valid_from</code> dates?</p></details>
+  <details class="answer">
+    <summary>Show answer</summary>
+    <p>(a) The first call adds Nair: valid [2026-03-01, open), recorded 2026-03-26. The second call finds Nair's edge: same relation and target, different source, not invalidated, and <code>valid_to</code> is None, so it closes it at the new <code>valid_from</code>: Nair's <code>valid_to</code> becomes 2021-01-01, which is <em>before</em> her <code>valid_from</code>, and <code>invalidated_at</code> becomes 2026-04-02. Vehl's edge is added with an open end. <code>holders(..., "2026-09-16")</code> returns <code>['Jonas Vehl']</code>: the store now believes Vehl is CTO today. The code assumes new facts are about later holders; an older fact arriving late silently erases the newer one.</p>
+    <p>(b) Compare start dates. If the existing holder started at or after the new fact, the new fact is about an earlier period: cut the <em>new</em> fact short and leave the existing edge alone.</p>
+    <pre><code class="language-python">    if exclusive and target in G:
+        for old_source, _, key, d in list(G.in_edges(target, keys=True, data=True)):
+            if d["relation"] != relation or old_source == source or d["invalidated_at"] is not None:
+                continue
+            if d["valid_from"] &gt;= vf:
+                # Out-of-order arrival: the new fact is about an earlier holder.
+                vt = d["valid_from"] if vt is None else min(vt, d["valid_from"])
+            elif d["valid_to"] is None or d["valid_to"] &gt; vf:
+                d["prior_valid_to"] = d["valid_to"]
+                d["valid_to"] = vf
+                d["invalidated_at"] = rec</code></pre>
+    <p>With the fix, the same two calls give Vehl [2021-01-01, 2026-03-01) and Nair [2026-03-01, open), nothing invalidated. <code>holders</code> returns Nair for today and Vehl for 2024-08, the same as in-order ingestion. Asked with <code>known_at="2026-03-30"</code> about 2024-08 it returns <code>[]</code>, which is correct: Vehl's fact had not been recorded yet. A regression test that ingests the Kestrel facts in shuffled order and compares <code>holders</code> answers with the in-order graph catches this whole class of bug.</p>
+    <p>Limitations the fix leaves: an edge remembers only one previous belief, and the <code>invalidated_at is not None</code> guard means an already-closed edge is never corrected again. If you later learn of an interim CTO inside Vehl's closed term, his edge cannot be split. Versioned rows (the SQL design) or an event log handle both, at the cost of more rows.</p>
+  </details>
+</section>
+
+<h2>Check your understanding</h2>
+<p class="quiz-score"></p>
+
+<div class="quiz">
+  <p class="q">Why should text unit ids be derived from content for incremental indexing?</p>
+  <ol>
+    <li>Hashes are shorter than positional ids</li>
+    <li>Positional ids cannot be stored in JSON</li>
+    <li data-correct>Unchanged text keeps its id, so its cached extraction is reused and only changed text is re-extracted</li>
+    <li>Content hashes make fixed-size windows stop shifting when text is inserted</li>
+  </ol>
+  <div class="explain">With content-addressed ids, the diff between old and new unit ids is exactly the set of units whose text changed. They do not stop window boundaries from shifting; that needs structure-aware chunking.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">An edge has <code>source_ids</code> [03-a, 03-b, 12-a]. Document 03 is retracted. What should happen?</p>
+  <ol>
+    <li>Delete the edge, because most of its sources are gone</li>
+    <li data-correct>Keep it with source 12-a, recomputing weight and descriptions from 12-a's records</li>
+    <li>Keep it unchanged until the next full rebuild</li>
+    <li>Subtract one third of the weight</li>
+  </ol>
+  <div class="explain">The source list is a reference count. One reference survives, so the edge stays, and its attributes are recomputed from the surviving extraction records rather than patched.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">On 2026-03-20 the assistant told a user that Jonas Vehl is CTO. Today you want to reproduce exactly what it would have said. Which call?</p>
+  <ol>
+    <li><code>holders(G, "CTO_OF", "Kestrel Labs", "2026-09-16")</code></li>
+    <li><code>holders(G, "CTO_OF", "Kestrel Labs", "2026-03-20")</code></li>
+    <li><code>holders(G, "CTO_OF", "Kestrel Labs", "2026-09-16", known_at="2026-03-20")</code></li>
+    <li data-correct><code>holders(G, "CTO_OF", "Kestrel Labs", "2026-03-20", known_at="2026-03-20")</code></li>
+  </ol>
+  <div class="explain">Both axes must be at the time of the original question: it asked about the present at that moment, using what the store knew then. Option 2 uses today's knowledge: Vehl's edge now ends on 2026-03-01, so it returns Priya Nair, which is not what the assistant said on that day.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">The interview says Priya Nair became CTO in March 2026. Why not simply delete Vehl's CTO_OF edge?</p>
+  <ol>
+    <li>Graph databases cannot delete edges</li>
+    <li>Deleting edges changes community ids</li>
+    <li data-correct>Questions about the past, such as who was CTO when the bleaching was detected, would lose their answer</li>
+    <li>The LLM might re-extract the edge later</li>
+  </ol>
+  <div class="explain">The old fact is still true for its interval. Invalidation closes its valid interval and remembers the previous end in <code>prior_valid_to</code>, so both “now” and “then” questions remain answerable.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">After reclustering, a level-1 community has exactly the same members as before (Jaccard 1.0), but one member is dirty. Under <code>reports_to_regenerate</code>, what happens to its report and to its level-0 parent's report?</p>
+  <ol>
+    <li>Neither is regenerated, because membership did not change</li>
+    <li>Only the child's report is regenerated; the parent's membership is also unchanged</li>
+    <li>Only the parent's report is regenerated</li>
+    <li data-correct>Both are regenerated: the child has a dirty member, and a parent is never reused when a child was regenerated</li>
+  </ol>
+  <div class="explain">A dirty member makes the child stale regardless of membership. Parents summarize their children's reports (and contain the dirty node too), so staleness propagates upward.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">Kestrel Labs appears in almost every new document. What is the main cost consequence for incremental updates?</p>
+  <ol>
+    <li>Extraction calls for Kestrel documents double</li>
+    <li data-correct>The hub's description summary and its communities' reports are touched by nearly every update, so those terms stop shrinking with the change size</li>
+    <li>Content hashes collide more often</li>
+    <li>Reference counts for Kestrel Labs overflow</li>
+  </ol>
+  <div class="explain">Extraction stays proportional to changed units. Summaries and reports are keyed on touched elements, and hubs are always touched. Incremental summaries and slower refresh schedules for hubs address this.</div>
+</div>
+
+<div class="quiz">
+  <p class="q">A press release in the corpus is withdrawn because it was wrong. How should the temporal store record this?</p>
+  <ol>
+    <li>Set <code>valid_to</code> on its facts to the withdrawal date</li>
+    <li data-correct>Stamp a retraction in transaction time on facts supported only by that source, leaving their valid intervals alone</li>
+    <li>Delete the edges physically</li>
+    <li>Add new edges with the opposite relation</li>
+  </ol>
+  <div class="explain">A retraction is about evidence, which is transaction time. Setting valid_to would claim the facts were true until the withdrawal date, which is exactly what the withdrawal denies. (Physical deletion is sometimes legally required; that is a separate purge process.)</div>
+</div>
+
+<h2>Questions learners often ask</h2>
+
+<details class="qa">
+  <summary>My corpus is small. Can I just rebuild nightly?</summary>
+  <div><p>Yes, and with a <code>CachedLLM</code> in front of extraction, a rebuild only pays for LLM calls whose prompts changed, which is most of the benefit of incremental extraction for free. The remaining costs of rebuilds are churn (report text and ids change daily) and lost history. If neither matters to your users, rebuild. Add temporal edges whenever answers depend on when something was true; that is independent of how you index.</p></div>
+</details>
+
+<details class="qa">
+  <summary>When should I do a full rebuild anyway?</summary>
+  <div><p>When something global changes: the extraction prompt or model, entity types, chunking parameters, the embedding model, or the resolution thresholds. Cached extractions from the old prompt are not comparable with new ones, and embeddings from two models do not share a space. Also rebuild on a slow schedule (weekly or monthly) to reset drift in locally assigned communities and to catch bugs in the incremental path. Run the rebuild in the background and compare it with the incrementally maintained index; the diff is a free test.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Where do valid times come from? The text rarely gives exact dates.</summary>
+  <div><p>From three places, in order of preference: dates stated in the text (“in April 2025”), relative expressions resolved against the document date (“last year” in a 2026 interview), and, as a fallback, the document date itself as the earliest time the fact is known to hold. Keep the granularity (year, month, day) so you do not claim precision you lack, and store the source id so a reader can check. Chapter 10's claim extraction produces start and end dates in exactly this shape.</p></div>
+</details>
+
+<details class="qa">
+  <summary>How reliable is an LLM at deciding that two facts contradict?</summary>
+  <div><p>Reasonably good on clear cases and noticeably worse on subtle ones: roles that can be shared (co-leads of Project Tern), titles that sound exclusive but are not (“a chief scientist”), and facts about different time periods written in the present tense. Use schema rules for the relations that matter most, send only the candidate edges between the same or closely related entities to the LLM, always log invalidations with their reason and source, and build a small test set of contradiction and non-contradiction pairs from your corpus to evaluate the prompt (<a href="25-evaluation.html">Chapter 25</a>).</p></div>
+</details>
+
+<details class="qa">
+  <summary>Append-only history conflicts with a deletion request under privacy law. What now?</summary>
+  <div><p>Bi-temporal invalidation is not deletion: the text is still stored. For a legal erasure you need a separate purge path that physically removes the source text units, their extraction cache entries, the facts and descriptions derived only from them, embeddings, and any report text that quotes them, followed by regenerating affected summaries and reports. The <code>source_ids</code> reference counts from this chapter are what make that purge possible; without provenance you cannot find everything a document contributed.</p></div>
+</details>
+
+<details class="qa">
+  <summary>Does incremental indexing change retrieval quality?</summary>
+  <div><p>It should not, if the update is equivalent to a rebuild. In practice two things drift: locally assigned communities diverge from what a fresh clustering would find, and relaxed report regeneration thresholds leave some reports stale. Evaluate the incrementally maintained index against a fresh build on your golden question set periodically, especially the global and temporal questions, which are the most sensitive to both.</p></div>
+</details>
+
+<section class="project">
+  <h3>Project: a living Kestrel index</h3>
+  <p>Replay the Kestrel corpus as if it arrived over five years, and keep an index and a temporal store current as each document lands.</p>
+  <ul class="checklist deliverables">
+    <li><input type="checkbox" aria-label="Done"> <span>An <code>update</code> command that diffs documents against a manifest, extracts only new or changed content-addressed units, and applies <code>upsert_units</code> using a persisted per-unit extraction cache</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>An equivalence test: ingesting the 12 documents one at a time in publication order yields the same nodes, edges, <code>source_ids</code> and weights as a full build</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Selective summaries and reports: only dirty elements are re-summarized and only changed communities (and ancestors) get new reports; log the calls saved per update</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A temporal graph fed by claim extraction with document dates as <code>recorded_at</code>, built with <code>add_fact</code>, an explicit close for end statements, the out-of-order fix from Exercise 27.5, and a retraction path for withdrawn documents</span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>Local search that filters relationships with <code>as_of</code> and prints valid intervals and today's date into the context; correct answers to questions 6, 7, 14 and 15 from <code>data/questions.jsonl</code></span></li>
+    <li><input type="checkbox" aria-label="Done"> <span>A short report: LLM calls for incremental ingestion of all 12 documents versus 12 full rebuilds, and which cost term dominated</span></li>
+  </ul>
+  <p><strong>Done when</strong> the equivalence test passes, question 15 is answered “Jonas Vehl” and question 6 “Priya Nair” from the same store, and you can replay what the assistant would have answered to question 6 on 2026-03-20.</p>
+</section>
+
+<div class="keypoints">
+  <h2>Key takeaways</h2>
+  <ul>
+    <li>Full rebuilds cost as much as the corpus, churn ids and reports, and lose history. Incremental updates make extraction proportional to the change.</li>
+    <li>Content-addressed text units plus a per-unit extraction cache turn the graph into a function of its sources. <code>source_ids</code> act as reference counts: recompute touched elements, delete at zero.</li>
+    <li>Summaries and reports do not shrink automatically, because hub entities are touched by almost every update. Regenerate only dirty elements and changed communities with their ancestors, and handle hubs with incremental summaries or slower schedules.</li>
+    <li>Separate valid time (when it was true) from transaction time (when you believed it). Invalidate on contradiction by closing intervals and remembering the previous belief, never by deleting.</li>
+    <li>As-of queries take a point on both axes. Put valid intervals and today's date into the prompt so the model can reason about time.</li>
+    <li>Zep and Graphiti build this around episodes, bi-temporal edges, LLM contradiction checks and hybrid search; a relational database with range types and exclusion constraints can do the same.</li>
+  </ul>
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Rasmussen, Paliychuk, Beauvais, Ryan, Chalef. <a href="https://arxiv.org/abs/2501.13956">Zep: A Temporal Knowledge Graph Architecture for Agent Memory</a>. <span class="venue">arXiv 2501.13956, 2025</span></li>
+  <li>Zep. <a href="https://github.com/getzep/graphiti">Graphiti: temporal knowledge graphs for AI agents</a>. <span class="venue">GitHub</span></li>
+  <li>Rajah. <a href="https://arxiv.org/abs/2608.24921">post-graph-rag: A PostgreSQL-Native Bi-Temporal Graph RAG Engine with Temporal Grounding at Synthesis</a>. <span class="venue">arXiv 2608.24921, 2026</span></li>
+  <li>Guo et al. <a href="https://arxiv.org/abs/2410.05779">LightRAG: Simple and Fast Retrieval-Augmented Generation</a>. <span class="venue">arXiv 2410.05779, 2024</span></li>
+  <li>HKUDS. <a href="https://github.com/HKUDS/LightRAG">LightRAG repository</a>: incremental insertion and document deletion. <span class="venue">GitHub</span></li>
+  <li>gusye1234. <a href="https://github.com/gusye1234/nano-graphrag">nano-graphrag</a>: content-hash chunk keys and incremental insert. <span class="venue">GitHub</span></li>
+  <li>Edge et al. <a href="https://arxiv.org/abs/2404.16130">From Local to Global: A Graph RAG Approach to Query-Focused Summarization</a>. <span class="venue">arXiv 2404.16130, 2024</span></li>
+  <li>Microsoft. <a href="https://microsoft.github.io/graphrag/cli/">GraphRAG CLI reference</a>: <code>index</code> and <code>update</code> commands. <span class="venue">Documentation</span></li>
+  <li>Traag, Waltman, van Eck. <a href="https://arxiv.org/abs/1810.08473">From Louvain to Leiden: guaranteeing well-connected communities</a>. <span class="venue">Scientific Reports, 2019</span></li>
+  <li>Fowler. <a href="https://martinfowler.com/articles/bitemporal-history.html">Bitemporal History</a>. <span class="venue">martinfowler.com, 2021</span></li>
+  <li>PostgreSQL. <a href="https://www.postgresql.org/docs/current/rangetypes.html">Range Types</a>, including exclusion constraints on ranges. <span class="venue">Documentation</span></li>
+</ul>
+
+</main>
+<script src="../assets/js/curriculum.js?v=9c5827a0"></script>
+<script src="../assets/js/site.js?v=a3b6d873"></script>
+<script src="../assets/js/viz.js?v=6015e47d"></script>
+<script>
+GRFSViz.register("ch27-bitemporal", function (el, cfg, api) {
+  var W = 720, H = cfg.height || 430;
+  var L = 92, R = 700, T = 18, B = H - 58;
+  var vMax = cfg.validMax || 72, tMax = cfg.txMax || 72, now = cfg.now;
+  var colors = cfg.relations || {};
+  var stage = api.frame(el, cfg).stage;
+  var svg = api.svgEl("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": cfg.title || "Bi-temporal timeline" }, stage);
+  var bar = api.controls(el);
+  var cap = api.h("div", { class: "viz-caption", "aria-live": "polite" }, el);
+
+  function x(m) { return L + (Math.min(m, vMax) / vMax) * (R - L); }
+  var brk = cfg.txBreak || 0, share = cfg.txBreakShare || 0;
+  function y(m) {
+    m = Math.min(m, tMax);
+    var f = brk ? (m < brk ? share * m / brk : share + (1 - share) * (m - brk) / (tMax - brk)) : m / tMax;
+    return B - f * (B - T);
+  }
+  function lab(m) { m = Math.floor(m); return (cfg.startYear + Math.floor(m / 12)) + "-" + String(m % 12 + 1).padStart(2, "0"); }
+  function txt(parent, xx, yy, s, style, anchor) {
+    var t = api.svgEl("text", { x: xx, y: yy, "text-anchor": anchor || "start", style: style }, parent);
+    t.textContent = s; return t;
+  }
+  var axisStyle = "fill:var(--muted);font-size:11px";
+
+  // grid and axes
+  var gGrid = api.svgEl("g", {}, svg);
+  for (var yr = 0; yr <= vMax / 12; yr++) {
+    var m = yr * 12;
+    api.svgEl("line", { x1: x(m), y1: T, x2: x(m), y2: B, style: "stroke:var(--rule);stroke-width:1" }, gGrid);
+    api.svgEl("line", { x1: L, y1: y(m), x2: R, y2: y(m), style: "stroke:var(--rule);stroke-width:1" }, gGrid);
+    txt(gGrid, x(m), B + 16, String(cfg.startYear + yr), axisStyle, "middle");
+    txt(gGrid, L - 8, y(m) + 4, String(cfg.startYear + yr), axisStyle, "end");
+  }
+  txt(gGrid, (L + R) / 2, H - 22, "Valid time: when the fact was true in the world", "fill:var(--ink-2);font-size:12px", "middle");
+  var yt = txt(gGrid, 0, 0, "Transaction time: when the store recorded it", "fill:var(--ink-2);font-size:12px", "middle");
+  yt.setAttribute("transform", "translate(22," + ((T + B) / 2) + ") rotate(-90)");
+  // diagonal valid = recorded, and today line
+  var diag = [];
+  for (var dm = 0; dm <= Math.min(vMax, tMax); dm += 3) diag.push(x(dm) + "," + y(dm));
+  api.svgEl("polyline", { points: diag.join(" "), style: "fill:none;stroke:var(--muted);stroke-width:1;stroke-dasharray:2 4" }, gGrid);
+  txt(gGrid, x(30) + 8, y(30) + 16, "valid = recorded", "fill:var(--muted);font-size:10.5px");
+  if (brk) txt(gGrid, L + 6, y(brk) - 5, "transaction axis stretched after " + (cfg.startYear + brk / 12), "fill:var(--muted);font-size:10px");
+  api.svgEl("rect", { x: L, y: T, width: R - L, height: y(now) - T, style: "fill:var(--rule);opacity:.35" }, gGrid);
+  api.svgEl("line", { x1: L, y1: y(now), x2: R, y2: y(now), style: "stroke:var(--ink-2);stroke-width:1.2;stroke-dasharray:6 4" }, gGrid);
+  txt(gGrid, L + 6, y(now) - 6, "today " + (cfg.nowLabel || "") + " (above: not yet recorded)", "fill:var(--ink-2);font-size:10.5px");
+
+  var gRows = api.svgEl("g", {}, svg);
+  var rows = (cfg.rows || []).map(function (r) {
+    var col = api.groupColor(colors[r.rel] || 1);
+    var x1 = x(r.vFrom), x2 = r.vTo == null ? R : x(r.vTo);
+    var y2 = y(r.tFrom), y1 = y(r.tTo == null ? now : r.tTo);
+    var g = api.svgEl("g", {}, gRows);
+    var rect = api.svgEl("rect", { x: x1, y: y1, width: Math.max(2, x2 - x1), height: Math.max(2, y2 - y1), rx: 3 }, g);
+    var label = txt(g, x1 + 6, y1 + 15, r.short, "fill:var(--ink);font-size:11px;font-weight:600;paint-order:stroke;stroke:var(--panel);stroke-width:3px");
+    return { r: r, g: g, rect: rect, col: col };
+  });
+
+  var cross = api.svgEl("g", { style: "pointer-events:none" }, svg);
+  var vLine = api.svgEl("line", { y1: T, y2: B, style: "stroke:var(--edge);stroke-width:1.6" }, cross);
+  var hLine = api.svgEl("line", { x1: L, x2: R, style: "stroke:var(--edge);stroke-width:1.6" }, cross);
+  var dot = api.svgEl("circle", { r: 6, style: "fill:var(--edge);stroke:var(--panel);stroke-width:2" }, cross);
+
+  // controls
+  var relLabel = api.h("label", {}, bar, "Relation ");
+  var sel = api.h("select", {}, relLabel);
+  Object.keys(colors).concat(["Both"]).forEach(function (k) { api.h("option", { value: k }, sel, k); });
+  var vLab = api.h("label", {}, bar, "Valid at ");
+  var vIn = api.h("input", { type: "range", min: 0, max: vMax - 1, step: 1, value: 68, "aria-label": "Valid time" }, vLab);
+  var vOut = api.h("span", { class: "stepno" }, vLab, "");
+  var tLab = api.h("label", {}, bar, "Known at ");
+  var tIn = api.h("input", { type: "range", min: 0, max: Math.floor(now), step: 1, value: Math.floor(now), "aria-label": "Transaction time" }, tLab);
+  var tOut = api.h("span", { class: "stepno" }, tLab, "");
+  var bar2 = api.controls(el);
+  var note = "";
+  (cfg.presets || []).forEach(function (p) {
+    var b = api.button(bar2, p.label);
+    b.addEventListener("click", function () { sel.value = p.rel; vIn.value = p.v; tIn.value = p.t; note = p.note || ""; render(); });
+  });
+  el.insertBefore(bar2, cap);
+  sel.addEventListener("change", function () { note = ""; render(); });
+  vIn.addEventListener("input", function () { note = ""; render(); });
+  tIn.addEventListener("input", function () { note = ""; render(); });
+
+  function render() {
+    var v = +vIn.value, t = +tIn.value, rel = sel.value;
+    vOut.textContent = lab(v); tOut.textContent = lab(t);
+    vLine.setAttribute("x1", x(v)); vLine.setAttribute("x2", x(v));
+    hLine.setAttribute("y1", y(t)); hLine.setAttribute("y2", y(t));
+    dot.setAttribute("cx", x(v)); dot.setAttribute("cy", y(t));
+    var hits = [];
+    rows.forEach(function (o) {
+      var r = o.r;
+      var shown = rel === "Both" || r.rel === rel;
+      var inside = r.vFrom <= v && (r.vTo == null || v < r.vTo) && r.tFrom <= t && t < (r.tTo == null ? Infinity : r.tTo);
+      o.g.style.display = shown ? "" : "none";
+      o.rect.setAttribute("style", "fill:color-mix(in srgb," + o.col + " " + (inside ? 42 : 14) + "%, transparent);stroke:" + o.col + ";stroke-width:" + (inside ? 3 : 1.3) + (r.tTo == null ? "" : ";stroke-dasharray:6 3"));
+      if (shown && inside) hits.push(r);
+    });
+    var q = "Valid at <strong>" + lab(v) + "</strong>, as known at <strong>" + lab(t) + "</strong>: ";
+    if (!hits.length) {
+      q += "no " + (rel === "Both" ? "" : rel + " ") + "fact matches. Either nothing was true then, or the store had not recorded it yet.";
+    } else {
+      q += hits.map(function (r) { return '<span class="viz-chip ' + (r.rel === "CTO_OF" ? "node" : "edge") + '">' + api.escapeHtml(r.id) + "</span> " + api.escapeHtml(r.fact) + ' <span class="viz-sub">(' + api.escapeHtml(r.dates) + ")</span>"; }).join("<br>");
+    }
+    cap.innerHTML = q + (note ? "<br>" + note : "") + '<br><span class="viz-sub">Dashed outline: an edge as it was believed before its invalidation. Solid outline: current belief.</span>';
+  }
+  render();
+});
+</script>
+</body>
+</html>
