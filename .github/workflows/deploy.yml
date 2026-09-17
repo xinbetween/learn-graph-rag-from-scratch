@@ -1,0 +1,67 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# GITHUB_TOKEN needs to mint an id-token for the Pages deployment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race. Queue instead of cancelling, so a push that lands
+# mid-deploy still ends up published rather than silently dropped.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build static site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/configure-pages@v5
+
+      # The site has no build step: site/ is the published artifact. It is
+      # served from graphrag.xinbetween.com at the origin root, and every
+      # internal link is relative, so no base path or site URL is baked in.
+      # The domain lives in site/CNAME so it survives every deploy.
+      #
+      # Refuse to publish a structurally broken site: missing chapters, invalid
+      # visualization JSON or broken internal links fail here rather than ship.
+      - name: Check site
+        run: python3 tools/check_site.py
+
+      - name: Assemble artifact
+        run: |
+          mkdir -p dist
+          cp -R site/. dist/
+          test -f dist/CNAME
+
+      # Pages serves the artifact as-is, but a stray Jekyll pass would eat any
+      # path it dislikes. One empty file makes that impossible.
+      - name: Disable Jekyll
+        run: touch dist/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

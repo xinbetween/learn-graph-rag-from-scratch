@@ -21,5 +21,15 @@ Reference code: `cd code && python3 -m venv .venv && .venv/bin/pip install -e ".
 
 ## Deploying
 
-`site/` is plain static files. Any static host works, for example Cloudflare Pages (`npx wrangler pages deploy site`),
-GitHub Pages or Netlify.
+The site is published to https://graphrag.xinbetween.com by GitHub Pages.
+
+- `.github/workflows/deploy.yml` runs on every push to `main`: it checks the site, copies `site/` into a Pages
+  artifact with `.nojekyll`, and deploys it through the `github-pages` environment. There is no build step;
+  `site/` is the published output, and all internal links are relative.
+- `site/CNAME` holds the custom domain so it survives every deploy.
+- `.github/workflows/ci.yml` runs on pushes and pull requests: the `minigraphrag` test suite, the site structure
+  and link checks, a check that asset `?v=` stamps are current, and a Chromium render of every page.
+
+One-time repository setup: in Settings → Pages, set the source to "GitHub Actions" and the custom domain to
+`graphrag.xinbetween.com`, then enable "Enforce HTTPS" once the certificate is issued. DNS needs a `CNAME`
+record from `graphrag` to `xinbetween.github.io`.
