@@ -48,12 +48,16 @@
   function href(s) { return root + "/chapters/" + s + ".html"; }
   window.GRFS = { flat, learnable, chapterLabel, chapterId, partLabel, partHeading, href, progress, root };
 
+  const REPO = "https://github.com/xinbetween/learn-graph-rag-from-scratch";
+  const XURL = "https://x.com/xinbetween";
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const ICON = {
     mark: '<svg viewBox="0 0 16 16" aria-hidden="true"><line x1="3.5" y1="4" x2="12.5" y2="3.5" stroke="var(--accent)" stroke-width="1.4"/><line x1="3.5" y1="4" x2="6" y2="12.5" stroke="var(--accent)" stroke-width="1.4"/><line x1="6" y1="12.5" x2="12.5" y2="3.5" stroke="var(--accent)" stroke-width="1.4"/><circle cx="3.5" cy="4" r="2.4" fill="var(--accent)"/><circle cx="12.5" cy="3.5" r="2" fill="var(--accent)"/><circle cx="6" cy="12.5" r="2.4" fill="var(--accent)"/></svg>',
     search: '<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><line x1="10.8" y1="10.8" x2="14.5" y2="14.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
     theme: '<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor"/></svg>',
     menu: '<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    github: '<svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>',
+    x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>',
     check: '<svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
   };
 
@@ -76,6 +80,8 @@
         '<a href="' + href("library") + '"' + cur("library") + ">Library</a>" +
         '<button class="searchbtn" aria-label="Search chapters">' + ICON.search + '<span class="lbl">Search</span><span class="kb">' + (mac ? "⌘K" : "Ctrl K") + "</span></button>" +
         '<button class="iconbtn theme-btn" aria-label="Toggle dark mode">' + ICON.theme + "</button>" +
+        '<a class="iconbtn" href="' + REPO + '" aria-label="Source on GitHub" title="Source on GitHub" rel="noopener">' + ICON.github + "</a>" +
+        '<a class="iconbtn" href="' + XURL + '" aria-label="Follow on X" title="Follow on X" rel="noopener">' + ICON.x + "</a>" +
       "</nav>";
     bar.querySelector(".theme-btn").addEventListener("click", () => setTheme(currentTheme() === "dark" ? "light" : "dark"));
     bar.querySelector(".menubtn").addEventListener("click", () => toggleNav());
@@ -316,7 +322,7 @@
     const f = document.createElement("footer");
     f.className = "sitefoot";
     f.innerHTML = '<div class="wrap"><div class="cols">' +
-      '<div><a class="brand" href="' + root + '/index.html">' + ICON.mark + "<span>" + esc(C.title) + '</span></a><p class="note">A self-paced course on graph retrieval-augmented generation, with a runnable reference implementation. The Kestrel Labs corpus used throughout is fictional.</p></div>' +
+      '<div><a class="brand" href="' + root + '/index.html">' + ICON.mark + "<span>" + esc(C.title) + '</span></a><p class="note">A self-paced course on graph retrieval-augmented generation, with a runnable reference implementation. The Kestrel Labs corpus used throughout is fictional.</p><p class="note"><a href="' + REPO + '" rel="noopener">Source on GitHub</a> · <a href="' + XURL + '" rel="noopener">Follow on X</a></p></div>' +
       '<div><h5>Course</h5><ul><li><a href="' + root + '/index.html#curriculum">Curriculum</a></li><li><a href="' + href("00-welcome") + '">Start here</a></li><li><a href="' + href("14-local-search") + '">Retrieval</a></li><li><a href="' + href("c1-minigraphrag") + '">Capstones</a></li></ul></div>' +
       '<div><h5>Reference</h5><ul><li><a href="' + href("glossary") + '">Glossary</a></li><li><a href="' + href("library") + '">Paper and tool library</a></li><li><a href="' + href("33-research-map") + '">Research map</a></li><li><a href="' + href("28-frameworks-in-practice") + '">Frameworks</a></li></ul></div>' +
       '<div><h5>Credits</h5><ul><li><a href="https://github.com/microsoft/graphrag">Microsoft GraphRAG</a></li><li><a href="https://github.com/DEEP-PolyU/Awesome-GraphRAG">Awesome-GraphRAG</a></li><li><a href="https://github.com/graphrag/awesome-graphrag">graphrag/awesome-graphrag</a></li><li><a href="https://huggingface.co/collections/graphrag/graphrag-papers">GraphRAG papers</a></li></ul></div>' +

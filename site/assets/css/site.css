@@ -151,6 +151,9 @@ kbd { background: var(--bg-sunk); border: 1px solid var(--border-strong); border
 }
 .iconbtn:hover, .icon-btn:hover { color: var(--fg); border-color: var(--border-strong); }
 .iconbtn svg { display: block; }
+/* the icon button is also used as a link, and `.topnav > a` would otherwise win on colour and size */
+.topnav > a.iconbtn { color: var(--fg-muted); font-size: 0; }
+.topnav > a.iconbtn:hover { color: var(--fg); border-color: var(--border-strong); text-decoration: none; }
 .menubtn { display: none !important; }
 .searchbtn {
   display: inline-flex; align-items: center; gap: .45rem; height: 1.9rem; flex: none;
