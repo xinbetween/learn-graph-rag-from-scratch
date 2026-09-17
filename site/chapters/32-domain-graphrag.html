@@ -972,7 +972,7 @@ print(total_raised(G, "KESTREL LABS", date(2025, 12, 31)))  # 52000000</code></p
 <p>The as-of query returns $52M at the end of 2025, which matches the Series B press release's own statement of total funding raised. That agreement is a useful consistency check: when a document states an aggregate, compare it with the aggregate your graph computes, and flag disagreements for review.</p>
 
 <h3>Retrieval, evaluation and pitfalls</h3>
-<p>Route by intent, as HC-RAG does. A fact question (“who chairs the audit committee?”) is a local lookup. A calculation (“what was the operating margin?”) should retrieve the two table cells and hand the arithmetic to code, not the LLM. A trend question needs the same metric across periods, which is an as-of query repeated. A comparison needs balanced retrieval across companies, so that one company's rich filing does not crowd out the other in the token budget.</p>
+<p>Route by intent, as HC-RAG does. A fact question (“who chairs the audit committee?”) is a local lookup. A calculation (“what was the operating margin?”) should retrieve the two table cells and hand the arithmetic to code, not the LLM. A trend question needs the same metric across periods, which is an as-of query repeated. A comparison needs balanced retrieval across companies, so that one company's detailed filing does not crowd out the other in the token budget.</p>
 <p>Evaluate numbers with exact match after normalizing unit and scale, with a small relative tolerance for rounding, and score evidence localization separately: did the system cite the right table and period? A right number from the wrong year is a lucky failure.</p>
 <ul>
   <li><strong>Units and scale.</strong> Tables state “in thousands” once in a header. Carry scale into every fact at extraction time.</li>
@@ -1053,7 +1053,7 @@ ORDER BY c.court_level DESC, c.decided DESC</code></pre>
   <li><strong>Holding vs. dicta.</strong> An opinion says many things; only the holding binds. Extraction prompts should separate them and cite paragraph numbers.</li>
   <li><strong>Jurisdiction mixing.</strong> A persuasive out-of-jurisdiction case ranked above a binding local one is a wrong answer even if every sentence is true.</li>
   <li><strong>Treatment extraction errors.</strong> Misreading “declined to follow” as “followed” flips validity. Treat LLM-extracted treatments as claims with confidence, and prefer editorial citator data where you have it.</li>
-  <li><strong>Time.</strong> “Good law” is as of a date. Store decision dates and answer as of the question's date, not only today.</li>
+  <li><strong>Time.</strong> “Good law” is as of a date. Store decision dates and answer as of the question's date, rather than assuming today.</li>
 </ul>
 
 <h2>Other domains: threat intelligence, science and support</h2>
@@ -1299,7 +1299,7 @@ print(guidelines_for(V, "warfarin"))    # ['g3', 'g1']</code></pre>
     <li>They required no prompt at all</li>
     <li data-correct>They relied more on durable, higher-level behaviors, so they kept firing after indicators were rotated</li>
   </ol>
-  <div class="explain">Both systems used the same model and instructions. GraphRAG plans reached higher levels of the Pyramid of Pain, and the authors also note that prompt wording mattered a great deal.</div>
+  <div class="explain">Both systems used the same model and instructions. GraphRAG plans reached higher levels of the Pyramid of Pain, and the authors report that prompt wording mattered a great deal.</div>
 </div>
 
 <h2>Questions learners often ask</h2>
