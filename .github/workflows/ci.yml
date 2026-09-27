@@ -12,14 +12,14 @@ permissions:
 jobs:
   code:
     name: Reference implementation tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: code
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -35,15 +35,15 @@ jobs:
 
   site:
     name: Site structure, links and asset stamps
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Full history: sitemap.xml dates each page from its last commit, which a
       # shallow clone cannot see.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -70,12 +70,12 @@ jobs:
 
   render:
     name: Render every page in Chromium
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: site
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 

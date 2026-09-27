@@ -20,18 +20,18 @@ concurrency:
 jobs:
   build:
     name: Build static site
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Full history: sitemap.xml dates each page from its last commit.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
 
       # The site has no build step: site/ is the published artifact. It is
       # served from graphrag.xinbetween.com at the origin root, and every
@@ -60,17 +60,17 @@ jobs:
       - name: Disable Jekyll
         run: touch dist/.nojekyll
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
   deploy:
     name: Deploy
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
