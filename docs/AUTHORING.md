@@ -256,5 +256,7 @@ provenance.
    problems (overlapping labels, clipped text, unreadable diagrams) in both light and dark color schemes.
 4. Counts: ≥1 viz, ≥1 SVG diagram, ≥4 exercises each with answer, ≥5 quizzes each with exactly one data-correct,
    ≥4 Q&A, a project, key takeaways, references.
-5. Do not edit shared files (`site.css`, `site.js`, `viz.js`, `curriculum.js`, `index.html`) or other agents' chapters.
+5. After adding or renaming a page, run `python3 tools/build_zh.py`, `python3 tools/stamp_assets.py` and
+   `python3 tools/build_meta.py` (Chinese mirror, asset stamps, sitemap and llms.txt).
+6. Do not edit shared files (`site.css`, `site.js`, `viz.js`, `curriculum.js`, `index.html`) or other agents' chapters.
    If you believe a shared component has a bug, describe it in your final reply instead.

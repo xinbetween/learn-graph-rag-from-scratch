@@ -1,0 +1,742 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>https://graphrag.xinbetween.com/index.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/index.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/index.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/index.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/index.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/index.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/index.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/index.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/00-welcome.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/00-welcome.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/00-welcome.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/00-welcome.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/00-welcome.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/00-welcome.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/00-welcome.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/00-welcome.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/01-llms-and-context.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/01-llms-and-context.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/01-llms-and-context.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/01-llms-and-context.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/01-llms-and-context.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/01-llms-and-context.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/01-llms-and-context.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/01-llms-and-context.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/02-vector-rag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/02-vector-rag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/02-vector-rag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/02-vector-rag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/02-vector-rag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/02-vector-rag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/02-vector-rag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/02-vector-rag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/03-where-rag-breaks.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/03-where-rag-breaks.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/03-where-rag-breaks.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/03-where-rag-breaks.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/03-where-rag-breaks.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/03-where-rag-breaks.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/03-where-rag-breaks.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/03-where-rag-breaks.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/04-graph-fundamentals.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/04-graph-fundamentals.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/04-graph-fundamentals.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/05-knowledge-graphs.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/05-knowledge-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/05-knowledge-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/05-knowledge-graphs.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/05-knowledge-graphs.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/05-knowledge-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/05-knowledge-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/05-knowledge-graphs.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/06-graph-shapes.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/06-graph-shapes.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/06-graph-shapes.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/06-graph-shapes.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/06-graph-shapes.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/06-graph-shapes.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/06-graph-shapes.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/06-graph-shapes.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/07-chunking-text-units.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/07-chunking-text-units.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/07-chunking-text-units.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/08-entity-relation-extraction.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/08-entity-relation-extraction.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/08-entity-relation-extraction.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/08-entity-relation-extraction.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/08-entity-relation-extraction.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/08-entity-relation-extraction.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/08-entity-relation-extraction.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/08-entity-relation-extraction.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/09-entity-resolution.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/09-entity-resolution.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/09-entity-resolution.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/09-entity-resolution.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/09-entity-resolution.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/09-entity-resolution.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/09-entity-resolution.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/09-entity-resolution.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/10-claims-temporal.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/10-claims-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/10-claims-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/10-claims-temporal.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/10-claims-temporal.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/10-claims-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/10-claims-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/10-claims-temporal.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/11-community-detection.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/11-community-detection.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/11-community-detection.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/11-community-detection.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/11-community-detection.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/11-community-detection.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/11-community-detection.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/11-community-detection.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/12-community-reports.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/12-community-reports.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/12-community-reports.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/12-community-reports.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/12-community-reports.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/12-community-reports.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/12-community-reports.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/12-community-reports.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/13-storage-indexing.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/13-storage-indexing.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/13-storage-indexing.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/13-storage-indexing.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/13-storage-indexing.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/13-storage-indexing.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/13-storage-indexing.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/13-storage-indexing.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/14-local-search.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/14-local-search.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/14-local-search.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/14-local-search.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/14-local-search.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/14-local-search.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/14-local-search.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/14-local-search.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/15-global-search.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/15-global-search.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/15-global-search.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/15-global-search.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/15-global-search.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/15-global-search.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/15-global-search.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/15-global-search.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/16-lightrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/16-lightrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/16-lightrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/16-lightrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/16-lightrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/16-lightrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/16-lightrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/16-lightrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/17-ppr-hipporag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/17-ppr-hipporag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/17-ppr-hipporag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/18-paths-and-agents.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/18-paths-and-agents.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/18-paths-and-agents.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/19-subgraph-gnn.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/19-subgraph-gnn.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/19-subgraph-gnn.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/20-text2cypher.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/20-text2cypher.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/20-text2cypher.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/20-text2cypher.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/20-text2cypher.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/20-text2cypher.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/20-text2cypher.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/20-text2cypher.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/21-hybrid-design-patterns.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/21-hybrid-design-patterns.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/21-hybrid-design-patterns.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/22-context-construction.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/22-context-construction.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/22-context-construction.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/22-context-construction.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/22-context-construction.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/22-context-construction.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/22-context-construction.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/22-context-construction.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/23-graph-reasoning.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/23-graph-reasoning.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/23-graph-reasoning.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/24-training-with-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/24-training-with-graphs.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/24-training-with-graphs.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/25-evaluation.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/25-evaluation.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/25-evaluation.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/25-evaluation.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/25-evaluation.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/25-evaluation.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/25-evaluation.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/25-evaluation.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/26-cost-scaling.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/26-cost-scaling.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/26-cost-scaling.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/26-cost-scaling.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/26-cost-scaling.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/26-cost-scaling.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/26-cost-scaling.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/26-cost-scaling.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/27-incremental-temporal.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/27-incremental-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/27-incremental-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/27-incremental-temporal.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/27-incremental-temporal.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/27-incremental-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/27-incremental-temporal.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/27-incremental-temporal.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/28-frameworks-in-practice.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/28-frameworks-in-practice.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/28-frameworks-in-practice.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/28-frameworks-in-practice.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/28-frameworks-in-practice.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/28-frameworks-in-practice.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/28-frameworks-in-practice.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/28-frameworks-in-practice.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/29-production-ops.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/29-production-ops.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/29-production-ops.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/29-production-ops.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/29-production-ops.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/29-production-ops.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/29-production-ops.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/29-production-ops.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/30-agentic-graphrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/30-agentic-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/30-agentic-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/30-agentic-graphrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/30-agentic-graphrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/30-agentic-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/30-agentic-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/30-agentic-graphrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/31-multimodal-hypergraph.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/31-multimodal-hypergraph.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/31-multimodal-hypergraph.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/32-domain-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/32-domain-graphrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/32-domain-graphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/33-research-map.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/33-research-map.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/33-research-map.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/33-research-map.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/33-research-map.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/33-research-map.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/33-research-map.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/33-research-map.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/c1-minigraphrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c1-minigraphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c1-minigraphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c1-minigraphrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/c1-minigraphrag.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c1-minigraphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c1-minigraphrag.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c1-minigraphrag.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/c2-code-graph.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c2-code-graph.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c2-code-graph.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c2-code-graph.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/c2-code-graph.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c2-code-graph.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c2-code-graph.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c2-code-graph.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c3-temporal-memory.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/c3-temporal-memory.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c3-temporal-memory.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/c4-enterprise-kgqa.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c4-enterprise-kgqa.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c4-enterprise-kgqa.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c4-enterprise-kgqa.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/c4-enterprise-kgqa.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/c4-enterprise-kgqa.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/c4-enterprise-kgqa.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/c4-enterprise-kgqa.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/glossary.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/glossary.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/glossary.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/glossary.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/glossary.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/glossary.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/glossary.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/glossary.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/chapters/library.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/library.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/library.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/library.html"/>
+  </url>
+  <url>
+    <loc>https://graphrag.xinbetween.com/zh/chapters/library.html</loc>
+    <lastmod>2026-09-17</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+    <xhtml:link rel="alternate" hreflang="en" href="https://graphrag.xinbetween.com/chapters/library.html"/>
+    <xhtml:link rel="alternate" hreflang="zh-Hans" href="https://graphrag.xinbetween.com/zh/chapters/library.html"/>
+    <xhtml:link rel="alternate" hreflang="x-default" href="https://graphrag.xinbetween.com/chapters/library.html"/>
+  </url>
+</urlset>

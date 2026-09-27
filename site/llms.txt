@@ -1,0 +1,116 @@
+# Graph RAG from Scratch
+
+> A self-paced course on graph retrieval-augmented generation (GraphRAG). It starts from a
+> hundred-line vector RAG and the questions it cannot answer, then builds the alternative one
+> stage at a time: LLM extraction into a knowledge graph, entity resolution, community detection
+> and reports, eight retrieval methods (local, global, DRIFT, LightRAG, Personalized PageRank,
+> paths, subgraphs, hybrid), context construction, evaluation, cost, temporal graphs and agents.
+
+Every example uses one fictional corpus about Kestrel Labs, an ocean-tech startup, so the same
+graph grows from raw text to answers across the whole course. Each chapter has a mechanism
+diagram, interactive figures, exercises with worked answers, graded questions and a project.
+The companion Python package `minigraphrag` implements every stage and runs offline against a
+deterministic mock model.
+
+## Start here
+
+How the course works, the running example, and your toolkit.
+
+- [Welcome: the map and the toolkit](https://graphrag.xinbetween.com/chapters/00-welcome.html): What GraphRAG is, how chapters are built, the Kestrel Labs corpus, and setting up the minigraphrag reference code.
+
+## Foundations
+
+LLMs, vector RAG, and the graph ideas everything else stands on.
+
+- [Why LLMs need retrieval](https://graphrag.xinbetween.com/chapters/01-llms-and-context.html): Parametric vs. non-parametric knowledge, context windows, hallucination and grounding.
+- [Build vector RAG from scratch](https://graphrag.xinbetween.com/chapters/02-vector-rag.html): Chunking, embeddings, cosine search, prompt assembly and citations in ~100 lines.
+- [Where vector RAG breaks](https://graphrag.xinbetween.com/chapters/03-where-rag-breaks.html): Multi-hop questions, global sensemaking questions, and lost relationships between chunks.
+- [Graph fundamentals for RAG](https://graphrag.xinbetween.com/chapters/04-graph-fundamentals.html): Nodes, edges, adjacency, BFS/DFS, shortest paths, degree, PageRank and modularity.
+- [Knowledge graphs, schemas and query languages](https://graphrag.xinbetween.com/chapters/05-knowledge-graphs.html): Triples vs. property graphs, ontologies, Cypher and SPARQL basics.
+
+## Building the graph
+
+Knowledge organization: turning raw text into a graph worth searching.
+
+- [Graph shapes for retrieval](https://graphrag.xinbetween.com/chapters/06-graph-shapes.html): Lexical graphs, domain graphs, tree indexes (RAPTOR), hybrid and hypergraph designs, and when to pick each.
+- [Text units and document structure](https://graphrag.xinbetween.com/chapters/07-chunking-text-units.html): Chunk size trade-offs for extraction, overlap, structure-aware splitting and provenance ids.
+- [Extracting entities and relationships with LLMs](https://graphrag.xinbetween.com/chapters/08-entity-relation-extraction.html): Extraction prompts, delimiter vs. JSON output, gleaning, parsing and failure modes.
+- [Entity resolution, merging and summarization](https://graphrag.xinbetween.com/chapters/09-entity-resolution.html): Normalization, fuzzy and embedding matching, merging descriptions and edge weights.
+- [Claims, covariates and time](https://graphrag.xinbetween.com/chapters/10-claims-temporal.html): Extracting claims with status and dates, and attaching time to facts.
+- [Community detection: Louvain and Leiden](https://graphrag.xinbetween.com/chapters/11-community-detection.html): Modularity, Louvain from scratch, Leiden's refinement step, hierarchical clustering.
+- [Community reports and hierarchical summaries](https://graphrag.xinbetween.com/chapters/12-community-reports.html): Building report context, ranking, bottom-up summarization and RAPTOR-style trees.
+- [Storing and indexing the graph](https://graphrag.xinbetween.com/chapters/13-storage-indexing.html): Parquet/JSON artifacts, NetworkX, Neo4j, Postgres, and embedding entities, edges and reports.
+
+## Retrieval
+
+Knowledge retrieval: finding the right nodes, paths, subgraphs and summaries.
+
+- [Local search: entity-anchored retrieval](https://graphrag.xinbetween.com/chapters/14-local-search.html): Seed entities from embeddings, expand neighborhoods, budget tokens across tables, cite sources.
+- [Global search and DRIFT](https://graphrag.xinbetween.com/chapters/15-global-search.html): Map-reduce over community reports, helpfulness scoring, dynamic community selection and DRIFT.
+- [Dual-level retrieval with LightRAG](https://graphrag.xinbetween.com/chapters/16-lightrag.html): Low- and high-level keywords, entity and relation matching, incremental graph updates.
+- [Personalized PageRank retrieval (HippoRAG)](https://graphrag.xinbetween.com/chapters/17-ppr-hipporag.html): Random walks with restart, seeding from query entities, and ranking passages by node mass.
+- [Path retrieval and LLMs walking the graph](https://graphrag.xinbetween.com/chapters/18-paths-and-agents.html): PathRAG pruning, Think-on-Graph beam search, Plan-on-Graph self-correction.
+- [Subgraph retrieval and GNN retrievers](https://graphrag.xinbetween.com/chapters/19-subgraph-gnn.html): G-Retriever's prize-collecting Steiner tree, GNN-RAG and graph foundation models (GFM-RAG).
+- [Querying knowledge graphs with Text2Cypher](https://graphrag.xinbetween.com/chapters/20-text2cypher.html): Schema-grounded query generation, validation, self-repair and safety.
+- [Hybrid retrieval and seven Graph RAG designs](https://graphrag.xinbetween.com/chapters/21-hybrid-design-patterns.html): BM25 + vectors + graph with RRF; neighborhood expansion, metapaths, subgraph assembly, temporal windows, hybrid rerankers, panels and provenance.
+
+## Generation
+
+Knowledge integration: getting graph evidence into the model's reasoning.
+
+- [Turning graphs into prompts](https://graphrag.xinbetween.com/chapters/22-context-construction.html): Triples, tables, adjacency text, JSON; ordering, token budgets and citations.
+- [Graph-guided reasoning](https://graphrag.xinbetween.com/chapters/23-graph-reasoning.html): Graph chain-of-thought, reasoning on graphs, faithful paths and post-retrieval pruning.
+- [Training models with graphs](https://graphrag.xinbetween.com/chapters/24-training-with-graphs.html): Graph tokens and soft prompts, instruction tuning (GraphGPT, LLaGA) and RL-trained graph retrievers.
+
+## Evaluation and production
+
+Measure it, make it cheaper, keep it fresh, run it safely.
+
+- [Evaluating GraphRAG](https://graphrag.xinbetween.com/chapters/25-evaluation.html): Benchmarks, answer and retrieval metrics, LLM-as-judge pairwise evaluation and pitfalls.
+- [Cost, latency and scale](https://graphrag.xinbetween.com/chapters/26-cost-scaling.html): Where indexing cost goes, LazyGraphRAG, FastGraphRAG, caching, batching and small extractor models.
+- [Incremental updates and temporal graphs](https://graphrag.xinbetween.com/chapters/27-incremental-temporal.html): Upserts without full rebuilds, bi-temporal edges, invalidation, Graphiti and Zep.
+- [Frameworks in practice](https://graphrag.xinbetween.com/chapters/28-frameworks-in-practice.html): Microsoft GraphRAG, LightRAG, neo4j-graphrag and LlamaIndex PropertyGraphIndex: config, prompt tuning, trade-offs.
+- [Running GraphRAG in production](https://graphrag.xinbetween.com/chapters/29-production-ops.html): Access control on graphs, prompt injection through documents, observability and failure modes.
+
+## Frontiers
+
+Agents, memory, multimodal graphs, domains and where the research is heading.
+
+- [Agentic GraphRAG and graph memory](https://graphrag.xinbetween.com/chapters/30-agentic-graphrag.html): Graph tools for agents, iterative deep graph search, A-MEM, Zep and Knowledge Graph of Thoughts.
+- [Multimodal and hypergraph RAG](https://graphrag.xinbetween.com/chapters/31-multimodal-hypergraph.html): N-ary facts as hyperedges, images and tables as nodes, multimodal knowledge graphs.
+- [Domain GraphRAG: code, medicine, finance, law](https://graphrag.xinbetween.com/chapters/32-domain-graphrag.html): Repository graphs, Medical Graph RAG, financial filings and legal citation graphs.
+- [The research map](https://graphrag.xinbetween.com/chapters/33-research-map.html): A taxonomy of the field, key papers by stage, benchmarks, and open problems in 2026.
+
+## Capstone projects
+
+Four end-to-end builds that combine everything.
+
+- [Capstone 1: ship MiniGraphRAG end to end](https://graphrag.xinbetween.com/chapters/c1-minigraphrag.html): Index a corpus, serve local, global and PPR search behind an API, and prove it beats vector RAG.
+- [Capstone 2: a codebase assistant on a code graph](https://graphrag.xinbetween.com/chapters/c2-code-graph.html): Parse a repository into a symbol graph and answer questions about call chains and impact.
+- [Capstone 3: temporal memory for an agent](https://graphrag.xinbetween.com/chapters/c3-temporal-memory.html): A bi-temporal graph memory that tracks changing facts across conversations.
+- [Capstone 4: enterprise knowledge graph QA](https://graphrag.xinbetween.com/chapters/c4-enterprise-kgqa.html): Hybrid retrieval with access control, Text2Cypher, evaluation harness and cost report.
+
+## Appendices
+
+Reference material.
+
+- [Glossary](https://graphrag.xinbetween.com/chapters/glossary.html): Every term used in the course, in one place.
+- [Paper and tool library](https://graphrag.xinbetween.com/chapters/library.html): All papers, repositories and articles referenced, organized by topic.
+
+## Code
+
+- [minigraphrag reference implementation](https://github.com/xinbetween/learn-graph-rag-from-scratch/tree/main/code): chunking, extraction with gleaning,
+  entity resolution, Louvain and Leiden communities, community reports, eight retrieval methods,
+  Text2Cypher, a bi-temporal graph and an evaluation harness. Runs offline with a mock LLM.
+- [Kestrel Labs corpus](https://github.com/xinbetween/learn-graph-rag-from-scratch/tree/main/code/data/corpus): the 12 fictional documents every chapter uses.
+- [Evaluation questions](https://github.com/xinbetween/learn-graph-rag-from-scratch/blob/main/code/data/questions.jsonl): 23 questions with answers and supporting documents.
+
+## Chinese (中文)
+
+- [从零构建 Graph RAG](https://graphrag.xinbetween.com/zh/): the same course in Chinese. Navigation, search, quizzes and figures
+  are translated throughout; chapters are translated progressively and the rest fall back to English.
+
+## Optional
+
+- [Full course text](https://graphrag.xinbetween.com/llms-full.txt): every English chapter as plain text in one file.
+- [Repository](https://github.com/xinbetween/learn-graph-rag-from-scratch): source of the site and the reference implementation.

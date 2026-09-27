@@ -1,0 +1,5 @@
+# https://graphrag.xinbetween.com
+User-agent: *
+Allow: /
+
+Sitemap: https://graphrag.xinbetween.com/sitemap.xml

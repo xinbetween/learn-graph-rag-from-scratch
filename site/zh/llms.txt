@@ -1,0 +1,107 @@
+# 从零构建 Graph RAG
+
+> 一门自学的图检索增强生成（GraphRAG）课程。它从一个一百行的向量 RAG 以及它答不了的问题出发，
+> 一步一步构建另一条路：用 LLM 抽取知识图谱、实体消解、社区发现与社区报告、八种检索方法
+> （局部搜索、全局搜索、DRIFT、LightRAG、个性化 PageRank、路径、子图、混合检索）、上下文构建、
+> 评估、成本、时序图与智能体。
+
+所有示例都使用同一份关于 Kestrel Labs（一家虚构的海洋科技公司）的语料，因此同一张图会贯穿整门课程，
+从原始文本一路长到答案。每一章都有原理图、交互图、附参考解答的练习、带解析的测验和一个项目。
+配套的 Python 包 `minigraphrag` 实现了每个阶段，用模拟模型即可离线运行。
+导航、搜索、测验和交互图界面均为中文；章节正文在逐步翻译，尚未翻译的章节回退到英文原文。
+
+## 从这里开始
+
+课程的学习方式、贯穿全程的示例，以及你的工具箱。
+
+- [欢迎：路线图与工具箱](https://graphrag.xinbetween.com/zh/chapters/00-welcome.html)：GraphRAG 是什么、各章的组织方式、Kestrel Labs 语料，以及如何搭建 minigraphrag 参考实现。
+
+## 基础
+
+LLM、向量 RAG，以及后续所有内容依赖的图论基础。
+
+- [LLM 为什么需要检索](https://graphrag.xinbetween.com/zh/chapters/01-llms-and-context.html)：参数化知识与非参数化知识、上下文窗口、幻觉与事实依据。
+- [从零构建向量 RAG](https://graphrag.xinbetween.com/zh/chapters/02-vector-rag.html)：分块、嵌入、余弦检索、提示词组装与引用，大约 100 行代码。
+- [向量 RAG 在哪里失效](https://graphrag.xinbetween.com/zh/chapters/03-where-rag-breaks.html)：多跳问题、面向全局的归纳问题，以及分块之间丢失的关系。
+- [面向 RAG 的图论基础](https://graphrag.xinbetween.com/zh/chapters/04-graph-fundamentals.html)：节点、边、邻接表示、BFS/DFS、最短路径、度、PageRank 与模块度。
+- [知识图谱、模式与查询语言](https://graphrag.xinbetween.com/zh/chapters/05-knowledge-graphs.html)：三元组与属性图、本体、Cypher 与 SPARQL 基础。
+
+## 构建图谱
+
+知识组织：把原始文本变成值得检索的图。
+
+- [面向检索的图结构](https://graphrag.xinbetween.com/zh/chapters/06-graph-shapes.html)：词汇图、领域图、树状索引（RAPTOR）、混合结构与超图，以及各自的适用场景。
+- [文本单元与文档结构](https://graphrag.xinbetween.com/zh/chapters/07-chunking-text-units.html)：面向抽取的分块大小权衡、重叠、结构感知切分与溯源 ID。
+- [用 LLM 抽取实体和关系](https://graphrag.xinbetween.com/zh/chapters/08-entity-relation-extraction.html)：抽取提示词、分隔符输出与 JSON 输出、补漏抽取（gleaning）、解析与常见失败模式。
+- [实体消解、合并与摘要](https://graphrag.xinbetween.com/zh/chapters/09-entity-resolution.html)：名称规范化、模糊匹配与嵌入匹配、合并描述与边权重。
+- [声明、协变量与时间](https://graphrag.xinbetween.com/zh/chapters/10-claims-temporal.html)：抽取带状态和日期的声明，并为事实附加时间。
+- [社区发现：Louvain 与 Leiden](https://graphrag.xinbetween.com/zh/chapters/11-community-detection.html)：模块度、从零实现 Louvain、Leiden 的细化步骤、层次聚类。
+- [社区报告与层次摘要](https://graphrag.xinbetween.com/zh/chapters/12-community-reports.html)：构建报告上下文、排序、自底向上的摘要生成，以及 RAPTOR 式的树。
+- [图的存储与索引](https://graphrag.xinbetween.com/zh/chapters/13-storage-indexing.html)：Parquet/JSON 产物、NetworkX、Neo4j、Postgres，以及为实体、边和报告生成嵌入。
+
+## 检索
+
+知识检索：找到正确的节点、路径、子图和摘要。
+
+- [局部搜索：以实体为锚点的检索](https://graphrag.xinbetween.com/zh/chapters/14-local-search.html)：用嵌入找到种子实体、扩展邻域、在各类表格之间分配 token 预算、引用来源。
+- [全局搜索与 DRIFT](https://graphrag.xinbetween.com/zh/chapters/15-global-search.html)：基于社区报告的 map-reduce、有用性评分、动态社区选择与 DRIFT。
+- [LightRAG 的双层检索](https://graphrag.xinbetween.com/zh/chapters/16-lightrag.html)：低层与高层关键词、实体与关系匹配、增量更新图谱。
+- [个性化 PageRank 检索（HippoRAG）](https://graphrag.xinbetween.com/zh/chapters/17-ppr-hipporag.html)：带重启的随机游走、从查询实体出发设置种子，并按节点上的概率质量为段落排序。
+- [路径检索与在图上游走的 LLM](https://graphrag.xinbetween.com/zh/chapters/18-paths-and-agents.html)：PathRAG 剪枝、Think-on-Graph 束搜索、Plan-on-Graph 自我纠错。
+- [子图检索与 GNN 检索器](https://graphrag.xinbetween.com/zh/chapters/19-subgraph-gnn.html)：G-Retriever 的奖励收集斯坦纳树、GNN-RAG 与图基础模型（GFM-RAG）。
+- [用 Text2Cypher 查询知识图谱](https://graphrag.xinbetween.com/zh/chapters/20-text2cypher.html)：基于模式的查询生成、校验、自我修复与安全。
+- [混合检索与七种 Graph RAG 设计](https://graphrag.xinbetween.com/zh/chapters/21-hybrid-design-patterns.html)：BM25 + 向量 + 图，用 RRF 融合；邻域扩展、元路径、子图组装、时间窗口、混合重排、面板与溯源。
+
+## 生成
+
+知识融合：让图中的证据进入模型的推理。
+
+- [把图变成提示词](https://graphrag.xinbetween.com/zh/chapters/22-context-construction.html)：三元组、表格、邻接文本、JSON；排列顺序、token 预算与引用。
+- [图引导的推理](https://graphrag.xinbetween.com/zh/chapters/23-graph-reasoning.html)：图上的思维链、基于图的推理、可信路径与检索后剪枝。
+- [用图训练模型](https://graphrag.xinbetween.com/zh/chapters/24-training-with-graphs.html)：图 token 与软提示、指令微调（GraphGPT、LLaGA），以及用强化学习训练的图检索器。
+
+## 评估与生产
+
+度量效果、降低成本、保持更新、安全运行。
+
+- [评估 GraphRAG](https://graphrag.xinbetween.com/zh/chapters/25-evaluation.html)：基准测试、答案与检索指标、LLM 评审的成对比较，以及常见陷阱。
+- [成本、延迟与规模](https://graphrag.xinbetween.com/zh/chapters/26-cost-scaling.html)：索引成本花在哪里、LazyGraphRAG、FastGraphRAG、缓存、批处理与小型抽取模型。
+- [增量更新与时序图](https://graphrag.xinbetween.com/zh/chapters/27-incremental-temporal.html)：无需全量重建的更新、双时态边、失效标记、Graphiti 与 Zep。
+- [框架实践](https://graphrag.xinbetween.com/zh/chapters/28-frameworks-in-practice.html)：Microsoft GraphRAG、LightRAG、neo4j-graphrag 与 LlamaIndex PropertyGraphIndex：配置、提示词调优与取舍。
+- [在生产环境运行 GraphRAG](https://graphrag.xinbetween.com/zh/chapters/29-production-ops.html)：图上的访问控制、经由文档的提示词注入、可观测性与失败模式。
+
+## 前沿
+
+智能体、记忆、多模态图、垂直领域，以及研究的走向。
+
+- [智能体 GraphRAG 与图记忆](https://graphrag.xinbetween.com/zh/chapters/30-agentic-graphrag.html)：给智能体用的图工具、迭代式深度图搜索、A-MEM、Zep 与 Knowledge Graph of Thoughts。
+- [多模态 RAG 与超图 RAG](https://graphrag.xinbetween.com/zh/chapters/31-multimodal-hypergraph.html)：用超边表示 n 元事实、把图片和表格作为节点、多模态知识图谱。
+- [垂直领域 GraphRAG：代码、医疗、金融、法律](https://graphrag.xinbetween.com/zh/chapters/32-domain-graphrag.html)：代码仓库图、Medical Graph RAG、财务报告与法律引用图。
+- [研究地图](https://graphrag.xinbetween.com/zh/chapters/33-research-map.html)：领域的分类体系、各阶段的关键论文、基准测试，以及 2026 年的开放问题。
+
+## 综合项目
+
+四个端到端的项目，把所有内容组合在一起。
+
+- [综合项目 1：端到端交付 MiniGraphRAG](https://graphrag.xinbetween.com/zh/chapters/c1-minigraphrag.html)：为语料建立索引，通过 API 提供局部搜索、全局搜索和 PPR 检索，并证明它胜过向量 RAG。
+- [综合项目 2：基于代码图的代码库助手](https://graphrag.xinbetween.com/zh/chapters/c2-code-graph.html)：把代码仓库解析成符号图，回答调用链和变更影响方面的问题。
+- [综合项目 3：智能体的时序记忆](https://graphrag.xinbetween.com/zh/chapters/c3-temporal-memory.html)：一个双时态图记忆，跨多轮对话追踪不断变化的事实。
+- [综合项目 4：企业知识图谱问答](https://graphrag.xinbetween.com/zh/chapters/c4-enterprise-kgqa.html)：带访问控制的混合检索、Text2Cypher、评估框架与成本报告。
+
+## 附录
+
+参考资料。
+
+- [术语表](https://graphrag.xinbetween.com/zh/chapters/glossary.html)：课程中用到的所有术语，集中在一处。
+- [文献与工具库](https://graphrag.xinbetween.com/zh/chapters/library.html)：课程引用的全部论文、代码仓库和文章，按主题整理。
+
+## 代码
+
+- [minigraphrag 参考实现](https://github.com/xinbetween/learn-graph-rag-from-scratch/tree/main/code)：分块、带补漏抽取的实体关系抽取、实体消解、
+  Louvain 与 Leiden 社区发现、社区报告、八种检索方法、Text2Cypher、双时态图与评估框架，可离线运行。
+- [Kestrel Labs 语料](https://github.com/xinbetween/learn-graph-rag-from-scratch/tree/main/code/data/corpus)：每一章都在用的 12 篇虚构文档。
+
+## 其他
+
+- [English version](https://graphrag.xinbetween.com/)：课程的英文版，以及英文全文 https://graphrag.xinbetween.com/llms-full.txt。
+- [代码仓库](https://github.com/xinbetween/learn-graph-rag-from-scratch)

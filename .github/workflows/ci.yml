@@ -52,13 +52,15 @@ jobs:
         run: python3 tools/check_site.py
 
       # The Chinese mirror under site/zh/ is regenerated from the English pages
-      # (translated pages keep their content), and pages link CSS/JS with
-      # ?v=<content hash> so browsers never mix stale and fresh assets. If either
+      # (translated pages keep their content), pages link CSS/JS with
+      # ?v=<content hash> so browsers never mix stale and fresh assets, and
+      # sitemap.xml / llms.txt / llms-full.txt are generated from the pages. If any
       # step would change a committed file, someone skipped it: fail with the diff.
-      - name: Chinese mirror and asset stamps are current
+      - name: Chinese mirror, asset stamps and metadata are current
         run: |
           python3 tools/build_zh.py
           python3 tools/stamp_assets.py
+          python3 tools/build_meta.py
           git status --porcelain -- site
           test -z "$(git status --porcelain -- site)"
 

@@ -40,6 +40,12 @@ jobs:
       - name: Check site
         run: python3 tools/check_site.py
 
+      # sitemap.xml, robots.txt, llms.txt and llms-full.txt are generated from the
+      # pages themselves, so they cannot go stale in a deploy even if someone
+      # forgot to regenerate them before committing.
+      - name: Generate sitemap and llms.txt
+        run: python3 tools/build_meta.py
+
       - name: Assemble artifact
         run: |
           mkdir -p dist
