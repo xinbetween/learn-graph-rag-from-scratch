@@ -47,7 +47,24 @@ PARTS = parts()
 SLUGS = [c[0] for _, _, chs in PARTS for c in chs]
 
 
-def git_lastmod(path: Path) -> str:
+def _shallow() -> bool:
+    """A shallow clone (CI's default checkout) knows only one commit, so every file would look as if it
+    changed on the same day. Detect that and keep the dates already in sitemap.xml instead."""
+    try:
+        return subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=ROOT,
+                              capture_output=True, text=True, timeout=20).stdout.strip() == "true"
+    except Exception:
+        return False
+
+
+SHALLOW = _shallow()
+PREV_LASTMOD = dict(re.findall(r"<loc>([^<]+)</loc>\s*<lastmod>([^<]+)</lastmod>",
+                               (SITE / "sitemap.xml").read_text() if (SITE / "sitemap.xml").exists() else ""))
+
+
+def git_lastmod(path: Path, url: str = "") -> str:
+    if SHALLOW and url in PREV_LASTMOD:
+        return PREV_LASTMOD[url]
     try:
         out = subprocess.run(["git", "log", "-1", "--format=%cI", "--", str(path)],
                              cwd=ROOT, capture_output=True, text=True, timeout=20).stdout.strip()
@@ -58,7 +75,7 @@ def git_lastmod(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).date().isoformat()
 
 
-def meta(path: Path) -> dict:
+def meta(path: Path, url: str = "") -> dict:
     s = path.read_text()
     def find(pat, default=""):
         m = re.search(pat, s, re.S)
@@ -67,7 +84,7 @@ def meta(path: Path) -> dict:
         "title": find(r"<title>(.*?)</title>").split(" | ")[0],
         "description": find(r'<meta name="description" content="(.*?)">'),
         "lede": find(r'<p class="lede">(.*?)</p>'),
-        "lastmod": git_lastmod(path),
+        "lastmod": git_lastmod(path, url),
     }
 
 
@@ -84,7 +101,7 @@ def sitemap() -> str:
             rows.append(
                 "  <url>\n"
                 f"    <loc>{loc}</loc>\n"
-                f"    <lastmod>{meta(path)['lastmod']}</lastmod>\n"
+                f"    <lastmod>{meta(path, loc)['lastmod']}</lastmod>\n"
                 f"    <changefreq>monthly</changefreq>\n"
                 f"    <priority>{pri}</priority>\n"
                 f'    <xhtml:link rel="alternate" hreflang="en" href="{ORIGIN}/{rel}"/>\n'

@@ -37,7 +37,11 @@ jobs:
     name: Site structure, links and asset stamps
     runs-on: ubuntu-latest
     steps:
+      # Full history: sitemap.xml dates each page from its last commit, which a
+      # shallow clone cannot see.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
